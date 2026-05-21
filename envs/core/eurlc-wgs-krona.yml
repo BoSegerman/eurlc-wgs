@@ -1,0 +1,7 @@
+name: eurlc-wgs-krona
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - krona=2.8.1

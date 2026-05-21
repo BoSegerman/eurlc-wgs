@@ -1,0 +1,15 @@
+name: eurlc-wgs
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - perl
+  - perl-json
+  - python=3.11
+  - biopython
+  - perl-json-maybexs
+  - perl-html-parser
+  - perl-xml-libxml
+  - perl-text-csv
+  - perl-termreadkey

@@ -1,0 +1,142 @@
+body.main-report {
+    margin: 25px;
+}
+
+body.main-report th {
+    font-size: 12px;
+    text-align: left;
+    padding: 8px 20px 8px 4px;
+    border-bottom: 2px solid #bbb;
+    background-color: #f3f6f9;
+    color: #003366;
+}
+
+body.main-report tbody tr:nth-child(even) {
+    background-color: #fafafa;
+}
+
+body.main-report tbody tr:hover {
+    background-color: #eef6ff;
+}
+
+body.main-report td.sample-id {
+    font-weight: bold;
+    font-family: monospace;
+    white-space: nowrap;
+}
+
+body.main-report td.qc,
+body.main-report td.coverage,
+body.main-report td.q30rate,
+body.main-report td.assembly-size,
+body.main-report td.contamination {
+    white-space: nowrap;
+}
+
+body.main-report a {
+    color: #004c80;
+    text-decoration: none;
+}
+
+body.main-report a:hover {
+    text-decoration: underline;
+}
+
+
+
+/* Keep contamination compact */
+body.main-report td.contamination {
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Main report dot styling */
+body.main-report .qc-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+body.main-report .qc-good {
+    background-color: #43a047;
+}
+
+body.main-report .qc-warning {
+    background-color: #fdd835;
+}
+
+body.main-report .qc-critical {
+    background-color: #fb8c00;
+}
+
+body.main-report .qc-bad {
+    background-color: #e53935;
+}
+
+/* Summary status table */
+.summary-status-table {
+    border-collapse: collapse;
+    margin-bottom: 1em;
+    width: 100%;
+}
+
+.summary-status-table th,
+.summary-status-table td {
+    border: 1px solid #ccc;
+    padding: 6px 10px;
+    text-align: center;
+}
+
+.summary-status-table th {
+    background: #f5f5f5;
+    font-weight: bold;
+}
+
+/* Use same palette as dots */
+.summary-warning {
+    background-color: #fff8e1;
+    color: #000;
+    font-weight: bold;
+}
+
+.summary-critical {
+    background-color: #ffe0b2;
+    color: #000;
+    font-weight: bold;
+}
+
+.summary-fail {
+    background-color: #ffebee;
+    color: #000;
+    font-weight: bold;
+}
+
+@media print {
+
+    body.main-report td,
+    body.main-report th {
+        overflow-wrap: anywhere;
+        word-break: normal;
+    }
+
+    body.main-report td.sample-id {
+        white-space: normal;
+        font-family: monospace;
+    }
+
+    body.main-report td.qc,
+    body.main-report td.coverage,
+    body.main-report td.q30rate,
+    body.main-report td.assembly-size,
+    body.main-report td.contamination {
+        white-space: normal;
+    }
+
+    body.main-report table {
+        table-layout: fixed;
+        width: 100%;
+    }
+}

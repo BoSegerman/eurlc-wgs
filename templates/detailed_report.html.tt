@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>{{sample_info.sample_name}} detailed report</title>
+  <link rel="icon" type="image/png" href="{{favicon_file}}">
+  <link rel="stylesheet" href="{{css_file}}">
+  <link rel="stylesheet" href="{{main_css_file}}">
+</head>
+
+<body class="main-report">
+
+<div class="report-header brand-header">
+
+    <div class="brand-logo">
+        <img src="{{pipeline_logo_file}}" alt="EURLC-WGS logo"
+             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+
+        <div class="logo-fallback">EURLC-WGS</div>
+    </div>
+
+    <div class="brand-text">
+        <div class="pipeline-badge">EURLC-WGS Pipeline</div>
+        <div class="pipeline-subtitle">Whole Genome Sequencing Analysis and Reporting</div>
+
+        <h1>Detailed sample report: {{sample_info.sample_name}}</h1>
+    </div>
+
+</div>
+
+{{sample_report_content}}
+
+</body>
+</html>

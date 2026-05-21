@@ -1,0 +1,7 @@
+name: eurlc-wgs-ncbi-amrfinderplus
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - ncbi-amrfinderplus=4.0.19

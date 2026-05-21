@@ -1,0 +1,7 @@
+name: eurlc-wgs-bbmap
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - bbmap=39.15

@@ -1,0 +1,9 @@
+name: eurlc-wgs-bowtie2
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - bowtie2=2.5.4
+  - samtools=1.23
+  - bcftools=1.23

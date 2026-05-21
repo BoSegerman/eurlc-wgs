@@ -1,0 +1,7 @@
+name: eurlc-wgs-weasyprint
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - weasyprint=62.3

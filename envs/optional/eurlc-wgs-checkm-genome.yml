@@ -1,0 +1,7 @@
+name: eurlc-wgs-checkm-genome
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - checkm-genome=1.2.3

@@ -1,0 +1,7 @@
+name: eurlc-wgs-skesa
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - skesa=2.5.1

@@ -1,0 +1,7 @@
+name: eurlc-wgs-chewbbaca
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - chewbbaca=3.3.10

@@ -1,0 +1,7 @@
+name: eurlc-wgs-fastp
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - fastp=0.24.0

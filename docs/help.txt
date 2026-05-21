@@ -1,0 +1,343 @@
+EURLC-WGS
+Whole genome sequencing analysis pipeline for bacterial isolate analysis
+
+Developed by:
+Bo Segerman
+Swedish Veterinary Agency (SVA), Uppsala, Sweden
+
+===============================================================================
+OVERVIEW
+===============================================================================
+
+EURLC-WGS is a modular whole genome sequencing (WGS) analysis pipeline
+primarily intended for bacterial isolate characterization from Illumina data.
+
+The pipeline supports:
+
+  - Quality control of raw sequencing reads
+  - Adapter trimming and filtering
+  - Downsampling to target coverage
+  - Species identification
+  - Contamination assessment
+  - Genome assembly
+  - Assembly quality assessment
+  - Genome annotation  
+  - MLST and cgMLST typing
+  - AMR gene detection
+  - Interactive clustering analysis
+  - HTML and PDF report generation
+
+The pipeline is designed primarily for:
+  - Foodborne pathogen surveillance
+  - Veterinary and public health microbiology
+  - Routine isolate characterization
+  - Comparative genomics workflows
+
+Supported input types:
+  - Paired-end FASTQ
+  - Single-end FASTQ
+  - FASTA assemblies
+
+===============================================================================
+BASIC USAGE
+===============================================================================
+
+Navigate to a directory containing sequencing data  and run pipeline:
+
+    eurlc-wgs 
+
+Or specify input directory:
+
+    eurlc-wgs datadir=input_directory/
+
+Specify number of threads:
+
+    eurlc-wgs --threads 8 
+
+Use recursive search:
+
+    eurlc-wgs --recursive
+
+Overwrite existing results:
+
+    eurlc-wgs --overwrite
+
+Use a specific configuration file:
+
+    eurlc-wgs config=my_config.cfg
+
+Use a specific database dir:
+
+    eurlc-wgs database=database_directory/
+    
+===============================================================================
+CONFIGURATION
+===============================================================================
+
+The pipeline can be configured in several ways.
+
+Configuration values may specify:
+  - enabled/disabled software modules
+  - assembler selection
+  - trimming strategy
+  - software arguments
+  - QC thresholds
+  - database paths
+  - species-specific expectations
+  - reporting behavior
+
+Configuration values can be added as arguments  cofigparameter=newvalue
+
+Configuration files can be:
+
+  1. Explicitly specified:
+
+        config=my_config.config
+
+  2. Automatically detected from the database directory:
+
+        ~/eurlc-wgs_db/eurlc-wgs.config
+
+This allows installations to share common configuration and database resources.
+
+A default configuration file can be written to the database directory using: 
+
+  eurlc-wgs  writedefaultconfigfile
+
+===============================================================================
+DATABASE DIRECTORY
+===============================================================================
+
+The pipeline expects a database directory located at:
+
+    ~/eurlc-wgs_db
+
+This directory contains reference databases used by various analysis tools.
+
+Typical structure:
+
+    ~/eurlc-wgs_db/
+    ├── kraken2/
+    ├── mash/
+    ├── chewbbaca/
+    ├── bakta/
+    ├── checkm/
+    ├── resfinder/
+    └── eurlc-wgs.config
+
+Examples:
+
+  Kraken2:
+      Taxonomic classification database
+
+  Mash:
+      Reference sketch databases for species identification
+
+  chewBBACA:
+      cgMLST schemas and allele databases
+
+  Bakta:
+      Genome annotation databases
+
+  CheckM:
+      Genome completeness databases
+
+  ResFinder:
+      Resistance gene databases
+
+The pipeline can automatically test whether databases are installed correctly.
+
+===============================================================================
+OUTPUT STRUCTURE
+===============================================================================
+
+Results are written to an output directory.
+
+Typical structure:
+
+    output/
+    ├── report/
+    ├── results/
+    ├── large_files/
+    ├── log/
+    ├── data/   
+    └── EURLC-WGS-report.html
+
+ EURLC-WGS-report.html   constitutes a main entry point to all results generated
+
+-------------------------------------------------------------------------------
+REPORT DIRECTORY
+-------------------------------------------------------------------------------
+
+The report directory contains user-friendly summaries.
+
+    report/
+    ├── main_report.html
+    ├── samples/
+    ├── clustering/
+    ├── amr/
+    ├── pdf/
+    └── assets/
+
+Main report:
+    Overall summary of all analyzed samples
+
+Sample reports:
+    Per-sample detailed reports
+
+Clustering reports:
+    Interactive cgMLST/wgMLST distance matrices
+
+AMR viewer:
+    Interactive AMR profile browser
+
+PDF:
+    PDF exports of reports
+
+-------------------------------------------------------------------------------
+RESULTS DIRECTORY
+-------------------------------------------------------------------------------
+
+The results directory contains software output and processed result files.
+
+Examples:
+
+    results/
+    ├── assemblies/
+    ├── amr/
+    ├── qc/
+    ├── typing/
+    └── clustering/
+
+These files are intended primarily for advanced users or downstream processing.
+
+
+
+-------------------------------------------------------------------------------
+LOG DIRECTORY
+-------------------------------------------------------------------------------
+
+Contains execution logs and command histories.
+
+Useful for:
+  - debugging
+  - reproducibility
+  - troubleshooting failed analyses
+
+===============================================================================
+REPORTING
+===============================================================================
+
+The pipeline generates several report types:
+
+  - Main HTML report
+  - Detailed sample reports
+  - Interactive clustering matrices
+  - Interactive AMR viewer
+  - MultiQC summaries
+  - TSV exports
+  - PDF reports
+
+Reports are intended to provide both:
+  - high-level overview
+  - detailed technical traceability
+
+===============================================================================
+SOFTWARE COMPONENTS
+===============================================================================
+
+Depending on configuration, the pipeline may use:
+
+  - fastp
+  - FastQC
+  - BBMap
+  - Kraken2
+  - Bracken
+  - Mash
+  - SPAdes
+  - Shovill
+  - SKESA
+  - Unicycler
+  - QUAST
+  - MLST
+  - FastMLST
+  - chewBBACA
+  - AMRFinderPlus
+  - ResFinder
+  - MultiQC
+  - WeasyPrint
+  
+  annotation with bakta is supported but not automatically istalled in this version
+
+===============================================================================
+INSTALLATION
+===============================================================================
+
+The pipeline uses Conda environments.
+
+Install:
+
+    ./install.sh
+
+Activate main environment:
+
+    conda activate eurlc-wgs
+
+The installer creates separate Conda environments for different tools to
+reduce dependency conflicts.
+
+The pipeline itself will also try to create missing environments
+
+===============================================================================
+TYPICAL WORKFLOW
+===============================================================================
+
+1. Install pipeline
+
+    ./install.sh
+
+2. Install databases
+
+    pre-formated databases can be supplied with the istallation files
+    The pipeline can also usually download missing databases by it self
+
+3. Navigate to the directory with fastq/fasta files
+
+    cd ~/mydatadir
+
+    
+4. Run analysis
+
+    eurlc-wgs 
+
+5. Open report
+
+    ~/mydatadir/eurlc-wgs/EURLC-WGS-report.html
+
+===============================================================================
+TROUBLESHOOTING
+===============================================================================
+
+Common problems:
+
+Missing databases:
+    Verify contents of ~/eurlc-wgs_db
+
+
+Non functional environments:
+  can be removed using: eurlc-wgs removetool=toolname
+
+the toolnames are found in the configfile
+===============================================================================
+CONTACT
+===============================================================================
+
+Bo Segerman
+
+Swedish Veterinary Agency (SVA)
+Uppsala, Sweden
+bo.segerman@sva.se
+
+
+
+===============================================================================

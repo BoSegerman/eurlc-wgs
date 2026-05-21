@@ -1,0 +1,7 @@
+name: eurlc-wgs-krakentools
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - krakentools=1.2

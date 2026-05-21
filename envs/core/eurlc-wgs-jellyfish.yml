@@ -1,0 +1,7 @@
+name: eurlc-wgs-jellyfish
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - jellyfish

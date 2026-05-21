@@ -1,0 +1,7 @@
+name: eurlc-wgs-illumina-interop
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - illumina-interop

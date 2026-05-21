@@ -1,0 +1,7 @@
+name: eurlc-wgs-fastmlst
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - fastmlst=0.0.16

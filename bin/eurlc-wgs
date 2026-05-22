@@ -79,6 +79,16 @@ $rundata{timestamps}{pipeline_start}{timestamp_UTC}   = timestamp_UTC();
 $rundata{timestamps}{pipeline_start}{timestamp_local} = timestamp_local(); 
 
 
+my $USE_COLOR = (-t STDOUT) ? 1 : 0;
+#my $USE_COLOR = 1;
+
+foreach my $arg (@ARGV) {
+  if( $arg eq "--no-color") {
+    $USE_COLOR = 0;
+  }  
+}
+
+
 
 ###################################################################################################
 ## welcome message
@@ -86,16 +96,16 @@ $rundata{timestamps}{pipeline_start}{timestamp_local} = timestamp_local();
 my $welcome = <<"WELCOME";
 
 
-@{[ color('bold blue') ]}====================================================================
-                 @{[ color('bold green') ]}EURL Campylobacter WGS Pipeline@{[ color('reset') ]}
-@{[ color('bold blue') ]}====================================================================@{[ color('reset') ]}
+@{[ maybe_color('bold blue') ]}====================================================================
+                 @{[ maybe_color('bold green') ]}EURL Campylobacter WGS Pipeline@{[ maybe_color('reset') ]}
+@{[ maybe_color('bold blue') ]}====================================================================@{[ maybe_color('reset') ]}
 
-  @{[ color('bold') ]}Version:@{[ color('reset') ]} $rundata{pipeline_info}{version}
-  @{[ color('bold') ]}Started:@{[ color('reset') ]} $rundata{timestamps}{pipeline_start}{timestamp_local}
+  @{[ maybe_color('bold') ]}Version:@{[ maybe_color('reset') ]} $rundata{pipeline_info}{version}
+  @{[ maybe_color('bold') ]}Started:@{[ maybe_color('reset') ]} $rundata{timestamps}{pipeline_start}{timestamp_local}
 
-  Report problems or feedback to: @{[ color('yellow') ]}$rundata{pipeline_info}{contact}@{[ color('reset') ]}
+  Report problems or feedback to: @{[ maybe_color('yellow') ]}$rundata{pipeline_info}{contact}@{[ maybe_color('reset') ]}
 
-@{[ color('bold blue') ]}====================================================================@{[ color('reset') ]}
+@{[ maybe_color('bold blue') ]}====================================================================@{[ maybe_color('reset') ]}
 
 
 WELCOME
@@ -103,6 +113,12 @@ WELCOME
 print $welcome;
 
 
+sub maybe_color {
+    my ($color_name) = @_;
+
+    return "" if !defined $USE_COLOR || !$USE_COLOR;
+    return color($color_name);
+}
 
 ###################################################################################################
 ## detect os and runmode
@@ -121,7 +137,7 @@ $rundata{system_info}{runmode}  = "conda";
 foreach my $arg (@ARGV) {
   if( $arg eq "docker") {
     $rundata{system_info}{runmode} = "docker";
-  }
+  }  
 }
 
 log_message("NOTICE: Running in $rundata{system_info}{runmode} mode (OS=$rundata{system_info}{os})" ); 
@@ -22222,9 +22238,15 @@ sub log_message {
 
     # Decide if it should also go to screen
     if ( $verbose eq "yes" || $verbose eq "1" || $msg =~ /^(ERROR:|WARNING:|NOTICE:|PROGRESS:)/ ) {
-        if ($color && exists $ansi_colors{$color}) {
+        if (
+            defined $USE_COLOR
+            && $USE_COLOR
+            && defined $color
+            && exists $ansi_colors{$color}
+        ) {
             print $ansi_colors{$color}, $output_screen, $ansi_colors{reset};
-        } else {
+        }
+        else {
             print $output_screen;
         }
         return $output_screen;

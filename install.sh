@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -33,6 +34,7 @@ HELP_FILE="${SRC_DIR}/docs/help.txt"
 
 MAIN_ENV="eurlc-wgs"
 INSTALL_OPTIONAL=0
+RESOURCES_ONLY=0
 
 # -----------------------------------------------------------------------------
 # Parse installer options
@@ -43,15 +45,20 @@ for arg in "$@"; do
         --optional|--with-optional)
             INSTALL_OPTIONAL=1
             ;;
+        --resources-only|--dev)
+            RESOURCES_ONLY=1
+            ;;
         -h|--help)
             echo "Usage:"
-            echo "  ./install.sh              install core environments"
-            echo "  ./install.sh --optional   install core + optional environments"
+            echo "  ./install.sh                    install core environments + resources"
+            echo "  ./install.sh --optional         install core + optional environments + resources"
+            echo "  ./install.sh --resources-only   install scripts/templates/assets/help only"
+            echo "  ./install.sh --dev              same as --resources-only"
             exit 0
             ;;
         *)
             echo "ERROR: Unknown installer option: $arg"
-            echo "Usage: ./install.sh [--optional]"
+            echo "Usage: ./install.sh [--optional] [--resources-only]"
             exit 1
             ;;
     esac
@@ -63,6 +70,7 @@ echo ">>> Source directory: ${SRC_DIR}"
 # -----------------------------------------------------------------------------
 # Locate conda/mamba
 # -----------------------------------------------------------------------------
+
 
 if ! command -v conda >/dev/null 2>&1; then
     echo "ERROR: conda not found in PATH. Please install Miniconda/Mambaforge first."
@@ -79,6 +87,8 @@ CONDA_BASE="$(conda info --base)"
 
 echo ">>> Using: ${CONDA_BIN}"
 echo ">>> Conda base: ${CONDA_BASE}"
+
+if [[ "${RESOURCES_ONLY}" -eq 0 ]]; then
 
 if [[ ! -d "${CORE_ENV_DIR}" ]]; then
     echo "ERROR: Missing core env directory: ${CORE_ENV_DIR}"
@@ -152,6 +162,9 @@ done
 echo
 echo ">>> All selected conda environments processed."
 
+else
+    echo ">>> Resource-only mode: skipping conda environment creation/update"
+fi
 # -----------------------------------------------------------------------------
 # Locate main eurlc-wgs environment
 # -----------------------------------------------------------------------------

@@ -1279,6 +1279,12 @@ my %postmountcheckhandlers = (
         log_message("NOTICE: Overriding from launch-arguments:overwrite=yes");
         $rundata{config}{overrides} .= "overwrite=yes\n";
     },
+    'non-interactive' => sub {
+
+    },    
+    'assume-yes' => sub {
+
+    },      
     summarize => sub {
    
         my $rundata_file  = peekdir("out,data") . "/rundata.json";

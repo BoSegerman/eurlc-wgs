@@ -1285,6 +1285,9 @@ my %postmountcheckhandlers = (
     'assume-yes' => sub {
 
     },      
+    'no-color' => sub {
+
+    },          
     summarize => sub {
    
         my $rundata_file  = peekdir("out,data") . "/rundata.json";

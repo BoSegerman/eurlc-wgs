@@ -52,7 +52,7 @@ Or specify input directory:
 
 Specify number of threads:
 
-    eurlc-wgs --threads 8 
+    eurlc-wgs threads=8 
 
 Use recursive search:
 
@@ -64,7 +64,7 @@ Overwrite existing results:
 
 Use a specific configuration file:
 
-    eurlc-wgs config=my_config.cfg
+    eurlc-wgs configfile=my_config.cfg
 
 Use a specific database dir:
 
@@ -86,13 +86,16 @@ Configuration values may specify:
   - species-specific expectations
   - reporting behavior
 
-Configuration values can be added as arguments  cofigparameter=newvalue
+Configuration values can be added directly as arguments, using the form
+section.param=value, e.g.:
+
+    eurlc-wgs fastp.arguments="--length_required 50"
 
 Configuration files can be:
 
   1. Explicitly specified:
 
-        config=my_config.config
+        configfile=my_config.config
 
   2. Automatically detected from the database directory:
 
@@ -102,7 +105,7 @@ This allows installations to share common configuration and database resources.
 
 A default configuration file can be written to the database directory using: 
 
-  eurlc-wgs  writedefaultconfigfile
+  eurlc-wgs configfile=write
 
 ===============================================================================
 DATABASE DIRECTORY
@@ -251,23 +254,27 @@ Depending on configuration, the pipeline may use:
   - fastp
   - FastQC
   - BBMap
+  - Jellyfish
   - Kraken2
   - Bracken
   - Mash
+  - Bowtie2
   - SPAdes
   - Shovill
   - SKESA
   - Unicycler
   - QUAST
+  - CheckM
   - MLST
   - FastMLST
   - chewBBACA
   - AMRFinderPlus
   - ResFinder
   - MultiQC
+  - Krona
   - WeasyPrint
   
-  annotation with bakta is supported but not automatically istalled in this version
+  annotation with bakta is supported but not automatically installed in this version
 
 ===============================================================================
 INSTALLATION
@@ -298,8 +305,8 @@ TYPICAL WORKFLOW
 
 2. Install databases
 
-    pre-formated databases can be supplied with the istallation files
-    The pipeline can also usually download missing databases by it self
+    pre-formatted databases can be supplied with the installation files
+    The pipeline can also usually download missing databases by itself
 
 3. Navigate to the directory with fastq/fasta files
 

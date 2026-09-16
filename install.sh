@@ -322,7 +322,9 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     [[ "${ASSUME_YES}" -eq 1 ]]       && SETUP_ARGS="${SETUP_ARGS} --assume-yes"
     [[ "${INSTALL_OPTIONAL}" -eq 1 ]] && SETUP_ARGS="${SETUP_ARGS} --optional"
 
-    conda run -n "${MAIN_ENV}" eurlc-wgs ${SETUP_ARGS}
+    # Run setup from HOME to avoid the pipeline treating the source
+    # directory as its input directory.
+    cd "${HOME}" && conda run -n "${MAIN_ENV}" eurlc-wgs ${SETUP_ARGS}
 else
     echo
     echo ">>> Skipping eurlc-wgs --setup (--no-setup specified)."

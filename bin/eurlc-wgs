@@ -2458,12 +2458,20 @@ if ( exists $args{"summarize"} || exists $args{"summarise"} ) {
 # still end up in %args_handled like any other argument, so they need an explicit
 # exemption here, or this check would wrongly report them as unknown.
 my %early_handled_args = (
-    "docker"     => 1,   # runmode selection, checked directly against @ARGV
-    "color"      => 1,   # force-enable colored output, checked directly against @ARGV
-    "no-color"   => 1,   # force-disable colored output, checked directly against @ARGV
-    "colour"     => 1,   # British spelling alias for "color"
-    "no-colour"  => 1,   # British spelling alias for "no-color"
+    "docker"           => 1,   # runmode selection, checked directly against @ARGV
+    "color"            => 1,   # force-enable colored output, checked directly against @ARGV
+    "no-color"         => 1,   # force-disable colored output, checked directly against @ARGV
+    "colour"           => 1,   # British spelling alias for "color"
+    "no-colour"        => 1,   # British spelling alias for "no-color"
+    # Utility commands handled in the early-exit block after config loading:
+    "setup"            => 1,
+    "freeze-databases" => 1,
+    "generate-seal"    => 1,   # also matches --generate-seal=Name (prefix match below)
 );
+# generate-seal=Name is passed as a key with the =Name suffix -- mark it handled too
+for my $key (keys %args_handled) {
+    $early_handled_args{$key} = 1 if $key =~ /^generate-seal=/;
+}
 
 my @unknown_args;
 foreach my $key (keys %args_handled) {

@@ -17,6 +17,9 @@ log/
 eurlc-wgs_db/
 db/
 data/
+*.config
+*.ini
+*:Zone.Identifier
 
 # =========================================================
 # Conda / environments
@@ -26,6 +29,7 @@ miniconda3/
 conda_pkgs/
 .env/
 .conda/
+
 
 # =========================================================
 # IDE / editor files

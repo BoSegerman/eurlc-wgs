@@ -4,4 +4,4 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - checkm-genome=1.2.3
+  - checkm-genome=1.2.5

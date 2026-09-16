@@ -17014,24 +17014,33 @@ th.sort-desc::after{content:" \25BC";font-size:.75em;opacity:.7}
 </style>
 <script>
 (function(){
-  function cellText(td){return(td?td.textContent||td.innerText:"").trim()}
+  function cellText(td){return(td?td.textContent||td.innerText:"").trim().replace(/\s+/g," ")}
+  function tryNum(s){
+    /* Only numeric sort if the cell looks like a pure number, optionally
+       followed by a unit (%, x, bp, Mb).  Sample names like PT43-3 must
+       fall through to string comparison. */
+    var m=s.match(/^([+\-]?\d[\d,]*\.?\d*)\s*(%|x|X|bp|Mb|GB|kb)?$/i);
+    return m?parseFloat(m[1].replace(/,/g,"")):NaN;
+  }
   function sortTable(table,col,asc){
     var tbody=table.tBodies[0];
     var rows=Array.from(tbody.rows);
     rows.sort(function(a,b){
       var ta=cellText(a.cells[col]);
       var tb=cellText(b.cells[col]);
-      var na=parseFloat(ta.replace(/[^0-9.\-]/g,""));
-      var nb=parseFloat(tb.replace(/[^0-9.\-]/g,""));
+      var na=tryNum(ta), nb=tryNum(tb);
       if(!isNaN(na)&&!isNaN(nb)){return asc?na-nb:nb-na}
-      return asc?ta.localeCompare(tb):tb.localeCompare(ta);
+      return asc?ta.localeCompare(tb,"sv",{sensitivity:"base"}):tb.localeCompare(ta,"sv",{sensitivity:"base"});
     });
     rows.forEach(function(r){tbody.appendChild(r)});
   }
   document.addEventListener("DOMContentLoaded",function(){
     document.querySelectorAll("table.sortable").forEach(function(table){
       var headers=table.querySelectorAll("th.sort-col");
-      var state={col:-1,asc:true};
+      // Table is pre-sorted ascending on Sample (col 0) by the server.
+      // Reflect that in state so the first click on Sample gives descending.
+      var state={col:0,asc:true};
+      if(headers[0]) headers[0].classList.add("sort-asc");
       headers.forEach(function(th,i){
         th.addEventListener("click",function(){
           var asc=state.col===i?!state.asc:true;

@@ -42,6 +42,7 @@ RUN_SETUP=1
 INSTALL_OPTIONAL=0
 ASSUME_YES=0
 RESOURCES_ONLY=0
+UNINSTALL=0
 
 # -----------------------------------------------------------------------------
 # Parse options
@@ -58,6 +59,8 @@ for arg in "$@"; do
         --resources-only|--dev)
             RESOURCES_ONLY=1
             RUN_SETUP=0 ;;
+        --uninstall)
+            UNINSTALL=1 ;;
         -h|--help)
             echo "Usage:"
             echo "  ./install.sh                   install eurlc-wgs + run setup"
@@ -65,6 +68,7 @@ for arg in "$@"; do
             echo "  ./install.sh --optional        include optional tools in setup"
             echo "  ./install.sh --assume-yes      non-interactive"
             echo "  ./install.sh --resources-only  reinstall scripts/templates/assets only"
+            echo "  ./install.sh --uninstall       remove all eurlc-wgs environments and resources"
             exit 0 ;;
         *)
             echo "ERROR: Unknown option: $arg"
@@ -75,6 +79,42 @@ done
 
 echo ">>> EURLC-WGS installer"
 echo ">>> Source directory: ${SRC_DIR}"
+
+# -----------------------------------------------------------------------------
+# Uninstall
+# -----------------------------------------------------------------------------
+
+if [[ "${UNINSTALL}" -eq 1 ]]; then
+    echo ">>> Uninstalling eurlc-wgs..."
+
+    if ! command -v conda >/dev/null 2>&1; then
+        echo "ERROR: conda not found in PATH."
+        exit 1
+    fi
+
+    CONDA_BASE_U="$(conda info --base)"
+
+    # Remove all eurlc-wgs* environments
+    echo ">>> Removing conda environments..."
+    conda env list | awk '$1 ~ /^eurlc-wgs/ {print $1}' | while read -r env; do
+        echo ">>> Removing: ${env}"
+        conda env remove -n "${env}" -y
+    done
+
+    # Remove shared resources
+    SHARE_DIR="${CONDA_BASE_U}/share/eurlc-wgs"
+    if [[ -d "${SHARE_DIR}" ]]; then
+        echo ">>> Removing shared resources: ${SHARE_DIR}"
+        rm -rf "${SHARE_DIR}"
+    else
+        echo ">>> Shared resources not found: ${SHARE_DIR} (already removed?)"
+    fi
+
+    echo ">>> Uninstall complete."
+    echo ">>> Note: eurlc-wgs_db/ (databases and config) was NOT removed."
+    echo ">>>       Remove it manually if no longer needed."
+    exit 0
+fi
 
 # -----------------------------------------------------------------------------
 # Locate conda

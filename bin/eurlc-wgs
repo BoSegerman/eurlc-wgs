@@ -2604,6 +2604,35 @@ if ( $R_cfg->{general}{archive_results} ) {
 }
 
 ###################################################################################################
+## Early-exit utility commands that don't need input files.
+## Checked here, before the no-files guard below, so they work even when
+## no FASTQ/FASTA data is present (e.g. during installation or maintenance).
+
+{
+    my $found_setup = grep { $_ eq "--setup" } @ARGV;
+    my ($found_freeze) = grep { $_ eq "--freeze-databases" } @ARGV;
+    my ($found_seal)   = grep { /^--generate-seal/ } @ARGV;
+
+    if ($found_setup) {
+        _cmd_setup();
+        close_logfile();
+        exit 0;
+    }
+    if ($found_freeze) {
+        _cmd_freeze_databases();
+        close_logfile();
+        exit 0;
+    }
+    if ($found_seal) {
+        ($found_seal) = $found_seal =~ /^--generate-seal(?:=(.+))?$/;
+        my $seal_name = $found_seal // ("config-" . strftime("%Y%m%d-%H%M%S", localtime));
+        _cmd_generate_seal($seal_name);
+        close_logfile();
+        exit 0;
+    }
+}
+
+###################################################################################################
 ## fail fast if there is nothing to analyze, before any destructive
 ## output-directory handling (just below) or expensive environment/database
 ## setup happens. This is a quick existence check only (stops at the first
@@ -14033,25 +14062,6 @@ my $softwareversions = log_tool_versions("enabled",getdir("out,log"));
     # Uses the resolved seal path from $R_cfg->{general}{seal}.
     _write_config_log(getdir("out,log"));
 
-    # ── Early-exit utility commands ──────────────────────────────────────────
-    # These run after config+db+program resolution but before sample loading
-    # and analysis, then exit. They are not part of a normal analysis run.
-
-    for my $arg (@ARGV) {
-        if ($arg eq "--freeze-databases") {
-            _cmd_freeze_databases();
-            exit 0;
-        }
-        if ($arg =~ /^--generate-seal(?:=(.+))?$/) {
-            my $seal_name = $1 // ("config-" . strftime("%Y%m%d-%H%M%S", localtime));
-            _cmd_generate_seal($seal_name);
-            exit 0;
-        }
-        if ($arg eq "--setup") {
-            _cmd_setup();
-            exit 0;
-        }
-    }
 }
 
 log_message("INFO: Versions:\n$softwareversions");

@@ -318,8 +318,9 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     echo ">>> (Tool environments are managed by the pipeline, not this script.)"
     echo
 
-    SETUP_ARGS="--setup"
-    [[ "${ASSUME_YES}" -eq 1 ]]       && SETUP_ARGS="${SETUP_ARGS} --assume-yes"
+    # Always add --assume-yes when called from install.sh: conda run has no
+    # terminal so interactive prompts would hang indefinitely.
+    SETUP_ARGS="--setup --assume-yes"
     [[ "${INSTALL_OPTIONAL}" -eq 1 ]] && SETUP_ARGS="${SETUP_ARGS} --optional"
 
     # Run setup from HOME to avoid the pipeline treating the source

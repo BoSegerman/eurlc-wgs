@@ -325,7 +325,13 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
 
     # Run setup from HOME to avoid the pipeline treating the source
     # directory as its input directory.
-    cd "${HOME}" && conda run -n "${MAIN_ENV}" eurlc-wgs ${SETUP_ARGS}
+    # Use direct activation rather than conda run to avoid output buffering.
+    cd "${HOME}"
+    # shellcheck disable=SC1091
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate "${MAIN_ENV}"
+    eurlc-wgs ${SETUP_ARGS}
+    conda deactivate
 else
     echo
     echo ">>> Skipping eurlc-wgs --setup (--no-setup specified)."

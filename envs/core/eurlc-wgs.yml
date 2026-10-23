@@ -5,11 +5,9 @@ channels:
   - defaults
 dependencies:
   - perl
-  - perl-json
+  - perl-json-maybexs      # JSON::MaybeXS -- report generation and config parsing
+  - perl-json-xs           # JSON::XS -- fast C backend for JSON::MaybeXS
+  - perl-html-parser       # HTML::Entities -- HTML escaping in reports
+  - perl-termreadkey       # Term::ReadKey -- terminal width detection
   - python=3.11
-  - biopython
-  - perl-json-maybexs
-  - perl-html-parser
-  - perl-xml-libxml
-  - perl-text-csv
-  - perl-termreadkey
+  - biopython              # Bio::SeqIO -- used by hash_results_alleles.py

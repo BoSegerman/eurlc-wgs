@@ -5,3 +5,5 @@ channels:
   - defaults
 dependencies:
   - quast=5.3.0
+  - python>=3.8,<3.13    # constrain Python -- quast 5.3.0 tested against 3.8-3.12
+  - setuptools           # provides distutils shim for Python 3.12+

@@ -4,4 +4,4 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - weasyprint=62.3
+  - weasyprint=69.0

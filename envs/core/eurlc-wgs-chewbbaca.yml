@@ -4,4 +4,4 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - chewbbaca=3.3.10
+  - chewbbaca=3.5.4

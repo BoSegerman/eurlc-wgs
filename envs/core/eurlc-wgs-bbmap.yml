@@ -4,4 +4,4 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - bbmap=39.15
+  - bbmap=40.02

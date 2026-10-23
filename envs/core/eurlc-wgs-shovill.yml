@@ -4,4 +4,4 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - shovill=1.1.0
+  - shovill=1.4.2

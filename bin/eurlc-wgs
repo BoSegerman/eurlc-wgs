@@ -104,10 +104,18 @@ foreach my $arg (@ARGV) {
 # interactive regardless of this flag; see its own dedicated handling below.
 my $ASSUME_YES = 0;
 
-foreach my $arg (@ARGV) {
-  if ( $arg eq "--assume-yes") { $ASSUME_YES = 1; }
-}
+# Suppress startup log noise when running utility commands (--setup,
+# --freeze-databases, --generate-seal). The flag is cleared at the start
+# of each _cmd_* function so the utility output itself is never suppressed.
+my $S_SUPPRESS_STARTUP_LOG = 0;
 
+foreach my $arg (@ARGV) {
+    if ($arg eq "--assume-yes")                { $ASSUME_YES = 1; }
+    if ($arg eq "--setup")                     { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg eq "--freeze-databases")          { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^--generate-seal/)            { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^--install-scheme/)           { $S_SUPPRESS_STARTUP_LOG = 1; }
+}
 
 
 ###################################################################################################
@@ -610,7 +618,19 @@ if ( is_docker() ){
 }
 if ( is_conda() ) {
 
-    setdir( "in"     , getcwd());
+    # getcwd() returns undef when the shell's CWD has been deleted/renamed
+    # (e.g. the user ran --install-scheme from inside a schema dir that got
+    # moved by PrepExternalSchema).  Fall back to HOME for early-exit commands
+    # that don't need an input directory; for normal runs this produces a clear
+    # error message a few lines below via the "not a directory" check.
+    my $cwd = eval { getcwd() };
+    if (!defined $cwd || $cwd eq "") {
+        $cwd = $ENV{HOME} // "/tmp";
+        warn "WARNING: Current working directory no longer exists on disk.\n"
+           . "         Run eurlc-wgs from a valid directory.\n"
+             unless $S_SUPPRESS_STARTUP_LOG;
+    }
+    setdir( "in"     , $cwd);
     setdir( "program", dirname($0));
     setfile("program", $0);
     setdir("home"    , $ENV{HOME});
@@ -1323,7 +1343,7 @@ $rundata{config}{defaults} = {
             env     => "eurlc-wgs-mlst",
             yml     => "core/eurlc-wgs-mlst.yml",
             package_name  => "mlst",
-            db_test   => "__CONDABASE__/envs/__ENV__/db/blast/mlst.fa",
+            db_test   => "__CONDABASE__/envs/__ENV__/db/blast/mlst.fa.ndb",
             install_db =>"echo 'if the mlst database is missing please reanstall mlst or follow procedures at the mlst homepage'",
             install_version  => "2.23.0",
     },
@@ -1335,9 +1355,18 @@ $rundata{config}{defaults} = {
             env     => "eurlc-wgs-fastmlst",
             yml     => "core/eurlc-wgs-fastmlst.yml",
             package_name  => "fastmlst",
-            install_version  => "0.0.16 python=3.10 biopython=1.81",
+            install_version  => "0.0.16 python>=3.7",
             run_update_db => "weekly",
             update_db_threads => 4,
+    },
+    weasyprint => {
+            version_check => "loose",
+            required => 0,
+            enabled => 1,
+            env     => "eurlc-wgs-weasyprint",
+            yml     => "core/eurlc-wgs-weasyprint.yml",
+            package_name  => "weasyprint",
+            install_version  => "69.0",
     },
     chewbbaca => {
             version_check => "strict",
@@ -1370,7 +1399,7 @@ $rundata{config}{defaults} = {
             package_name   => "ncbi-amrfinderplus",
             program_name => "amrfinder",
             install_version  => "4.0.19",
-            db_test   => "__CONDABASE__/envs/__ENV__/share/amrfinderplus/data/latest/AMR.LIB",
+            db_test   => "__CONDABASE__/envs/__ENV__/share/amrfinderplus/data/latest/version.txt",
             install_db => "conda run -n __ENV__ --no-capture-output amrfinder -u --threads 3",
             # Curated organism values AMRFinderPlus accepts for --organism (species- and
             # genus-level, comma-separated). Used to dynamically resolve the correct
@@ -2467,10 +2496,12 @@ my %early_handled_args = (
     "setup"            => 1,
     "freeze-databases" => 1,
     "generate-seal"    => 1,   # also matches --generate-seal=Name (prefix match below)
+    "install-scheme"   => 1,   # also matches --install-scheme=Species (prefix match below)
 );
-# generate-seal=Name is passed as a key with the =Name suffix -- mark it handled too
+# generate-seal=Name and install-scheme=Species are passed as keys with the =... suffix
 for my $key (keys %args_handled) {
     $early_handled_args{$key} = 1 if $key =~ /^generate-seal=/;
+    $early_handled_args{$key} = 1 if $key =~ /^install-scheme=/;
 }
 
 my @unknown_args;
@@ -2609,9 +2640,10 @@ if ( $R_cfg->{general}{archive_results} ) {
 ## no FASTQ/FASTA data is present (e.g. during installation or maintenance).
 
 {
-    my $found_setup = grep { $_ eq "--setup" } @ARGV;
-    my ($found_freeze) = grep { $_ eq "--freeze-databases" } @ARGV;
-    my ($found_seal)   = grep { /^--generate-seal/ } @ARGV;
+    my $found_setup  = grep { $_ eq "--setup" } @ARGV;
+    my ($found_freeze)  = grep { $_ eq "--freeze-databases" } @ARGV;
+    my ($found_seal)    = grep { /^--generate-seal/ } @ARGV;
+    my ($found_scheme)  = grep { /^--install-scheme/ } @ARGV;
 
     if ($found_setup) {
         _cmd_setup();
@@ -2627,6 +2659,12 @@ if ( $R_cfg->{general}{archive_results} ) {
         ($found_seal) = $found_seal =~ /^--generate-seal(?:=(.+))?$/;
         my $seal_name = $found_seal // ("config-" . strftime("%Y%m%d-%H%M%S", localtime));
         _cmd_generate_seal($seal_name);
+        close_logfile();
+        exit 0;
+    }
+    if ($found_scheme) {
+        my ($species_arg) = $found_scheme =~ /^--install-scheme(?:=(.+))?$/;
+        _cmd_install_scheme($species_arg);
         close_logfile();
         exit 0;
     }
@@ -13990,6 +14028,8 @@ for my $sample ( @$R_samples) {
     log_message("NOTICE: $sample->{name} [$sample->{type}]", "green");
 }
 
+write_sample_manifest(\%rundata);
+
 # Stop here, before any of the expensive setup work below (conda environment
 # checks, database downloads) -- there is nothing to analyze, so there's no
 # point doing any of that. This is deliberately not treated as an ERROR (it's
@@ -25071,6 +25111,54 @@ sub set_sample_warning {
 }
 
 
+# write_sample_manifest(\%rundata)
+#
+# Writes out/log/sample_manifest.tsv after all samples have been loaded and
+# their basenames finalised (after sanitization and unique_basename).
+# The file is always written, even when no names were changed, so it serves
+# as the authoritative basename → raw-file mapping for the entire run.
+#
+# Columns:
+#   sample_name   - the final basename used throughout the pipeline
+#   type          - PE / SE / FASTA
+#   raw_R1        - absolute path to the R1 (or SE) FASTQ, or the FASTA file
+#   raw_R2        - absolute path to the R2 FASTQ (empty for SE/FASTA)
+#
+# The file is tab-separated with a header line so it can be opened directly
+# in Excel / LibreOffice or parsed with awk/cut without extra options.
+sub write_sample_manifest {
+    my ($run_data) = @_;
+
+    my $manifest_path = getdir("out,log") . "/sample_manifest.tsv";
+    open my $fh, '>', $manifest_path
+        or do { log_message("WARNING: could not write sample manifest [$manifest_path]: $!"); return; };
+
+    print $fh join("\t", "sample_name", "type", "raw_R1_or_SE_or_FASTA", "raw_R2") . "\n";
+
+    for my $sample (@{ $run_data->{samples} }) {
+        my $name = $sample->{name} // "";
+        my $type = $sample->{type} // "";
+
+        my ($col_r1, $col_r2) = ("", "");
+
+        if ($type eq "PE") {
+            $col_r1 = $sample->{paths}{raw}{R1} // "";
+            $col_r2 = $sample->{paths}{raw}{R2} // "";
+        } elsif ($type eq "SE") {
+            $col_r1 = $sample->{paths}{raw}{SE} // "";
+        } elsif ($type eq "FASTA") {
+            $col_r1 = $sample->{paths}{raw}{FASTA} // "";
+        }
+
+        print $fh join("\t", $name, $type, $col_r1, $col_r2) . "\n";
+    }
+
+    close $fh;
+    log_message("INFO: Wrote sample manifest (basename -> raw file mapping) to '$manifest_path'");
+    return 1;
+}
+
+
 sub read_fastq_filelist {
     my ($run_data) = @_;
 
@@ -25277,7 +25365,16 @@ sub unique_basename {
 
     return $base unless exists $run_data->{sample_index}{$base};
 
-    log_message("WARNING: duplicate name [$base], renaming...");
+    # The collision can arise in two ways:
+    #   (a) Two files in different directories genuinely have the same stem
+    #       (recursive scan, e.g. dir1/PT43_R1.fastq.gz + dir2/PT43_R1.fastq.gz).
+    #   (b) Two files with different original names map to the same sanitized
+    #       stem (e.g. "PT43.3" and "PT43_3" both become "PT43_3" after
+    #       sanitize_sample_basename -- the NOTICE from sanitization above
+    #       will already explain which files triggered this).
+    # In both cases the sample is kept and a unique suffix is appended.
+    log_message("WARNING: duplicate sample basename [$base] -- two source files produce the same name "
+              . "(check preceding NOTICE lines to see if basename sanitization was involved); renaming...");
 
     my $counter  = 1;
     my $renamed;
@@ -25287,11 +25384,11 @@ sub unique_basename {
     } while (exists $run_data->{sample_index}{$renamed} && $counter < 100);
 
     if ($counter >= 100 && exists $run_data->{sample_index}{$renamed}) {
-        log_message("ERROR: could not create unique name for [$base], skipping this entry");
+        log_message("ERROR: could not create unique name for [$base] after 100 attempts -- skipping this entry");
         return;
     }
 
-    log_message("NOTICE: [$R1,$R2] $base is renamed to $renamed");
+    log_message("NOTICE: [$R1,$R2] basename [$base] renamed to [$renamed] to avoid collision");
     return $renamed;
 }
 
@@ -25874,6 +25971,12 @@ sub colorize_for_screen {
 sub log_message {
     my ($msg, $color) = @_;   # $color is optional
 
+    # In utility mode (--setup, --freeze-databases, --generate-seal) suppress
+    # screen output during the noisy startup phase. The flag is cleared when
+    # the utility command itself begins, so its own output is always visible.
+    # Always write to the log file regardless.
+    my $suppress_screen = $S_SUPPRESS_STARTUP_LOG ? 1 : 0;
+
     # Ensure newline unless it already ends with \n or ...
     unless ( $msg =~ /\n$/ || $msg =~ /\.\.\.$/ ) {
         $msg .= "\n";
@@ -25907,7 +26010,7 @@ sub log_message {
     my $verbose = $R_cfg->{general}{verbose} // 0;
 
     # Decide if it should also go to screen
-    if ( $verbose || $msg =~ /^(ERROR:|WARNING:|NOTICE:|PROGRESS:)/ ) {
+    if ( !$suppress_screen && ( $verbose || $msg =~ /^(ERROR:|WARNING:|NOTICE:|PROGRESS:)/ ) ) {
         # During parallel scheduler result_parsing reap cycles,
         # $S_par_log_capture is set. Three-way behaviour:
         #
@@ -26486,6 +26589,7 @@ sub _write_yml_checksums {
 #   - If databases.config exists, database status is shown
 # Safe to run multiple times (skips already-installed environments).
 sub _cmd_setup {
+    $S_SUPPRESS_STARTUP_LOG = 0;   # show all output from here on
 
     my $db_dir  = peekdir("db");
     my $db_dir_exists = -d $db_dir;
@@ -26678,33 +26782,43 @@ sub _cmd_setup {
         # No databases.config -- use built-in db_test paths to check
         my @db_tools = grep {
             ref($R_cfg->{$_}) eq 'HASH'
-            && ($R_cfg->{$_}{db_path} // "") ne ""
+            && (   ($R_cfg->{$_}{db_path} // "") ne ""
+                || ($R_cfg->{$_}{db_test} // "") ne "" )
+            && ($R_cfg->{$_}{install_db} // "") ne ""
         } sort keys %$R_cfg;
 
         for my $tool (@db_tools) {
             next unless $R_cfg->{$tool}{enabled} // 1;
-            my $db_path  = fill_placeholder_string($R_cfg->{$tool}{db_path} // "");
-            my $db_test  = fill_placeholder_string($R_cfg->{$tool}{db_test} // "");
+            my $db_path  = fill_placeholder_string($R_cfg->{$tool}{db_path} // "", $R_cfg->{$tool});
+            my $db_test  = fill_placeholder_string($R_cfg->{$tool}{db_test} // "", $R_cfg->{$tool});
             my $exists   = $db_test ne "" ? -e $db_test : ($db_path ne "" ? -d $db_path : 0);
             my $install_cmd = $R_cfg->{$tool}{install_db} // "";
+            my $display_path = $db_test ne "" ? $db_test : $db_path;
 
             if ($exists) {
-                log_message(sprintf("NOTICE:   ✓  %-28s (%s)", $tool, $db_path), "green");
+                log_message(sprintf("NOTICE:   ✓  %-28s (%s)", $tool, $display_path), "green");
             } else {
-                log_message(sprintf("NOTICE:   ✗  %-28s (%s)", $tool, $db_path), "red");
+                log_message(sprintf("NOTICE:   ✗  %-28s (%s)", $tool, $display_path), "red");
                 if ($install_cmd ne "") {
                     my $go = $ASSUME_YES || prompt_yes_no("  Download/install $tool database?", 1);
                     if ($go) {
-                        ensure_dir($db_path);
+                        my $db_root = peekdir("db");
+                        ensure_dir($db_path) if $db_path ne "";
                         my $cmd = $install_cmd;
-                        $cmd =~ s/__DB__/$db_path/g;
+                        $cmd =~ s/__DB__/$db_root/g;
+                        # Expand __ENV__ and __CONDABASE__ using the tool's config
+                        my $env_name   = $R_cfg->{$tool}{env}  // "";
+                        my $conda_base = get_conda_base();
+                        $cmd =~ s/__ENV__/$env_name/g;
+                        $cmd =~ s/__CONDABASE__/$conda_base/g;
                         log_message("NOTICE:   Running: $cmd");
                         system($cmd) == 0
                             ? log_message("NOTICE:   ✓  $tool database installed", "green")
                             : log_message("WARNING:  ✗  $tool database installation failed", "red");
                     }
                 } else {
-                    log_message("NOTICE:   No automated install command -- install manually to $db_path");
+                    my $hint = $db_path ne "" ? $db_path : "(see documentation)";
+                    log_message("NOTICE:   No automated install command -- install manually to $hint");
                 }
             }
         }
@@ -26758,15 +26872,21 @@ sub _find_tool_for_db {
 
 # Expand __DB__ placeholder in a string using the current db dir.
 sub fill_placeholder_string {
-    my ($str) = @_;
+    my ($str, $tool_cfg) = @_;
     return "" unless defined $str;
-    my $db = peekdir("db");
+    my $db          = peekdir("db");
+    my $conda_base  = get_conda_base();
+    my $env_name    = (defined $tool_cfg && ref $tool_cfg eq 'HASH')
+                      ? ($tool_cfg->{env} // "") : "";
     $str =~ s/__DB__/$db/g;
+    $str =~ s/__CONDABASE__/$conda_base/g;
+    $str =~ s/__ENV__/$env_name/g;
     return $str;
 }
 
 # --freeze-databases: copy each database from default/ to <md5>/, update databases.config
 sub _cmd_freeze_databases {
+    $S_SUPPRESS_STARTUP_LOG = 0;
     my $db_path = $R_cfg->{general}{databases_config} // "";
     unless ($db_path && -f $db_path) {
         log_message("ERROR: --freeze-databases requires general.databases_config to be set.", "red");
@@ -26888,6 +27008,7 @@ sub _cmd_freeze_databases {
 
 # --generate-seal[=NAME]: write config_seal.ini next to databases.config
 sub _cmd_generate_seal {
+    $S_SUPPRESS_STARTUP_LOG = 0;
     my ($seal_name) = @_;
 
     my $db_path   = $R_cfg->{general}{databases_config} // "";
@@ -26971,6 +27092,298 @@ SEAL
     log_message("NOTICE: Seal name: $seal_name");
     log_message("NOTICE: Open the file and fill in 'created_by' and 'description'.");
     log_message("NOTICE: Reference this seal name in your method log when recording runs.");
+}
+
+# --install-scheme[=Species]: download a cgMLST/wgMLST schema from Chewie-NS and
+# (optionally) prepare it for use. The full schema is always stored intact; a
+# separate filter file (targets list) is used at runtime via --genes-list so that
+# the schema never needs to be re-downloaded when the target set changes.
+#
+# Usage:
+#   eurlc-wgs --install-scheme=campylobacter
+#   eurlc-wgs --install-scheme=listeria
+#   eurlc-wgs --install-scheme            (lists available species)
+#
+# After download, the function prints what to add to databases.config.
+sub _cmd_install_scheme {
+    $S_SUPPRESS_STARTUP_LOG = 0;
+    my ($species_arg) = @_;
+
+    # ── Known schemas on Chewie-NS ────────────────────────────────────────────
+    # Full species list: https://chewbbaca.online/
+    # IDs verified 2025: chewBBACA DownloadSchema -sp <id> -sc 1 -o <outdir>
+    # chewBBACA creates a named subdirectory inside -o; we pass schemas/ as -o.
+    # Named shortcuts for the four primary food/zoonotic pathogen species.
+    # For any other species use: eurlc-wgs --install-scheme=<sp_id>.<sc_id>
+    # Full species list: https://chewbbaca.online/
+    my %known_schemes = (
+        campylobacter => {
+            label       => "Campylobacter jejuni cgMLST (Chewie-NS sp=6 sc=1)",
+            species_id  => 6,
+            schema_id   => 1,
+            filter_hint => "campylobacter_cgmlst_targets.txt",
+            note        => "Full wgMLST schema; use a targets file (--genes-list) to select cgMLST loci at runtime.",
+        },
+        listeria => {
+            label       => "Listeria monocytogenes cgMLST (Chewie-NS sp=18 sc=1)",
+            species_id  => 18,
+            schema_id   => 1,
+            filter_hint => "",
+            note        => "",
+        },
+        salmonella => {
+            label       => "Salmonella enterica cgMLST (Chewie-NS sp=14 sc=1)",
+            species_id  => 14,
+            schema_id   => 1,
+            filter_hint => "",
+            note        => "",
+        },
+        ecoli => {
+            label       => "Escherichia coli cgMLST (Chewie-NS sp=10 sc=1)",
+            species_id  => 10,
+            schema_id   => 1,
+            filter_hint => "ecoli_cgmlst_targets.txt",
+            note        => "Use a targets file to limit to cgMLST core loci.",
+        },
+    );
+
+    # ── No species given: list available ─────────────────────────────────────
+    unless (defined $species_arg && $species_arg ne "") {
+        log_message("NOTICE:");
+        log_message("NOTICE: Usage:  eurlc-wgs --install-scheme=<species>");
+        log_message("NOTICE:         eurlc-wgs --install-scheme=all");
+        log_message("NOTICE:         eurlc-wgs --install-scheme=<sp_id>.<sc_id>   (any Chewie-NS schema by number)");
+        log_message("NOTICE:");
+        log_message("NOTICE: Named species shortcuts:");
+        for my $key (sort keys %known_schemes) {
+            log_message(sprintf("NOTICE:   %-16s %s", $key, $known_schemes{$key}{label}));
+        }
+        log_message("NOTICE:");
+        log_message("NOTICE: Full species list: https://chewbbaca.online/");
+        log_message("NOTICE:");
+        log_message("NOTICE: Examples:");
+        log_message("NOTICE:   eurlc-wgs --install-scheme=campylobacter");
+        log_message("NOTICE:   eurlc-wgs --install-scheme=6.1        (same as campylobacter)");
+        log_message("NOTICE:   eurlc-wgs --install-scheme=all");
+        return;
+    }
+
+    # ── Numeric mode: --install-scheme=<sp_id>.<sc_id> ───────────────────────
+    if ($species_arg =~ /^(\d+)\.(\d+)$/) {
+        my ($sp_id, $sc_id) = ($1, $2);
+        log_message("NOTICE:");
+        log_message("NOTICE: Numeric mode: Chewie-NS species=$sp_id  schema=$sc_id");
+        # Check if this matches a named scheme (for filter hints)
+        my ($named) = grep { $known_schemes{$_}{species_id} == $sp_id
+                           && $known_schemes{$_}{schema_id}  == $sc_id
+                         } keys %known_schemes;
+        my $sc_ref = $named
+            ? $known_schemes{$named}
+            : { label => "Chewie-NS sp=${sp_id} sc=${sc_id}",
+                species_id => $sp_id, schema_id => $sc_id,
+                filter_hint => "", note => "" };
+        _install_one_scheme($sc_ref, \%known_schemes);
+        return;
+    }
+
+    # ── Install all schemes ───────────────────────────────────────────────────
+    if (lc($species_arg) eq "all") {
+        my @all_keys = sort keys %known_schemes;
+        log_message("NOTICE:");
+        log_message("NOTICE: Installing all " . scalar(@all_keys) . " available schemes:");
+        log_message("NOTICE:   - $known_schemes{$_}{label}") for @all_keys;
+        log_message("NOTICE:");
+        my $db_check = peekdir("db");
+        if ($db_check eq "") {
+            log_message("ERROR: No database directory configured. Set general.db in eurlc-wgs.config.", "red");
+            return;
+        }
+        my @failed;
+        for my $k (@all_keys) {
+            log_message("NOTICE:");
+            log_message("NOTICE: ════════════════════════════════════════════════════════");
+            log_message("NOTICE: Installing: $known_schemes{$k}{label}");
+            log_message("NOTICE: ════════════════════════════════════════════════════════");
+            my $ok = _install_one_scheme($known_schemes{$k}, \%known_schemes);
+            push @failed, $known_schemes{$k}{label} unless $ok;
+        }
+        log_message("NOTICE:");
+        log_message("NOTICE: ════════════════════════════════════════════════════════");
+        if (@failed) {
+            log_message("WARNING: The following schemes failed to install:", "yellow");
+            log_message("WARNING:   - $_") for @failed;
+        } else {
+            log_message("NOTICE: ✓  All schemes installed successfully.", "green");
+        }
+        log_message("NOTICE: Add the databases.config snippets printed above for each scheme.");
+        return;
+    }
+
+    # ── Named species ─────────────────────────────────────────────────────────
+    my $key = lc($species_arg);
+    $key =~ s/[\s_-]+//g;   # normalize: "C. jejuni" → "cjejuni", "e-coli" → "ecoli"
+
+    my $match;
+    for my $k (sort keys %known_schemes) {
+        if ($k eq $key || index($k, $key) == 0 || index($key, $k) == 0) {
+            $match = $k;
+            last;
+        }
+    }
+
+    unless (defined $match) {
+        log_message("ERROR: Unknown species '$species_arg'.", "red");
+        log_message("NOTICE: Run 'eurlc-wgs --install-scheme' (no argument) to list available species.");
+        log_message("NOTICE: Use '--install-scheme=<sp_id>.<sc_id>' to install any schema by number.");
+        return;
+    }
+
+    _install_one_scheme($known_schemes{$match}, \%known_schemes);
+}
+
+# _install_one_scheme($sc_hashref, $known_schemes_hashref)
+# $sc_hashref must have: species_id, schema_id, label, filter_hint, note
+#
+# chewBBACA 3.x DownloadSchema behaviour:
+#   -o <container_dir>  must be empty or non-existent.
+#   chewBBACA creates a named subdirectory inside it, e.g.:
+#       <container_dir>/Campylobacter_jejuni_wgMLST/
+#   The .fasta files land there, NOT directly in <container_dir>.
+#
+# PrepExternalSchema must therefore target the subdirectory, not the container.
+# After PrepExternalSchema the final structure is:
+#   schemas/<container_dir>/<chewbbaca_schema_name>/   ← ready to use
+#
+# Returns 1 on success, 0 on failure.
+sub _install_one_scheme {
+    my ($sc, $known_schemes) = @_;
+    my $db = peekdir("db");
+    if ($db eq "") {
+        log_message("ERROR: No database directory configured. Set general.db in eurlc-wgs.config.", "red");
+        return 0;
+    }
+
+    my $chewy_env  = $R_cfg->{chewbbaca}{env} // "eurlc-wgs-chewbbaca";
+    my $sp_id      = $sc->{species_id};
+    my $sc_id      = $sc->{schema_id};
+
+    # Container dir: empty wrapper that chewBBACA downloads into.
+    # Named after sp/sc so it is predictable and unique.
+    my $container  = "$db/chewbbaca/schemas/sp${sp_id}_sc${sc_id}";
+
+    log_message("NOTICE:");
+    log_message("NOTICE: ── Install scheme: $sc->{label} ─────────────────────");
+    log_message("NOTICE:   Download container : $container/");
+    log_message("NOTICE:   Chewie-NS          : species=$sp_id  schema=$sc_id");
+    log_message("NOTICE:   conda env          : $chewy_env");
+    log_message("NOTICE:");
+
+    ensure_dir("$db/chewbbaca/schemas");
+
+    # ── Check / clear existing container ─────────────────────────────────────
+    if (-d $container) {
+        my @contents = grep { -d $_ } glob("$container/*/");
+        if (@contents) {
+            log_message("NOTICE: Schema already downloaded: $container");
+            my $go = $ASSUME_YES || prompt_yes_no("  Remove and re-download?", 0);
+            unless ($go) {
+                log_message("NOTICE: Skipping $sc->{label}.");
+                # Report path of existing schema for the config snippet below.
+                my ($existing) = @contents;
+                $existing =~ s{/$}{};
+                _print_schema_config($sc, $sp_id, $sc_id, $db, $existing);
+                return 1;
+            }
+            log_message("NOTICE: Removing existing download...");
+            system("rm -rf \"\Q$container\E\"");
+        }
+        # Empty container is fine — chewBBACA accepts it.
+    }
+
+    # ── Download from Chewie-NS ───────────────────────────────────────────────
+    log_message("NOTICE: Downloading schema from Chewie-NS (this may take a while)...");
+    my $dl_cmd = "conda run -n $chewy_env chewBBACA.py DownloadSchema"
+               . " -sp $sp_id -sc $sc_id -o \"$container\" --cpu 4";
+    log_message("NOTICE: Running: $dl_cmd");
+    my $rc = system($dl_cmd);
+
+    if ($rc != 0) {
+        log_message("ERROR: Schema download failed (exit code $rc).", "red");
+        log_message("NOTICE: Check your internet connection and that Chewie-NS is reachable.");
+        log_message("NOTICE: URL: https://chewbbaca.online/");
+        return 0;
+    }
+
+    # chewBBACA created exactly one subdir inside $container
+    my @subdirs = grep { -d $_ } glob("$container/*/");
+    unless (@subdirs) {
+        log_message("ERROR: Download appeared to succeed but no schema subdirectory found in $container", "red");
+        return 0;
+    }
+    my $raw_schema = $subdirs[0];
+    $raw_schema =~ s{/$}{};
+    log_message("NOTICE: ✓  Schema downloaded to $raw_schema", "green");
+
+    # ── PrepExternalSchema — run on the subdir, not the container ────────────
+    log_message("NOTICE: Running PrepExternalSchema...");
+    my $prep_out = "${raw_schema}_prepared";
+    my $prep_cmd = "conda run -n $chewy_env chewBBACA.py PrepExternalSchema"
+                 . " -g \"$raw_schema\" -o \"$prep_out\" --cpu 4";
+    log_message("NOTICE: Running: $prep_cmd");
+    my $rc2 = system($prep_cmd);
+
+    my $final_schema;
+    if ($rc2 == 0 && -d $prep_out) {
+        system("rm -rf \"\Q$raw_schema\E\"");
+        rename $prep_out, $raw_schema
+            or log_message("WARNING: Could not rename prepared schema dir; using as-is.");
+        $final_schema = $raw_schema;
+        log_message("NOTICE: ✓  Schema prepared and ready at $final_schema", "green");
+    } else {
+        log_message("WARNING: PrepExternalSchema failed — keeping raw downloaded schema.", "yellow");
+        log_message("WARNING: Re-run PrepExternalSchema manually if chewBBACA reports format errors.");
+        $final_schema = $raw_schema;
+    }
+
+    _print_schema_config($sc, $sp_id, $sc_id, $db, $final_schema);
+    return 1;
+}
+
+sub _print_schema_config {
+    my ($sc, $sp_id, $sc_id, $db, $schema_path) = @_;
+
+    # ── Filter file hint ──────────────────────────────────────────────────────
+    my $filter_path = "";
+    if (($sc->{filter_hint} // "") ne "") {
+        $filter_path = "$db/chewbbaca/filters/$sc->{filter_hint}";
+        if (-f $filter_path) {
+            log_message("NOTICE: ✓  Filter file found: $filter_path", "green");
+        } else {
+            log_message("NOTICE:");
+            log_message("NOTICE: Optional targets file not found: $filter_path");
+            log_message("NOTICE: Place a list of locus names (one per line) there to run with");
+            log_message("NOTICE: a cgMLST subset instead of the full wgMLST schema.");
+        }
+    }
+
+    # ── databases.config snippet ──────────────────────────────────────────────
+    my $schema_key = (split m{/}, $schema_path)[-1];
+    my $filter_val = (-f $filter_path) ? $filter_path : "unfiltered";
+    log_message("NOTICE:");
+    log_message("NOTICE: ── Add to databases.config ────────────────────────────");
+    log_message("NOTICE:");
+    log_message("NOTICE: [chewbbaca_schemas.$schema_key]");
+    log_message("NOTICE: enabled  = 1");
+    log_message("NOTICE: path     = $schema_path");
+    log_message("NOTICE: filter   = $filter_val");
+    log_message("NOTICE: species  = $sc->{label}");
+    log_message("NOTICE: note     = Downloaded from Chewie-NS sp=$sp_id sc=$sc_id");
+    log_message("NOTICE:");
+    if (($sc->{note} // "") ne "") {
+        log_message("NOTICE: Note: $sc->{note}");
+        log_message("NOTICE:");
+    }
+    log_message("NOTICE: ✓  Done.", "green");
 }
 
 sub md5_file {
@@ -29108,7 +29521,7 @@ sub get_fastq_stem {
     # Remove known extension (case-insensitive)
     $filename =~ s/($ext_pattern)$//i;
 
-    return $filename;
+    return sanitize_sample_basename($filename);
 }
 
 ####################################################################################
@@ -29123,15 +29536,67 @@ sub get_fasta_stem {
     # Remove trailing slashes or backslashes
     $filename =~ s{[\\/]+$}{};
 
-
-
     # Join extensions into regex, escape dots
     my $ext_pattern = join('|', map { quotemeta($_) } @constants_fasta_exts);
 
     # Remove known extension (case-insensitive)
     $filename =~ s/($ext_pattern)$//i;
 
-    return $filename;
+    return sanitize_sample_basename($filename);
+}
+
+####################################################################################
+
+# sanitize_sample_basename($name)
+#
+# Normalises a raw filename stem into a safe sample basename that downstream
+# tools (chewBBACA, SPAdes, AMRFinderPlus, …) can use as-is in filenames and
+# result tables without surprises.
+#
+# Rules (applied in order):
+#   1. Replace any character that is not A-Z a-z 0-9 _ - with an underscore.
+#      This covers dots, spaces, parentheses, colons, plus signs, etc.
+#      Rationale: chewBBACA historically split on the first dot in the FASTA
+#      filename, turning "PT43.3.fasta" → sample ID "PT43", which caused
+#      silent collisions between samples like PT43.3 and PT43.6.
+#   2. Collapse consecutive underscores into one.
+#   3. Strip leading and trailing underscores.
+#
+# The function returns the original string unchanged if no substitution is
+# needed, so it is a no-op for well-formed names.
+#
+# NOTE: sanitization happens at the point where the stem is first extracted
+# from the filename (get_fastq_stem / get_fasta_stem), before anything is
+# written to filelist_fastq.txt.  The downstream unique_basename() call in
+# read_fastq_filelist / read_fasta_filelist then handles any collision that
+# arises because two different original names map to the same sanitized form
+# (e.g. "PT43.3" and "PT43_3" both become "PT43_3"; the second gets "_1"
+# appended and a WARNING is logged).
+sub sanitize_sample_basename {
+    my ($name) = @_;
+    return $name unless defined $name && $name ne "";
+
+    my $original = $name;
+
+    # 1. Replace unsafe characters with underscore
+    $name =~ s/[^A-Za-z0-9_\-]/_/g;
+
+    # 2. Collapse runs of underscores
+    $name =~ s/_+/_/g;
+
+    # 3. Strip leading/trailing underscores
+    $name =~ s/^_+|_+$//g;
+
+    # Edge case: if the result is empty (e.g. input was "..."), fall back
+    # to a generic name so the pipeline can continue.
+    if ($name eq "") {
+        $name = "sample";
+        log_message("WARNING: basename [$original] reduced to empty string after sanitization -- using fallback name [$name]");
+    } elsif ($name ne $original) {
+        log_message("NOTICE: basename sanitized [$original] -> [$name] (unsafe characters replaced with underscores)");
+    }
+
+    return $name;
 }
 
 ###################################################################################################### 

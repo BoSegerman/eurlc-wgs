@@ -4,4 +4,4 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - jellyfish
+  - jellyfish>=2,<3

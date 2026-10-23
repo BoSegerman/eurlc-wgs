@@ -5,4 +5,4 @@ channels:
   - defaults
 dependencies:
   - python=3.12
-  - resfinder=4.6.0
+  - resfinder=4.7.2

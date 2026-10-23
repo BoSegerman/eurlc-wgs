@@ -4,4 +4,6 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - fastmlst=0.0.16
+  - python>=3.7,<3.13
+  - fastmlst=0.0.19
+  

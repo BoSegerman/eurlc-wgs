@@ -110,11 +110,11 @@ my $ASSUME_YES = 0;
 my $S_SUPPRESS_STARTUP_LOG = 0;
 
 foreach my $arg (@ARGV) {
-    if ($arg eq "--assume-yes")                { $ASSUME_YES = 1; }
-    if ($arg eq "--setup")                     { $S_SUPPRESS_STARTUP_LOG = 1; }
-    if ($arg eq "--freeze-databases")          { $S_SUPPRESS_STARTUP_LOG = 1; }
-    if ($arg =~ /^--generate-seal/)            { $S_SUPPRESS_STARTUP_LOG = 1; }
-    if ($arg =~ /^--install-scheme/)           { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?assume-yes$/)               { $ASSUME_YES = 1; }
+    if ($arg =~ /^(?:--?)?setup$/)                    { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?freeze-databases(?:=|$)/)   { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?generate-seal(?:=|$)/)      { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?install-scheme(?:=|$)/)     { $S_SUPPRESS_STARTUP_LOG = 1; }
 }
 
 
@@ -410,6 +410,20 @@ my %data_key = (
     chewbbaca_per_sample_done => {
         check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{chewbbaca}{schemas} && @{ $R_samples->[$i]{results}{chewbbaca}{schemas} } ? 1 : 0; },
     },
+    multiqc_done => {
+        # multiqc is a batch-level step -- satisfied once the stage3 assembly QC
+        # report exists (stage1/stage2 may be absent for FASTA-only runs).
+        # Vacuously true per-sample once the batch report is written.
+        check => sub {
+            my $qc3_report = fill_placeholders("__DIR-QC3__/multiqc_report.html", "", "multiqc");
+            return (defined $qc3_report && -s $qc3_report) ? 1 : 0;
+        },
+    },
+    cleanup_done => {
+        # Vacuously satisfied -- the cleanup step has no file-based output to
+        # check. Marking it done via the postprocess return value is sufficient.
+        check => sub { return 0; },
+    },
 );
 
 ###################################################################################################
@@ -573,7 +587,10 @@ for my $key_name (qw(any_assembler_done any_mlst_done any_amr_done)) {
 $data_key{any_assembler_done} = {
     check => sub {
         my ($i) = @_;
-        for my $k (qw(spades_assembled shovill_assembled skesa_assembled unicycler_assembled)) {
+        # fasta_imported is the "assembler" for FASTA-type samples; it must
+        # be included here so select_main_assembly's requires gate is satisfied
+        # for FASTA samples (the four real assemblers never run for those).
+        for my $k (qw(spades_assembled shovill_assembled skesa_assembled unicycler_assembled fasta_imported)) {
             return 1 if exists $data_key{$k} && $data_key{$k}{check}->($i);
         }
         return 0;
@@ -1020,10 +1037,10 @@ $rundata{config}{defaults} = {
         # without needing to specify each companion file separately.
         #
         # Example: if eurlc-wgs.config is at /db/campy.config, the pipeline
-        # will look for /db/databases.config, /db/programs.config etc.
+        # will look for /db/db_freeze.config, /db/conda_manifest.ini etc.
         # unless overridden here.
-        databases_config => "databases.config",
-        programs_config  => "programs.config",
+        db_freeze_config => "db_freeze.config",
+        conda_manifest   => "conda_manifest.ini",
         seal             => "config_seal.ini",
 
         # Parallel execution mode (§ parallel scheduler).
@@ -1057,7 +1074,6 @@ $rundata{config}{defaults} = {
         parallel_default_ram_gb  => 999,
         overwrite  => "prompt",
         recursive  => 0,
-        keeplevel  => 2,   # 1=minimal … 4=keep everything
         verbose    => 0,
         fastq      => 1,   # analyze FASTQ input -- see --fastq/--fasta in the manual
         fasta      => 1,   # analyze FASTA input -- both default on; giving exactly
@@ -1101,6 +1117,30 @@ $rundata{config}{defaults} = {
         # changed. 0 disables the cache (always re-check). See
         # ensure_tool_version()/validation_cache_is_fresh().
         cache_max_age_days => 7,
+    },
+    cleanup => {
+        # Per-file-type cleanup after the pipeline completes.
+        # 1 = remove the files when the pipeline is done (saves disk).
+        # 0 = keep them.
+        #
+        # trimmed_fastq: fastp/trimmomatic output -- roughly the same size as
+        #   raw input. Not needed after assembly is done. Default: remove.
+        trimmed_fastq      => 1,
+        #
+        # downsampled_fastq: seqtk/bbmap/rasusa output (coverage-capped reads).
+        #   Not needed after assembly is done. Default: remove.
+        downsampled_fastq  => 1,
+        #
+        # jellyfish_db: the binary .jf k-mer database files produced by
+        #   jellyfish count. Only the histogram (.hist) is used by the pipeline
+        #   and is always kept. Default: remove (the histogram is kept regardless).
+        jellyfish_db       => 1,
+        #
+        # bam: remapping BAM and BAI files in results/qc/stage3_assembly/remapping/.
+        #   These are useful for visual inspection in IGV and to verify coverage,
+        #   but are large (comparable to raw input). They can also be used to
+        #   reconstruct FASTQ reads via `samtools fastq`. Default: keep.
+        bam                => 0,
     },
     md5 => {
             # Implemented via Digest::MD5 (core Perl) -- no external tool,
@@ -1433,26 +1473,7 @@ $rundata{config}{defaults} = {
     },
 
 
-    chewbbaca_schemas => {
-        pubmlst_campy_cg_v2 => {
-            enabled => 1,
-            species => "Campylobacter jejuni,Campylobacter coli",
-            path    => "__DB__/chewbbaca/schemas/pubmlst-C_jejuni_C_coli_cgMLST_V2",
-            filter  => "unfiltered",
-        },
-        cewie_NS_Escherichia_coli => {
-            enabled => 1,        
-            species => "Escherichia coli",
-            path    => "__DB__/chewbbaca/schemas/cewie_NS-Escherichia_coli",
-            filter  => "__DB__/chewbbaca/filters/cewie_NS-Escherichia_coli.txt",
-        },
-        cewie_NS_Listeria_monocytogenes => {
-            enabled => 1,        
-            species => "Listeria monocytogenes",
-            path    => "__DB__/chewbbaca/schemas/cewie_NS-Listeria_monocytogenes",
-            filter  => "unfiltered",
-        },
-    },
+    chewbbaca_schemas => {},  # populated at runtime by discover_installed_schemas()
 
     species => {
         "Campylobacter jejuni" => {
@@ -2003,7 +2024,8 @@ if (-f $rundata{config}{path}) {
         foreach my $section (keys %$cfg) {
             if ($section =~ /^chewbbaca_schema_(.+)$/i) {
                 # The schema's name comes from the SECTION TITLE itself
-                # (writedefaultconfigfile() writes "[chewbbaca_schema_<name>]"),
+                # (a user can add "[chewbbaca_schema_<name>]" to eurlc-wgs.config
+                # to override fields from schema.ini),
                 # not from a "name=" key inside the section -- there isn't one.
                 my $name = $1;
 
@@ -2116,15 +2138,23 @@ if (-f $rundata{config}{path}) {
 
 log_message("NOTICE: Configuration source: $rundata{config}{source}");
 
-# Resolve companion config file paths (databases_config, programs_config, seal)
+# Resolve companion config file paths (db_freeze_config, conda_manifest, seal)
 # relative to the main config file's directory. This means --config carries
 # the whole config tree automatically without extra parameters.
 {
-    my $config_dir = $rundata{config}{path} ne ""
-        ? File::Basename::dirname(abs_path($rundata{config}{path}))
-        : peekdir("db");
+    # Prefer db root as the base directory for companion config files.
+    # This keeps the entire configuration tree inside eurlc-wgs_db/ regardless
+    # of which directory the user is running from.
+    # abs_path() returns undef for non-existent paths (e.g. during --configfile=write
+    # before the config file has been created), which would make dirname() return '.'
+    # (the current working directory) -- exactly what we want to avoid.
+    my $config_dir = peekdir("db") || do {
+        $rundata{config}{path} ne "" && -f $rundata{config}{path}
+            ? File::Basename::dirname(abs_path($rundata{config}{path}))
+            : "."
+    };
 
-    for my $key (qw(databases_config programs_config seal)) {
+    for my $key (qw(db_freeze_config conda_manifest seal)) {
         my $val = $R_cfg->{general}{$key} // "";
         next if $val eq "";
         # Resolve relative paths against config dir; leave absolute paths alone
@@ -2135,7 +2165,7 @@ log_message("NOTICE: Configuration source: $rundata{config}{source}");
     }
 
     log_message("NOTICE: Config dir: $config_dir");
-    for my $key (qw(databases_config programs_config seal)) {
+    for my $key (qw(db_freeze_config conda_manifest seal)) {
         my $val   = $R_cfg->{general}{$key} // "";
         my $label = sprintf("%-20s", $key . ":");
         if ($val ne "" && -f $val) {
@@ -2146,6 +2176,27 @@ log_message("NOTICE: Configuration source: $rundata{config}{source}");
             log_message("NOTICE: $label (not configured)");
         }
     }
+}
+
+###################################################################################################
+## Discover chewBBACA schemas installed in db/chewbbaca/schemas/
+## Each sub-directory that contains a schema.ini is treated as an installed schema.
+## This runs after the config file is loaded so that a [chewbbaca_schema_<name>] section
+## in eurlc-wgs.config can still override individual fields (enabled, filter, etc.).
+{
+    my %discovered = discover_installed_schemas();
+    for my $schema_name (keys %discovered) {
+        my $disc = $discovered{$schema_name};
+        # Start from discovered values, then let any config-file overrides win
+        # (they were already merged into $R_cfg_schemas during config loading above).
+        for my $field (keys %$disc) {
+            $R_cfg->{chewbbaca_schemas}{$schema_name}{$field} //= $disc->{$field};
+        }
+        # Store the schema dir so filter resolution can find co-located filter files
+        $R_cfg->{chewbbaca_schemas}{$schema_name}{_schema_dir} //= $disc->{_schema_dir};
+    }
+    my $n = scalar keys %{ $R_cfg->{chewbbaca_schemas} };
+    log_message("INFO: chewBBACA schemas discovered: $n");
 }
 
 ###################################################################################################
@@ -2496,12 +2547,19 @@ my %early_handled_args = (
     "setup"            => 1,
     "freeze-databases" => 1,
     "generate-seal"    => 1,   # also matches --generate-seal=Name (prefix match below)
-    "install-scheme"   => 1,   # also matches --install-scheme=Species (prefix match below)
+    "install-scheme"   => 1,   # also matches --install-scheme=Species (prefix match below) [LEGACY alias]
+    "install-schema"   => 1,   # also matches --install-schema=Name (prefix match below)
+    "list-schemas"     => 1,   # list installed and available schemas
+    "import-schema"    => 1,   # also matches --import-schema=Dir (prefix match below)
+    "update-catalog"   => 1,   # also matches --update-catalog[=url]
 );
-# generate-seal=Name and install-scheme=Species are passed as keys with the =... suffix
+# generate-seal=Name and install-scheme/schema=Species are passed as keys with the =... suffix
 for my $key (keys %args_handled) {
     $early_handled_args{$key} = 1 if $key =~ /^generate-seal=/;
     $early_handled_args{$key} = 1 if $key =~ /^install-scheme=/;
+    $early_handled_args{$key} = 1 if $key =~ /^install-schema=/;
+    $early_handled_args{$key} = 1 if $key =~ /^import-schema=/;
+    $early_handled_args{$key} = 1 if $key =~ /^update-catalog/;
 }
 
 my @unknown_args;
@@ -2640,10 +2698,17 @@ if ( $R_cfg->{general}{archive_results} ) {
 ## no FASTQ/FASTA data is present (e.g. during installation or maintenance).
 
 {
-    my $found_setup  = grep { $_ eq "--setup" } @ARGV;
-    my ($found_freeze)  = grep { $_ eq "--freeze-databases" } @ARGV;
-    my ($found_seal)    = grep { /^--generate-seal/ } @ARGV;
-    my ($found_scheme)  = grep { /^--install-scheme/ } @ARGV;
+    # Use %args (prefix-normalised) rather than raw @ARGV so that
+    # --freeze-databases, -freeze-databases and freeze-databases all work.
+    # Value in %args is "" for a bare flag or the part after "=" for key=value.
+    my $found_setup          = exists $args{"setup"};
+    my $found_freeze         = exists $args{"freeze-databases"};
+    my $found_seal           = exists $args{"generate-seal"};
+    my $found_scheme         = exists $args{"install-scheme"};   # legacy alias
+    my $found_install_schema = exists $args{"install-schema"};
+    my $found_list_schemas   = exists $args{"list-schemas"};
+    my $found_import_schema  = exists $args{"import-schema"};
+    my $found_update_catalog = exists $args{"update-catalog"};
 
     if ($found_setup) {
         _cmd_setup();
@@ -2651,20 +2716,43 @@ if ( $R_cfg->{general}{archive_results} ) {
         exit 0;
     }
     if ($found_freeze) {
-        _cmd_freeze_databases();
+        my $freeze_filter = $args{"freeze-databases"};   # "" = all, "kraken2,mash" = filter
+        $freeze_filter = undef if $freeze_filter eq "";
+        _cmd_freeze_databases($freeze_filter);
         close_logfile();
         exit 0;
     }
     if ($found_seal) {
-        ($found_seal) = $found_seal =~ /^--generate-seal(?:=(.+))?$/;
-        my $seal_name = $found_seal // ("config-" . strftime("%Y%m%d-%H%M%S", localtime));
+        my $seal_name = $args{"generate-seal"};
+        $seal_name = "config-" . strftime("%Y%m%d-%H%M%S", localtime) if $seal_name eq "";
         _cmd_generate_seal($seal_name);
         close_logfile();
         exit 0;
     }
-    if ($found_scheme) {
-        my ($species_arg) = $found_scheme =~ /^--install-scheme(?:=(.+))?$/;
-        _cmd_install_scheme($species_arg);
+    if ($found_list_schemas) {
+        _cmd_list_schemas();
+        close_logfile();
+        exit 0;
+    }
+    if ($found_install_schema || $found_scheme) {
+        # --install-schema is the new name; --install-scheme is a legacy alias
+        my $schema_arg = $found_install_schema ? $args{"install-schema"} : $args{"install-scheme"};
+        $schema_arg = undef if defined $schema_arg && $schema_arg eq "";
+        _cmd_install_schema($schema_arg);
+        close_logfile();
+        exit 0;
+    }
+    if ($found_import_schema) {
+        my $dir_arg = $args{"import-schema"};
+        $dir_arg = undef if defined $dir_arg && $dir_arg eq "";
+        _cmd_import_schema($dir_arg);
+        close_logfile();
+        exit 0;
+    }
+    if ($found_update_catalog) {
+        my $url_arg = $args{"update-catalog"};
+        $url_arg = undef if defined $url_arg && $url_arg eq "";
+        _cmd_update_catalog($url_arg);
         close_logfile();
         exit 0;
     }
@@ -3744,31 +3832,31 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/kraken2-__BASE__.report 
        --threads __THREADS__ 
-       --db $R_cfg->{kraken2}{db_path} 
-       --paired __OUTDIR__/tmpR1.fastq.gz __OUTDIR__/tmpR2.fastq.gz 
-       > __OUTDIR__/tmp.krakenout.txt 
+       --db __KRAKENDB__
+       --paired __OUTDIR__/tmpR1.fastq.gz __OUTDIR__/tmpR2.fastq.gz
+       > __OUTDIR__/tmp.krakenout.txt
        __HIDE-STDERR__
-    __NEWCOMMAND__ 
+    __NEWCOMMAND__
     rm __OUTDIR__/tmpR1.fastq.gz
-    __NEWCOMMAND__ 
+    __NEWCOMMAND__
     rm __OUTDIR__/tmpR2.fastq.gz
-    __NEWCOMMAND__ 
+    __NEWCOMMAND__
     rm __OUTDIR__/tmp.krakenout.txt
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{bracken}->{db_path} 
-       -i __OUTDIR__/kraken2-__BASE__.report  
-       -o __OUTDIR__/__BASE__.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/kraken2-__BASE__.report
+       -o __OUTDIR__/__BASE__.bracken
+       -r __READLEN__
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{bracken}->{db_path} 
-       -i __OUTDIR__/kraken2-__BASE__.report  
-       -o __OUTDIR__/__BASE__.genus.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/kraken2-__BASE__.report
+       -o __OUTDIR__/__BASE__.genus.bracken
+       -r __READLEN__
        -l G
-       __HIDE-OUTPUT__       
+       __HIDE-OUTPUT__
 CMD
 
 
@@ -3778,40 +3866,40 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/kraken2-__BASE__.report 
        --threads __THREADS__ 
-       --db $R_cfg->{kraken2}{db_path} 
-       __OUTDIR__/tmpSE.fastq.gz  
-       > __OUTDIR__/tmp.krakenout.txt 
+       --db __KRAKENDB__
+       __OUTDIR__/tmpSE.fastq.gz
+       > __OUTDIR__/tmp.krakenout.txt
        __HIDE-STDERR__
-    __NEWCOMMAND__ 
+    __NEWCOMMAND__
     rm __OUTDIR__/tmpSE.fastq.gz
-    __NEWCOMMAND__ 
+    __NEWCOMMAND__
     rm __OUTDIR__/tmp.krakenout.txt
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{bracken}->{db_path} 
-       -i __OUTDIR__/kraken2-__BASE__.report 
-       -o __OUTDIR__/__BASE__.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/kraken2-__BASE__.report
+       -o __OUTDIR__/__BASE__.bracken
+       -r __READLEN__
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{bracken}->{db_path} 
-       -i __OUTDIR__/kraken2-__BASE__.report 
-       -o __OUTDIR__/__BASE__.genus.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/kraken2-__BASE__.report
+       -o __OUTDIR__/__BASE__.genus.bracken
+       -r __READLEN__
        -l G
-       __HIDE-OUTPUT__       
+       __HIDE-OUTPUT__
 CMD
 
 $runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{kraken2}->{env}  --no-capture-output kraken2 
-       --report __OUTDIR__/kraken2-__BASE__.report 
+    conda run -n $R_cfg->{kraken2}->{env}  --no-capture-output kraken2
+       --report __OUTDIR__/kraken2-__BASE__.report
        --threads __THREADS__  
-       --db $R_cfg->{kraken2}{db_path} 
-       __FASTA__  
-       > __OUTDIR__/tmp.krakenout.txt 
+       --db __KRAKENDB__
+       __FASTA__
+       > __OUTDIR__/tmp.krakenout.txt
        __HIDE-STDERR__
-    __NEWCOMMAND__ 
+    __NEWCOMMAND__
     rm __OUTDIR__/tmp.krakenout.txt
 CMD
 
@@ -4025,11 +4113,16 @@ sub postprocess_find_species_kraken2 {
 
 
 sub test_db_kraken2{
-  my $testfile_krakendb = fill_placeholders( normalize_path($R_cfg->{kraken2}->{db_path}) . "/hash.k2d" ) ;
-  if( !(-f $testfile_krakendb) ){
-     return 0;
+  # Use db_test if set (resolve_and_verify_databases updates it to the frozen path).
+  # Fall back to db_path + hash.k2d for backwards compatibility.
+  my $testfile_krakendb;
+  my $db_test = $R_cfg->{kraken2}{db_test} // "";
+  if ($db_test ne "") {
+      $testfile_krakendb = fill_placeholders($db_test);
+  } else {
+      $testfile_krakendb = fill_placeholders( normalize_path($R_cfg->{kraken2}->{db_path}) . "/hash.k2d" );
   }
-  return 1;
+  return (-f $testfile_krakendb) ? 1 : 0;
 }
 
 ##
@@ -4433,6 +4526,14 @@ sub run_jellyfish {
 
     execute_and_log("$count_cmd ; $histo_cmd", 0, "Estimating genomesize from k-mer profiles (jellyfish)");
 
+    # The .jf binary database is only needed to produce the histogram.
+    # Remove it unconditionally once the histogram is written -- it is
+    # never used downstream and can be several hundred MB per sample.
+    if (-f $jf_file) {
+        unlink $jf_file
+            or log_message("WARNING: Could not remove jellyfish database [$jf_file]: $!");
+        log_message("INFO: Removed jellyfish k-mer database [$jf_file] (histogram kept)");
+    }
 
     return $hist_file;
 }
@@ -6399,108 +6500,108 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/__BASE__.kraken2.txt 
        --threads __THREADS__ 
-       --db $R_cfg->{kraken2}->{db_path} 
-       --paired '__R1TD__' '__R2TD__' 
-       > __OUTDIR__/__BASE__.krakenout.txt 
+       --db __KRAKENDB__
+       --paired '__R1TD__' '__R2TD__'
+       > __OUTDIR__/__BASE__.krakenout.txt
        __HIDE-STDERR__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py 
-       -r __OUTDIR__/__BASE__.kraken2.txt 
-       -o __OUTDIR__/__BASE__.krona_input 
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
+       -r __OUTDIR__/__BASE__.kraken2.txt
+       -o __OUTDIR__/__BASE__.krona_input
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText 
-       __OUTDIR__/__BASE__.krona_input 
-       -o __OUTDIR__/__BASE__.krona_kraken2.html 
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText
+       __OUTDIR__/__BASE__.krona_input
+       -o __OUTDIR__/__BASE__.krona_kraken2.html
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{bracken}->{db_path} 
-       -i __OUTDIR__/__BASE__.kraken2.txt 
-       -o __OUTDIR__/__BASE__.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/__BASE__.kraken2.txt
+       -o __OUTDIR__/__BASE__.bracken
+       -r __READLEN__
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{bracken}->{db_path} 
-       -i __OUTDIR__/__BASE__.kraken2.txt 
-       -o __OUTDIR__/__BASE__.genus.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/__BASE__.kraken2.txt
+       -o __OUTDIR__/__BASE__.genus.bracken
+       -r __READLEN__
        -l G
-       __HIDE-OUTPUT__ 
-     __NEWCOMMAND__    
-     rm __OUTDIR__/__BASE__.krakenout.txt      
-     __NEWCOMMAND__   
-    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py 
-       -r __OUTDIR__/__BASE__.kraken2_bracken_species.txt 
-       -o __OUTDIR__/__BASE__.bracken_species_krona_input 
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText 
-       __OUTDIR__/__BASE__.bracken_species_krona_input 
-       -o __OUTDIR__/__BASE__.krona_bracken_species.html 
+     __NEWCOMMAND__
+     rm __OUTDIR__/__BASE__.krakenout.txt
+     __NEWCOMMAND__
+    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
+       -r __OUTDIR__/__BASE__.kraken2_bracken_species.txt
+       -o __OUTDIR__/__BASE__.bracken_species_krona_input
        __HIDE-OUTPUT__
-        __NEWCOMMAND__      
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText
+       __OUTDIR__/__BASE__.bracken_species_krona_input
+       -o __OUTDIR__/__BASE__.krona_bracken_species.html
+       __HIDE-OUTPUT__
+        __NEWCOMMAND__
 CMD
 
 $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
-       --report __OUTDIR__/__BASE__.kraken2.txt 
-       --threads __THREADS__ 
-       --db $R_cfg->{kraken2}->{db_path} 
-       '__SETD__'  
-       > __OUTDIR__/__BASE__.krakenout.txt 
+    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2
+       --report __OUTDIR__/__BASE__.kraken2.txt
+       --threads __THREADS__
+       --db __KRAKENDB__
+       '__SETD__'
+       > __OUTDIR__/__BASE__.krakenout.txt
        __HIDE-STDERR__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py 
-       -r __OUTDIR__/__BASE__.kraken2.txt 
-       -o __OUTDIR__/__BASE__.krona_input 
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
+       -r __OUTDIR__/__BASE__.kraken2.txt
+       -o __OUTDIR__/__BASE__.krona_input
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText 
-       __OUTDIR__/__BASE__.krona_input 
-       -o __OUTDIR__/__BASE__.krona_kraken2.html 
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText
+       __OUTDIR__/__BASE__.krona_input
+       -o __OUTDIR__/__BASE__.krona_kraken2.html
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{kraken2}->{db_path} 
-       -i __OUTDIR__/__BASE__.kraken2.txt 
-       -o __OUTDIR__/__BASE__.bracken 
-       -r __READLEN__  
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/__BASE__.kraken2.txt
+       -o __OUTDIR__/__BASE__.bracken
+       -r __READLEN__
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken 
-       -d $R_cfg->{kraken2}->{db_path} 
-       -i __OUTDIR__/__BASE__.kraken2.txt 
-       -o __OUTDIR__/__BASE__.genus.bracken 
-       -r __READLEN__ 
-       -l G 
-       __HIDE-OUTPUT__       
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
+       -d __BRACKENDB__
+       -i __OUTDIR__/__BASE__.kraken2.txt
+       -o __OUTDIR__/__BASE__.genus.bracken
+       -r __READLEN__
+       -l G
+       __HIDE-OUTPUT__
     __NEWCOMMAND__
        rm __OUTDIR__/__BASE__.krakenout.txt
-        __NEWCOMMAND__   
-    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py 
-       -r __OUTDIR__/__BASE__.kraken2_bracken_species.txt 
-       -o __OUTDIR__/__BASE__.bracken_species_krona_input 
+        __NEWCOMMAND__
+    conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
+       -r __OUTDIR__/__BASE__.kraken2_bracken_species.txt
+       -o __OUTDIR__/__BASE__.bracken_species_krona_input
        __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText 
-       __OUTDIR__/__BASE__.bracken_species_krona_input 
-       -o __OUTDIR__/__BASE__.krona_bracken_species.html 
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{krona}->{env} --no-capture-output ktImportText
+       __OUTDIR__/__BASE__.bracken_species_krona_input
+       -o __OUTDIR__/__BASE__.krona_bracken_species.html
        __HIDE-OUTPUT__
-        __NEWCOMMAND__   
+        __NEWCOMMAND__
 CMD
 
-$runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);   
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
-       --report __OUTDIR__/__BASE__.kraken2.txt 
-       --threads __THREADS__ 
-       --db $R_cfg->{kraken2}{db_path} 
-       __FASTA__  
-       > __OUTDIR__/tmp.krakenout.txt 
+$runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
+    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2
+       --report __OUTDIR__/__BASE__.kraken2.txt
+       --threads __THREADS__
+       --db __KRAKENDB__
+       __FASTA__
+       > __OUTDIR__/tmp.krakenout.txt
        __HIDE-STDERR__
        __NEWCOMMAND__
-       rm __OUTDIR__/tmp.krakenout.txt   
+       rm __OUTDIR__/tmp.krakenout.txt
 CMD
 
 # TEST---------------------------------
@@ -9725,8 +9826,8 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{bakta}->{env} --no-capture-output bakta 
        --threads __THREADS__ 
        --output __OUTDIR__ 
-       --db $R_cfg->{bakta}->{db_path} 
-       __DIR-ASSEMBLIES__/__BASE__.fasta 
+       --db __BAKTADB__
+       __DIR-ASSEMBLIES__/__BASE__.fasta
        __HIDE-OUTPUT__
 CMD
 
@@ -11122,10 +11223,10 @@ CMD
 $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{resfinder}->{env} --no-capture-output run_resfinder.py 
        -o __OUTDIR__ 
-       --db_path_res $R_cfg->{resfinder}->{"db_path"}/resfinder_db 
+       --db_path_res __RESFINDERDB__/resfinder_db
        __POINTDB__
-       $R_cfg->{resfinder}->{arguments} 
-       -ifq '__SETD__' 
+       $R_cfg->{resfinder}->{arguments}
+       -ifq '__SETD__'
        __HIDE-OUTPUT__
 CMD
 
@@ -11134,10 +11235,10 @@ $runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{resfinder}->{env} --no-capture-output run_resfinder.py 
        -o __OUTDIR__
        -s __RESFINDER-SPECIES__
-       --db_path_res $R_cfg->{resfinder}->{db_path}/resfinder_db
+       --db_path_res __RESFINDERDB__/resfinder_db
        __POINTDB__
-       $R_cfg->{resfinder}->{arguments} 
-       -ifa __DIR-ASSEMBLIES__/__BASE__.fasta 
+       $R_cfg->{resfinder}->{arguments}
+       -ifa __DIR-ASSEMBLIES__/__BASE__.fasta
        __HIDE-OUTPUT__
 CMD
 
@@ -11339,10 +11440,10 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     conda run -n $R_cfg->{resfinder}->{env} --no-capture-output run_resfinder.py 
        -o __OUTDIR__
        -s __RESFINDER-SPECIES__
-       --db_path_res $R_cfg->{resfinder}->{db_path}/resfinder_db
+       --db_path_res __RESFINDERDB__/resfinder_db
        __POINTDB__
-       $R_cfg->{resfinder}->{arguments} 
-       -ifa __DIR-ASSEMBLIES__/__BASE__.fasta 
+       $R_cfg->{resfinder}->{arguments}
+       -ifa __DIR-ASSEMBLIES__/__BASE__.fasta
        __HIDE-OUTPUT__
 CMD
 
@@ -12338,6 +12439,13 @@ sub preprocess_chewbbaca {
                next;
             }
 
+            # Ensure schema is prepared (short/ + BLAST indices exist).
+            # PrepExternalSchema is run automatically if needed.
+            unless (ensure_schema_prepared($schema_path, $schema_name)) {
+                log_message("WARNING: Skipping schema [$schema_name] -- could not prepare it.", "yellow");
+                next;
+            }
+
             $command_part = fill_placeholders($command_part, "", $runstep_name);
 
             # Determine output and result file paths
@@ -12638,7 +12746,7 @@ sub postprocess_chewbbaca {
 
                    my $outdir = getdir("out");
                    my $schema = $schema_dirname;
-                    
+
                    # out_prefix is treated as a literal FILENAME prefix by
                    # compute_chewbbaca_distance_matrix (writes
                    # "$out_prefix.dist.tsv"/".success.tsv", no separator
@@ -12647,8 +12755,21 @@ sub postprocess_chewbbaca {
                    # rather than as a sibling of it.
                    my $matrix_prefix = "$per_batch_dir/$schema_dirname";
 
-                   my $matrix_ref = compute_chewbbaca_distance_matrix(
+                   # Build a CRC32-hashed version of $result_ref to use for
+                   # distance calculation.  Raw allele IDs from chewBBACA use
+                   # multiple notations for the same allele (e.g. INF-*488
+                   # and *488 are the same sequence, just called at different
+                   # novelty states).  CRC32 hashing is sequence-based and
+                   # therefore immune to all such format variations -- making
+                   # it the robust choice for pairwise comparison.
+                   my $crc32_result_ref = build_crc32_result_ref(
                        $result_ref,
+                       "$hashed_results_path/results_alleles_crc32.tsv",
+                   );
+                   my $dist_input_ref = $crc32_result_ref // $result_ref;
+
+                   my $matrix_ref = compute_chewbbaca_distance_matrix(
+                       $dist_input_ref,
                        report_distance    => 10,
                        report_pct_success => 0.85,
                        out_prefix         => $matrix_prefix,
@@ -13345,6 +13466,214 @@ $runstep{$runstep_name} = {
 # TEST---------------------------------
 $runstep{$runstep_name}{test} = \&test_chewbbaca;   # same conda tool, shared test
 
+# ensure_schema_prepared($schema_path, $schema_name)
+# ---------------------------------------------------
+# Checks whether a chewBBACA schema directory has been prepared for use
+# (i.e. the short/ subdirectory exists and contains FASTA files).
+# If not, runs PrepExternalSchema automatically.
+#
+# chewBBACA requires the schema to be "prepared" (BLAST databases + short
+# allele files generated) before AlleleCall can run.  This preparation is
+# NOT done automatically by AlleleCall -- without it the run will fail with
+# a BLAST database error.
+#
+# Training file (.trn) resolution order:
+#   1. First .trn file found directly in the schema directory
+#   2. First .trn file found anywhere under the db chewbbaca/ tree
+#   3. Omitted -- Prodigal will run in meta-mode (suboptimal but won't crash)
+#
+# Returns 1 if the schema is (now) prepared, 0 on failure.
+#
+sub ensure_schema_prepared {
+    my ($schema_path, $schema_name) = @_;
+    $schema_name //= basename($schema_path);
+
+    # ── Already prepared? ──────────────────────────────────────────────────────
+    my $short_dir = "$schema_path/short";
+    my @short_fastas = glob("$short_dir/*.fasta");
+    if (-d $short_dir && @short_fastas) {
+        return 1;   # nothing to do
+    }
+
+    log_message("NOTICE: chewBBACA schema [$schema_name] is not prepared (short/ directory missing or empty).");
+    log_message("NOTICE: Running PrepExternalSchema automatically -- this may take a few minutes...");
+
+    # ── Locate training file ───────────────────────────────────────────────────
+    my $ptf_arg = "";
+    my @trn_in_schema = glob("$schema_path/*.trn");
+    if (@trn_in_schema) {
+        my $ptf = $trn_in_schema[0];
+        $ptf_arg = "--ptf \"$ptf\"";
+        log_message("NOTICE: Using training file: $ptf");
+    } else {
+        # Try the broader chewbbaca db tree
+        my $chewbbaca_db = File::Spec->catdir(peekdir("db") // "", "chewbbaca");
+        my @trn_global   = glob("$chewbbaca_db/*.trn");
+        if (@trn_global) {
+            my $ptf = $trn_global[0];
+            $ptf_arg = "--ptf \"$ptf\"";
+            log_message("NOTICE: Using training file from chewbbaca db root: $ptf");
+        } else {
+            log_message("WARNING: No .trn training file found for schema [$schema_name].", "yellow");
+            log_message("WARNING: Prodigal will run in meta-mode -- results may be less accurate.", "yellow");
+            log_message("WARNING: Place a species-specific .trn file in $schema_path to fix this.", "yellow");
+        }
+    }
+
+    # ── Get thread count ───────────────────────────────────────────────────────
+    my $threads = $R_cfg->{general}{threads} // 4;
+
+    # ── Run PrepExternalSchema in-place ───────────────────────────────────────
+    # --no-cleanup keeps the original allele files (important for existing schemas).
+    # Output goes to a temp dir, then we merge short/ and *.py back into the schema.
+    my $chewy_env = $R_cfg->{chewbbaca}{env} // "chewbbaca";
+    my $prep_out  = "${schema_path}_prep_tmp_$$";
+
+    my $prep_cmd = "conda run -n $chewy_env --no-capture-output chewBBACA.py PrepExternalSchema"
+                 . " -g \"$schema_path\""
+                 . " -o \"$prep_out\""
+                 . " $ptf_arg"
+                 . " --cpu $threads";
+
+    log_message("NOTICE: $prep_cmd");
+    my $rc = system($prep_cmd);
+
+    if ($rc != 0) {
+        log_message("ERROR: PrepExternalSchema failed (exit code " . ($rc >> 8) . ") for schema [$schema_name].", "red");
+        log_message("ERROR: AlleleCall will likely fail. Check the schema directory: $schema_path", "red");
+    }
+
+    # chewBBACA 3.x PrepExternalSchema writes short/ directly into the source
+    # schema dir (-g), not exclusively into the -o output dir.
+    # First check if short/ is now present in the original schema dir.
+    # If not, try to merge relevant files from the prep output (older behavior).
+    my @post_short = glob("$short_dir/*.fasta");
+    if (!@post_short && -d $prep_out) {
+        my $prep_inner = "$prep_out/" . basename($schema_path);
+        $prep_inner    = -d $prep_inner ? $prep_inner : $prep_out;
+
+        for my $item (glob("$prep_inner/*")) {
+            my $bn   = basename($item);
+            my $dest = "$schema_path/$bn";
+            system("rm -rf \"\Q$dest\E\"") if -e $dest;
+            rename($item, $dest)
+                or log_message("WARNING: Could not move $item -> $dest: $!", "yellow");
+        }
+        @post_short = glob("$short_dir/*.fasta");
+    }
+
+    # Clean up prep output directory and chewBBACA's sidecar files
+    system("rm -rf \"\Q$prep_out\E\"")                if -d $prep_out;
+    unlink "${prep_out}_invalid_loci.txt"              if -f "${prep_out}_invalid_loci.txt";
+    unlink "${prep_out}_invalid_alleles.txt"           if -f "${prep_out}_invalid_alleles.txt";
+    unlink "${prep_out}_summary_stats.tsv"             if -f "${prep_out}_summary_stats.tsv";
+
+    return 0 if $rc != 0;
+
+    # Verify
+    if (@post_short) {
+        log_message("NOTICE: ✓ Schema [$schema_name] prepared successfully.", "green");
+        return 1;
+    } else {
+        log_message("ERROR: PrepExternalSchema ran but short/ still missing in $schema_path", "red");
+        return 0;
+    }
+}
+
+# discover_installed_schemas()
+# ----------------------------
+# Scans db/chewbbaca/schemas/*/schema.ini and returns a hash of
+#   schema_name => { species, path, filter, enabled, source, _schema_dir, ... }
+#
+# schema.ini format (INI, section [schema]):
+#   name         = pubmlst_campy_cg_v2        ; if omitted, dirname is used
+#   species      = Campylobacter jejuni, Campylobacter coli
+#   source       = pubmlst                     ; pubmlst | chewie-ns | cgmlst.org | custom
+#   source_url   = https://...
+#   version      = 2
+#   description  = cgMLST schema for Campylobacter
+#   filter       = filter.txt                  ; relative to schema dir, or "unfiltered"
+#   enabled      = 1
+#
+# filter field resolution:
+#   "unfiltered" or ""  → no filter
+#   relative path       → resolved against the schema directory
+#   absolute path       → used as-is
+#
+sub discover_installed_schemas {
+    my $schemas_root = File::Spec->catdir(peekdir("db") // "", "chewbbaca", "schemas");
+    my %found;
+
+    return %found unless defined $schemas_root && -d $schemas_root;
+
+    opendir(my $dh, $schemas_root) or do {
+        log_message("WARNING: Could not open schemas directory [$schemas_root]: $!");
+        return %found;
+    };
+
+    for my $entry (readdir $dh) {
+        next if $entry =~ /^\./;
+        my $schema_dir = File::Spec->catdir($schemas_root, $entry);
+        next unless -d $schema_dir;
+
+        my $ini_file = File::Spec->catfile($schema_dir, "schema.ini");
+        unless (-f $ini_file) {
+            # Directory exists but has no schema.ini -- not a registered schema
+            log_message("INFO: Skipping $entry (no schema.ini found)");
+            next;
+        }
+
+        my $ini = read_ini_file($ini_file);
+        unless ($ini && ref $ini eq 'HASH') {
+            log_message("WARNING: Could not parse schema.ini in [$schema_dir]");
+            next;
+        }
+
+        # Support both [schema] and bare key=value at root level
+        my $s = $ini->{schema} // $ini->{''} // {};
+
+        # Derive schema name: from ini "name" field, else from directory name
+        my $schema_name = $s->{name} // $entry;
+        $schema_name =~ s/\s+/_/g;  # normalise spaces to underscores
+
+        # Derive path: always the directory itself (schema files live directly in it)
+        my $path = $schema_dir;
+
+        # Resolve filter path
+        my $filter = $s->{filter} // "";
+        if ($filter ne "" && $filter ne "unfiltered") {
+            unless (File::Spec->file_name_is_absolute($filter)) {
+                # Relative path → resolve against schema dir
+                $filter = File::Spec->catfile($schema_dir, $filter);
+            }
+        }
+
+        my $enabled = $s->{enabled} // 1;
+        if (defined $enabled && ($enabled eq "0" || lc($enabled) eq "false" || lc($enabled) eq "no")) {
+            $enabled = 0;
+        } else {
+            $enabled = 1;
+        }
+
+        $found{$schema_name} = {
+            species     => $s->{species}     // "",
+            path        => $path,
+            filter      => $filter,
+            enabled     => $enabled,
+            source      => $s->{source}      // "custom",
+            source_url  => $s->{source_url}  // "",
+            version     => $s->{version}     // "",
+            description => $s->{description} // "",
+            _schema_dir => $schema_dir,      # internal; not written to config
+        };
+
+        log_message("INFO: Discovered chewBBACA schema: [$schema_name] in [$schema_dir]");
+    }
+
+    closedir $dh;
+    return %found;
+}
+
 # Returns the list of (schema_dirname, schema_path, filtercommand) triples
 # matching this sample's species -- the per-sample equivalent of
 # preprocess_chewbbaca's species/schema matching loop, reused identically
@@ -13406,6 +13735,13 @@ sub preprocess_chewbbaca_per_sample {
 
         if (! -d $s->{schema_path}) {
             log_message("WARNING: Chewbbaca schema path is not valid for schema $s->{schema_name} [$s->{schema_path}], skipping...", "yellow");
+            next;
+        }
+
+        # Ensure schema is prepared (short/ + BLAST indices exist).
+        # PrepExternalSchema is run automatically if needed.
+        unless (ensure_schema_prepared($s->{schema_path}, $s->{schema_name})) {
+            log_message("WARNING: Skipping schema [$s->{schema_name}] for sample $sample_name -- could not prepare it.", "yellow");
             next;
         }
 
@@ -13898,9 +14234,15 @@ sub preprocess_multiqc {
         $qc3_report,
     ];
 
-    # Skip if all expected reports already exist
-    if (-s $qc1_report && -s $qc2_report && -s $qc3_report) {
-        log_message("NOTICE: Skipping $runstep_name, all MultiQC reports already exist");
+    # Skip if all expected reports already exist.
+    # For FASTA-only runs stage1/stage2 reports are never produced, so only
+    # require qc3 in that case.
+    my $has_fastq = grep { ($_->{type} // '') ne 'FASTA' } @$R_samples;
+    my $already_done = $has_fastq
+        ? (-s $qc1_report && -s $qc2_report && -s $qc3_report)
+        : (-s $qc3_report);
+    if ($already_done) {
+        log_message("NOTICE: Skipping $runstep_name, all expected MultiQC reports already exist");
         postprocess_multiqc();
         return "";
     }
@@ -13918,10 +14260,29 @@ sub postprocess_multiqc {
 
     my $R_resultfiles = $runstep{$runstep_name}{resultfiles} || [];
 
-    foreach my $file (@$R_resultfiles) {
+    # Stage 1 (raw-read QC) and stage 2 (trimmed-read QC) have no input for
+    # FASTA-type samples, so MultiQC produces no report for those stages in
+    # FASTA-only runs.  Only warn when a report is missing AND at least one
+    # sample in the batch actually had FASTQ data to feed into that stage.
+    my $has_fastq_samples = grep { ($_->{type} // '') ne 'FASTA' } @$R_samples;
+
+    my $qc1_report = fill_placeholders("__DIR-QC1__/multiqc_report.html", "", $runstep_name);
+    my $qc2_report = fill_placeholders("__DIR-QC2__/multiqc_report.html", "", $runstep_name);
+    my $qc3_report = fill_placeholders("__DIR-QC3__/multiqc_report.html", "", $runstep_name);
+
+    for my $entry (
+        [ $qc1_report, $has_fastq_samples, "stage 1 (raw-read QC)"    ],
+        [ $qc2_report, $has_fastq_samples, "stage 2 (trimmed-read QC)"],
+        [ $qc3_report, 1,                  "stage 3 (assembly QC)"    ],
+    ) {
+        my ($file, $expected, $label) = @$entry;
         if (!defined $file || !-s $file) {
-            log_message("WARNING: Expected MultiQC result file missing or empty: [$file]");
-            return 0;
+            if ($expected) {
+                log_message("WARNING: Expected MultiQC result file missing or empty: [$file]");
+                return 0;
+            } else {
+                log_message("INFO: MultiQC $label report not produced (no FASTQ samples in this run) -- skipping [$file]");
+            }
         }
     }
 
@@ -13947,6 +14308,108 @@ for (my $samplenr = 0; $samplenr < @$R_samples; $samplenr++) {
     return 1;
 }
 
+
+## runstep cleanup
+
+$runstep_name = "cleanup";
+
+$runstep{$runstep_name} = {
+      resources  => { threads => 1, ram_gb => 1 },
+      message    => "Cleaning up intermediate files...",
+      long_name  => "Cleanup intermediate files",
+      output_dir => "",
+      resultfile => "",
+      resultfiles_status => "NA",
+
+      # Runs once, at the very end, after everything else is done.
+      # Per-filetype removal is controlled by [cleanup] in the config.
+      requires   => [ 'multiqc_done' ],
+      produces   => [ 'cleanup_done' ],
+      applies_if => sub { return 1; },
+};
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_cleanup;
+
+sub preprocess_cleanup {
+    my $runstep_name = "cleanup";
+    log_message("INFO: Starting $runstep_name step");
+    return "";   # no external command -- all work is done in postprocess
+}
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_cleanup;
+
+sub postprocess_cleanup {
+    my $cfg = $R_cfg->{cleanup} // {};
+
+    # ── Jellyfish .jf databases ──────────────────────────────────────────────
+    # Removed unconditionally in run_jellyfish() right after the histogram is
+    # written, so there is nothing to do here.
+
+    # ── Trimmed FASTQ ────────────────────────────────────────────────────────
+    if ($cfg->{trimmed_fastq} // 1) {
+        my $trimmed_dir = getdir("out,large_files,fastq,trimmed");
+        if (defined $trimmed_dir && -d $trimmed_dir) {
+            my $removed = _cleanup_fastq_dir($trimmed_dir, "trimmed FASTQ");
+            log_message("INFO: Cleanup: removed $removed trimmed FASTQ file(s) from [$trimmed_dir]");
+        }
+    } else {
+        log_message("INFO: Cleanup: keeping trimmed FASTQ files (cleanup.trimmed_fastq = 0)");
+    }
+
+    # ── Downsampled FASTQ ────────────────────────────────────────────────────
+    if ($cfg->{downsampled_fastq} // 1) {
+        my $td_dir = getdir("out,large_files,fastq,trimmed_downsampled");
+        if (defined $td_dir && -d $td_dir) {
+            my $removed = _cleanup_fastq_dir($td_dir, "downsampled FASTQ");
+            log_message("INFO: Cleanup: removed $removed downsampled FASTQ file(s) from [$td_dir]");
+        }
+    } else {
+        log_message("INFO: Cleanup: keeping downsampled FASTQ files (cleanup.downsampled_fastq = 0)");
+    }
+
+    # ── BAM / BAI ────────────────────────────────────────────────────────────
+    if ($cfg->{bam} // 0) {
+        my $remap_base = fill_placeholders("__DIR-QC3__/remapping", "", $runstep_name);
+        if (defined $remap_base && -d $remap_base) {
+            my $removed = 0;
+            for my $sample (@$R_samples) {
+                my $base = $sample->{base} // "";
+                next unless $base;
+                for my $ext (qw(.sorted.bam .sorted.bam.bai)) {
+                    my $f = "$remap_base/$base/$base$ext";
+                    next unless -f $f;
+                    if (unlink $f) { $removed++ }
+                    else { log_message("WARNING: Cleanup: could not remove [$f]: $!") }
+                }
+            }
+            log_message("INFO: Cleanup: removed $removed BAM/BAI file(s) from [$remap_base]");
+        }
+    } else {
+        log_message("INFO: Cleanup: keeping BAM files (cleanup.bam = 0)");
+    }
+
+    return 1;
+}
+
+# Helper: removes all .fastq.gz and .fastq files from a directory.
+# Returns the count of files removed.
+sub _cleanup_fastq_dir {
+    my ($dir, $label) = @_;
+    my $removed = 0;
+    opendir(my $dh, $dir) or do {
+        log_message("WARNING: Cleanup: could not open $label directory [$dir]: $!");
+        return 0;
+    };
+    while (my $entry = readdir $dh) {
+        next unless $entry =~ /\.fastq(\.gz)?$/i;
+        my $path = "$dir/$entry";
+        next unless -f $path;
+        if (unlink $path) { $removed++ }
+        else { log_message("WARNING: Cleanup: could not remove $label file [$path]: $!") }
+    }
+    closedir $dh;
+    return $removed;
+}
 
 ###################################################################################################
 ###################################################################################################
@@ -14060,11 +14523,11 @@ log_message("NOTICE: Collecting and documenting version info for the pipeline.")
 
 my $softwareversions = log_tool_versions("enabled",getdir("out,log"));
 
-# Verify database manifest (databases.config). Runs after tool version
+# Verify database manifest (db_freeze.config). Runs after tool version
 # logging so all version info is grouped in the same startup section.
 # Logs results to log/versioning_explicit/databases.log every run.
 {
-    my $db_config_path = $R_cfg->{general}{databases_config} // "";
+    my $db_config_path = $R_cfg->{general}{db_freeze_config} // "";
     if ($db_config_path ne "" && -f $db_config_path) {
         log_message("NOTICE: Resolving database paths from manifest: $db_config_path");
         my $dbs = load_databases_config($db_config_path);
@@ -14077,14 +14540,14 @@ my $softwareversions = log_tool_versions("enabled",getdir("out,log"));
                 log_message("NOTICE: All databases resolved OK");
             }
         } else {
-            log_message("WARNING: databases.config is empty or could not be parsed: $db_config_path", "yellow");
+            log_message("WARNING: db_freeze.config is empty or could not be parsed: $db_config_path", "yellow");
         }
     }
 
-    my $prog_config_path = $R_cfg->{general}{programs_config} // "";
+    my $prog_config_path = $R_cfg->{general}{conda_manifest} // "";
     if ($prog_config_path ne "" && -f $prog_config_path) {
         log_message("NOTICE: Verifying conda environments against manifest: $prog_config_path");
-        my $progs = load_programs_config($prog_config_path);
+        my $progs = load_conda_manifest($prog_config_path);
         if (%$progs) {
             my $errors = verify_programs($progs, getdir("out,log"));
             if ($errors > 0) {
@@ -14094,7 +14557,7 @@ my $softwareversions = log_tool_versions("enabled",getdir("out,log"));
                 log_message("NOTICE: All conda environments verified OK");
             }
         } else {
-            log_message("WARNING: programs.config is empty or could not be parsed: $prog_config_path", "yellow");
+            log_message("WARNING: conda_manifest.ini is empty or could not be parsed: $prog_config_path", "yellow");
         }
     }
 
@@ -14118,11 +14581,13 @@ log_message("INFO: Versions:\n$softwareversions");
 ## run_data_driven_runsteps() inside the main per-sample loop below, in the
 ## same way as every other migrated runstep -- no special-casing left here.
 
+log_message("NOTICE: Loading sample data");
 load_optional_illumina_files();
 
 # Resolve parallel scheduler resource ceilings (auto-detect or config).
 # Must run after config is loaded; $S_max_threads/$S_max_ram_gb are
 # read-only after this point.
+log_message("NOTICE: Resolving resource limits (threads/RAM)");
 resolve_parallel_resource_limits();
 
 ###################################################################################################
@@ -14132,6 +14597,7 @@ resolve_parallel_resource_limits();
 ## real testing or processing begins. Aborts the whole run on any problem
 ## found, rather than letting a misconfigured/newly-added runstep deadlock
 ## silently partway through a long run.
+log_message("NOTICE: Validating pipeline configuration");
 validate_runstep_graph();
 
 # Dump the complete runstep dependency graph to the log immediately after
@@ -16297,28 +16763,47 @@ sub writedefaultconfigfile {
             next if ($section eq "chewbbaca_schemas" || $section eq "species"); # handled separately
             next unless ref($R_cfg->{$section}) eq 'HASH';
 
+            # The [cleanup] section gets a descriptive header and per-key
+            # comments so the generated config file is self-documenting.
+            if ($section eq "cleanup") {
+                print $fh "[cleanup]\n";
+                print $fh "; Controls which large intermediate files are removed when the pipeline finishes.\n";
+                print $fh "; 1 = remove  |  0 = keep\n";
+                my %cleanup_comments = (
+                    trimmed_fastq     => "fastp/trimmomatic output -- not needed after assembly",
+                    downsampled_fastq => "coverage-capped reads (seqtk/bbmap/rasusa) -- not needed after assembly",
+                    jellyfish_db      => "binary .jf k-mer database -- histogram is always kept regardless",
+                    bam               => "remapping BAM + BAI -- useful for IGV; can reconstruct FASTQ via samtools fastq",
+                );
+                for my $param (sort keys %{ $R_cfg->{cleanup} }) {
+                    my $val = $R_cfg->{cleanup}{$param} // 0;
+                    my $cmt = $cleanup_comments{$param} // "";
+                    print $fh "; $cmt\n" if $cmt;
+                    print $fh "$param=$val\n";
+                }
+                print $fh "\n";
+                next;
+            }
+
             print $fh "[$section]\n";
             foreach my $param (sort keys %{$R_cfg->{$section}}) {
                 my $value = $R_cfg->{$section}{$param};
+                # Annotate db_path so users understand it is overridden when frozen
+                if ($param eq "db_path") {
+                    print $fh "; Live database path -- used unless a frozen version is defined in db_freeze.config\n";
+                }
                 print $fh "$param=$value\n";
             }
             print $fh "\n";
           }
 
-          # --- Write schemas ---
-          if (exists $rundata{config}{effective}{chewbbaca_schemas} &&
-            ref($rundata{config}{effective}{chewbbaca_schemas}) eq 'HASH') {
-
-            foreach my $schema_name (sort keys %{$rundata{config}{effective}{chewbbaca_schemas}}) {
-                my $schema = $rundata{config}{effective}{chewbbaca_schemas}{$schema_name};
-                print $fh "[chewbbaca_schema_$schema_name]\n";
-                foreach my $k (qw(species path filter)) {
-                    my $v = $schema->{$k} // "";
-                    print $fh "$k=$v\n";
-                }
-                print $fh "\n";
-            }
-          }
+          # --- chewBBACA schemas ---
+          # Schemas are NOT written here. They are discovered at runtime from
+          # schema.ini files in db/chewbbaca/schemas/<name>/schema.ini.
+          # To override individual schema settings (e.g. enabled or filter),
+          # add a [chewbbaca_schema_<name>] section manually to this config file.
+          print $fh "; chewBBACA schemas are discovered from db/chewbbaca/schemas/<name>/schema.ini\n";
+          print $fh "; To override a schema setting, add: [chewbbaca_schema_<name>] enabled=0\n\n";
 
           # --- Write species ---
           if (exists $rundata{config}{effective}{species} &&
@@ -16347,13 +16832,186 @@ sub writedefaultconfigfile {
           log_message("INFO: Could not create default config file [$rundata{config}{path}]. Msg: [$!]");
           return 0; #failed
        }
+
+       # Also write a default db_freeze.config next to the main config,
+       # unless one already exists there.
+       # Determine where to write db_freeze.config.
+       # IMPORTANT: this runs before the companion-path expansion block (~line 2122),
+       # so $R_cfg->{general}{db_freeze_config} may still be the raw relative default
+       # ("db_freeze.config") rather than an expanded absolute path.
+       # Always resolve relative paths against the db root here.
+       my $db_cfg_path = $R_cfg->{general}{db_freeze_config} // "";
+       my $db_root     = getdir("db");
+       if ($db_cfg_path eq "" || !File::Spec->file_name_is_absolute($db_cfg_path)) {
+           $db_cfg_path = File::Spec->catfile($db_root, "db_freeze.config");
+       }
+       if (-f $db_cfg_path) {
+           log_message("NOTICE: db_freeze.config already exists at [$db_cfg_path] -- not overwriting");
+       } else {
+           write_default_databases_config($db_cfg_path);
+       }
     }
     else {
        log_message("INFO: Database path " . getdir("db") . " does not exist  — skipping writing default config");
        return 0; #failed
     }
-    
+
     return 1; #success
+}
+
+# write_default_databases_config($path)
+# --------------------------------------
+# Generates a default db_freeze.config at $path based on the programs in
+# %PROGRAMS that have a db_path defined.  The file is created with commented-
+# out marker_md5 lines (empty) so the user knows where to fill them in once
+# the databases are installed and frozen.
+#
+# Returns 1 on success, 0 on failure.
+#
+sub write_default_databases_config {
+    my ($path) = @_;
+
+    # Resolve the actual db directory (replaces __DB__ in path templates)
+    my $db_dir = getdir("db");
+
+    # Each entry: [ section_name, rel_path_under_db, marker_file, config_key, note ]
+    # These mirror the db_path / db_test entries in the program definitions above.
+    # Only databases that live in a separate directory (not conda-internal) are listed.
+    my @db_entries = (
+        [ "kraken2",    "kraken2",          "taxo.k2d",                      "kraken2.db_path",    "Kraken2 standard database"         ],
+        [ "mashscreen", "mash",             "refseq.genomes.k21s1000.msh",   "mashscreen.db_path", "Mash RefSeq sketch"                ],
+        [ "checkm",     "checkm",           "hmms/checkm.hmm",               "checkm.db_path",     "CheckM database (optional)"        ],
+        [ "bakta",      "bakta/db-light",   "bakta.db",                      "bakta.db_path",      "Bakta light database (optional)"   ],
+        [ "resfinder",  "resfinder",        "resfinder_db/all.fsa",          "resfinder.db_path",  "ResFinder database (optional)"     ],
+    );
+
+    open my $fh, '>', $path
+        or do { log_message("WARNING: Cannot write default db_freeze.config to [$path]: $!"); return 0; };
+
+    print $fh "; Auto-generated db_freeze.config\n";
+    print $fh "; Written: " . scalar(localtime) . "\n";
+    print $fh ";\n";
+    print $fh "; This file defines FROZEN (versioned) database snapshots for reproducibility.\n";
+    print $fh "; Database PATHS are NOT stored here -- they live in eurlc-wgs.config under\n";
+    print $fh "; each program's db_path key (using __DB__ placeholders for portability).\n";
+    print $fh ";\n";
+    print $fh "; Fields:\n";
+    print $fh ";   marker_file  = a file inside the database whose MD5 identifies the version\n";
+    print $fh ";   marker_md5   = expected MD5 of marker_file after --freeze-databases\n";
+    print $fh ";                  leave empty to use the live database without version locking\n";
+    print $fh ";   config_key   = eurlc-wgs.config key that holds the live database path\n";
+    print $fh ";                  (read-only reference -- do not edit)\n";
+    print $fh ";   note         = free-text label shown in run logs\n\n";
+
+    for my $entry (@db_entries) {
+        my ($section, $rel_path, $marker, $config_key, $note) = @$entry;
+
+        # Skip databases belonging to disabled programs
+        my $prog_enabled = $R_cfg->{$section}{enabled} // 1;
+        if (!$prog_enabled || $prog_enabled eq "0") {
+            log_message("NOTICE: Skipping [$section] in db_freeze.config -- program is disabled");
+            next;
+        }
+
+        print $fh "[$section]\n";
+        print $fh "marker_file  = $marker\n";
+        print $fh "marker_md5   =\n";
+        print $fh "config_key   = $config_key\n";
+        print $fh "note         = $note\n";
+        print $fh "\n";
+    }
+
+    # Append one entry per configured chewbbaca schema.
+    # The marker file (schema_version.md5) is auto-generated by --freeze-databases
+    # if not already present; it contains a fingerprint of all loci file names and
+    # sizes so the schema version can be identified without hashing all alleles.
+    my $chewbbaca_enabled = $R_cfg->{chewbbaca}{enabled} // 1;
+    if ($chewbbaca_enabled && $chewbbaca_enabled ne "0") {
+        my $schemas = $R_cfg->{chewbbaca_schemas} // {};
+        for my $schema_name (sort keys %$schemas) {
+            my $schema = $schemas->{$schema_name};
+            next unless ($schema->{enabled} // 1) && ($schema->{enabled} // 1) ne "0";
+            my $species_note = $schema->{species} // $schema_name;
+            $species_note =~ s/,/, /g;
+            print $fh "[chewbbaca_$schema_name]\n";
+            print $fh "marker_file  = schema_version.md5\n";
+            print $fh "marker_md5   =\n";
+            print $fh "config_key   = chewbbaca_schemas.$schema_name.path\n";
+            print $fh "note         = chewBBACA schema ($species_note)\n";
+            print $fh "\n";
+        }
+    }
+
+    close $fh;
+    log_message("NOTICE: Default db_freeze.config written to [$path]");
+    log_message("NOTICE: Run --freeze-databases to lock database versions (fills in marker_md5).");
+    return 1;
+}
+
+# build_crc32_result_ref
+#
+# Replaces the raw allele arrays in a $result_ref (as returned by
+# parse_chewbbaca) with CRC32-hashed values from the companion
+# results_alleles_crc32.tsv file.
+#
+# Why: chewBBACA uses several ID notations for the same allele sequence
+# (classic INF-488, chewie-NS INF-*488, bare *488 ...).  The only
+# notation-agnostic comparison is sequence-based, which is exactly what
+# the CRC32 table provides.  Using it here makes the distance matrix
+# immune to future chewBBACA format changes.
+#
+# Returns the patched $result_ref on success, undef on failure (so the
+# caller can fall back to raw alleles rather than crashing).
+sub build_crc32_result_ref {
+    my ($result_ref, $crc32_file) = @_;
+
+    unless (defined $crc32_file && -f $crc32_file) {
+        log_message("WARNING: CRC32 allele table not found [$crc32_file]; falling back to raw allele IDs for distance matrix");
+        return undef;
+    }
+
+    # Read the CRC32 TSV -- first column is FILE/sample name.
+    my ($crc32_header, $crc32_rows) = read_tsv_rows_by_first_column($crc32_file);
+    unless ($crc32_header && $crc32_rows) {
+        log_message("WARNING: Could not parse CRC32 allele table [$crc32_file]; falling back to raw allele IDs for distance matrix");
+        return undef;
+    }
+
+    # read_tsv_rows_by_first_column stores each row as a raw tab-separated
+    # string (including the key in column 0).  Split into an arrayref of
+    # values, dropping the first column (sample name), to match the
+    # {alleles} format that compute_chewbbaca_distance_matrix expects.
+    my %crc32_alleles;
+    for my $sample (keys %$crc32_rows) {
+        my @fields = split /\t/, $crc32_rows->{$sample};
+        shift @fields;   # remove sample-name column
+        $crc32_alleles{$sample} = \@fields;
+    }
+
+    # Parse the header the same way: strip the FILE column.
+    my @hdr_fields = split /\t/, $crc32_header;
+    shift @hdr_fields;   # remove FILE
+
+    # Build a shallow copy of $result_ref with the allele arrays swapped
+    # out for CRC32 values.  Everything else (stats, call rates, etc.) is
+    # kept from the original so callers that use those fields are unaffected.
+    my %patched = %$result_ref;
+    $patched{allele_header} = \@hdr_fields;
+
+    my @patched_data;
+    for my $rec (@{ $result_ref->{data} // [] }) {
+        my %prec = %$rec;
+        my $sample = $rec->{file} // "";
+        if (exists $crc32_alleles{$sample}) {
+            $prec{alleles} = $crc32_alleles{$sample};
+        } else {
+            log_message("WARNING: Sample [$sample] missing from CRC32 table; raw allele IDs used for this sample in distance matrix");
+        }
+        push @patched_data, \%prec;
+    }
+    $patched{data} = \@patched_data;
+
+    return \%patched;
 }
 
 # compute_chewbbaca_distance_matrix
@@ -16395,6 +17053,22 @@ sub compute_chewbbaca_distance_matrix {
         $alleles_by_sample{$r->{file}} = \@a;
     }
 
+    # Cannot compute a distance matrix with zero samples.
+    # This happens when chewBBACA failed or produced no output.
+    # Return a minimal but valid structure so callers don't crash.
+    # A single sample is fine -- the matrix is trivial (1x1 self-distance = 0).
+    if (@sample_names < 1) {
+        return {
+            sample_names    => \@sample_names,
+            order           => \@sample_names,
+            distance_matrix => {},
+            percent_success => {},
+            diff_alleles    => {},
+            diff_allele_values => {},
+            n_positions     => 0,
+        };
+    }
+
     my $is_missing = sub {
         my ($v) = @_;
         return 1 unless defined $v;
@@ -16411,7 +17085,14 @@ sub compute_chewbbaca_distance_matrix {
         my ($v) = @_;
         return undef if $is_missing->($v);
         $v =~ s/^\s+|\s+$//g;
-        $v =~ s/^INF[-_](\d+)$/$1/i;
+        # Strip INF- prefix (chewBBACA novel-allele notation).
+        # Handles both classic local IDs (INF-488) and chewie-NS
+        # online IDs (INF-*488) where the asterisk indicates an
+        # allele retrieved from the Nomenclature Server.
+        $v =~ s/^INF[-_](\*?\d+)$/$1/i;
+        # Normalise bare NS-style IDs (*488 -> 488) so they compare
+        # equal to the stripped form produced by the rule above.
+        $v =~ s/^\*(\d+)$/$1/;
         return $v;
     };
 
@@ -16770,6 +17451,14 @@ sub fill_placeholders {
     if( $cmd =~ /__DIR-OUT__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-OUT__", getdir("out") ); }
     if( $cmd =~ /__DIR-DB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-DB__", getdir("db") ); }
     if( $cmd =~ /__DB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DB__", getdir("db") ); }
+    # Database path placeholders -- resolved at command-build time so that
+    # resolve_and_verify_databases() can update $R_cfg paths to frozen copies
+    # before the command is assembled (direct Perl interpolation in heredocs
+    # bakes values at template-definition time, before resolution runs).
+    if( $cmd =~ /__KRAKENDB__/ )    { _fill_placeholders__safe_replace(\$cmd, "__KRAKENDB__",    $R_cfg->{kraken2}{db_path}    // getdir("db") . "/kraken2" ); }
+    if( $cmd =~ /__BRACKENDB__/ )   { _fill_placeholders__safe_replace(\$cmd, "__BRACKENDB__",   $R_cfg->{bracken}{db_path}    // getdir("db") . "/kraken2" ); }
+    if( $cmd =~ /__RESFINDERDB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__RESFINDERDB__", $R_cfg->{resfinder}{db_path}  // getdir("db") . "/resfinder" ); }
+    if( $cmd =~ /__BAKTADB__/ )     { _fill_placeholders__safe_replace(\$cmd, "__BAKTADB__",     $R_cfg->{bakta}{db_path}      // getdir("db") . "/bakta/db-light" ); }
     if( $cmd =~ /__DIR-QC__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-QC__", getdir("out,results,qc" ) ); }
     if( $cmd =~ /__DIR-QC1__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-QC1__", getdir("out,results,qc,stage1_rawdata" ) ); }    
     if( $cmd =~ /__DIR-QC2__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-QC2__", getdir("out,results,qc,stage2_trimmeddata" ) ); }    
@@ -16970,8 +17659,8 @@ sub summarize_results(){
 sub get_config_seal_html_for_report {
 
     my $seal_path = $R_cfg->{general}{seal} // "";
-    my $db_path   = $R_cfg->{general}{databases_config} // "";
-    my $prog_path = $R_cfg->{general}{programs_config}  // "";
+    my $db_path   = $R_cfg->{general}{db_freeze_config} // "";
+    my $prog_path = $R_cfg->{general}{conda_manifest}  // "";
     my $cfg_path  = $rundata{config}{path} // "";
 
     my ($status, $name, $detail, $color_class);
@@ -17991,8 +18680,8 @@ sub short_report_section_versions {
     # Configuration seal table
     {
         my $seal_path = $R_cfg->{general}{seal}             // "";
-        my $db_path   = $R_cfg->{general}{databases_config} // "";
-        my $prog_path = $R_cfg->{general}{programs_config}  // "";
+        my $db_path   = $R_cfg->{general}{db_freeze_config} // "";
+        my $prog_path = $R_cfg->{general}{conda_manifest}  // "";
         my $cfg_path  = $rundata{config}{path}              // "";
 
         my ($status, $seal_name, $detail);
@@ -18020,10 +18709,10 @@ sub short_report_section_versions {
         $html .= "<tr><td>Config file</td><td>"
                . encode_entities(-f $cfg_path  ? $cfg_path  : $cfg_path  ? "(not found) $cfg_path"  : "built-in defaults")
                . "</td></tr>\n";
-        $html .= "<tr><td>databases.config</td><td>"
+        $html .= "<tr><td>db_freeze.config</td><td>"
                . encode_entities(-f $db_path   ? $db_path   : $db_path   ? "(not found) $db_path"   : "not configured")
                . "</td></tr>\n";
-        $html .= "<tr><td>programs.config</td><td>"
+        $html .= "<tr><td>conda_manifest.ini</td><td>"
                . encode_entities(-f $prog_path ? $prog_path : $prog_path ? "(not found) $prog_path" : "not configured")
                . "</td></tr>\n";
         if ($detail ne "") {
@@ -25997,7 +26686,7 @@ sub log_message {
     my $output_log = "[$timestamp][+$runtime] $msg";
 
     my $output_screen = $msg;
-    $output_screen =~ s/^(NOTICE:|PROGRESS:)\s*//;  # Strip NOTICE: and PROGRESS: prefixes for screen
+    $output_screen =~ s/^(NOTICE:|PROGRESS:)[ \t]?//;  # Strip NOTICE: and PROGRESS: prefixes for screen
     $output_screen = "[+$runtime] $output_screen";
 
     if ($logfile_open) {
@@ -26098,7 +26787,7 @@ sub register_raw_output {
     };
 }
 
-# Load and verify the database manifest (databases.config).
+# Load and verify the database manifest (db_freeze.config).
 #
 # The manifest is an INI-style file where each section declares one
 # database:
@@ -26120,7 +26809,7 @@ sub register_raw_output {
 
 # ─── Program manifest: conda environment verification ──────────────────────
 #
-# programs.config is an INI file declaring one conda environment per section:
+# conda_manifest.ini is an INI file declaring one conda environment per section:
 #
 #   [eurlc-wgs-fastp]
 #   explicit_list_md5 = a3f7c8d2...              <- one accepted fingerprint
@@ -26138,13 +26827,13 @@ sub register_raw_output {
 #   eurlc-wgs --show-env-fingerprint eurlc-wgs-fastp
 # or check log/versioning_explicit/programs.log after any run.
 
-sub load_programs_config {
+sub load_conda_manifest {
     my ($path) = @_;
     return {} unless defined $path && $path ne "" && -f $path;
 
     my (%progs, $section);
     open my $fh, '<', $path
-        or do { log_message("WARNING: Cannot open programs.config [$path]: $!"); return {}; };
+        or do { log_message("WARNING: Cannot open conda_manifest.ini [$path]: $!"); return {}; };
 
     while (my $line = <$fh>) {
         chomp $line;
@@ -26221,7 +26910,7 @@ sub verify_programs {
             $status = "UNVERIFIED"; $color = "yellow";
             $warnings++;
             log_message("NOTICE: Program manifest: [$env] has no reference fingerprint. "
-                       . "Add this to programs.config to enable verification:\n"
+                       . "Add this to conda_manifest.ini to enable verification:\n"
                        . "  explicit_list_md5 = $actual", "yellow");
         }
         elsif (grep { lc($_) eq lc($actual) } @accepted) {
@@ -26265,23 +26954,39 @@ sub verify_programs {
 
 # ─── Database manifest: load, resolve, verify ──────────────────────────────
 #
-# databases.config is an INI file declaring one database per section:
+# db_freeze.config is an INI file that defines frozen (versioned) database
+# snapshots. It does NOT store database paths -- those live in eurlc-wgs.config
+# under the program's db_path key. db_freeze.config only records which frozen
+# snapshot to use (via marker_md5) and where to look for the marker file.
 #
-#   [kraken2_standard]
-#   path         = /db/kraken2          <- root directory for this database
+#   [kraken2]
 #   marker_file  = taxo.k2d             <- file whose MD5 identifies the version
-#   marker_md5   = a3f7c8d2...          <- expected MD5 (32 hex chars)
-#   config_key   = kraken2.db_path      <- $R_cfg key to update with resolved path
-#   note         = Standard-8 2025-10
+#   marker_md5   = a3f7c8d2...          <- expected MD5; leave empty = use live db
+#   config_key   = kraken2.db_path      <- $R_cfg key whose value is the live path
+#   note         = Standard-8 2025-10   <- free-text label shown in run logs
 #
-# Path resolution at startup (resolve_and_verify_databases):
+# The live database path is ALWAYS read from $R_cfg via config_key (which in
+# turn picks it up from eurlc-wgs.config, supporting __DB__ placeholders and
+# making the setup fully portable without absolute paths in db_freeze.config).
 #
-#   marker_md5 set  →  path/<md5>/   exists + MD5 matches  →  use it          [OK]
-#                   →  path/<md5>/   missing or MD5 wrong  →  WARN + default  [DEGRADED]
-#   marker_md5 empty →                                      →  use default     [UNVERSIONED]
-#   default/  missing in all cases                          →  ERROR           [NO_DB]
+# Database directory layout:
 #
-#   config_key is then updated in $R_cfg so all downstream code sees the
+#   eurlc-wgs_db/
+#     kraken2/              ← live database (db_path in eurlc-wgs.config)
+#     mash/
+#     chewbbaca/
+#     frozen_dbs/           ← frozen snapshots (--freeze-databases)
+#       kraken2/
+#         a3f9b2c1.../      ← copy named after MD5 of marker_file
+#       mash/
+#         c8d3f1b2.../
+#
+#   marker_md5 set  →  frozen_dbs/<name>/<md5>/  exists + MD5 matches  →  use it    [OK]
+#                   →  frozen_dbs/<name>/<md5>/  missing or MD5 wrong  →  WARN+live  [DEGRADED]
+#   marker_md5 empty →                                                  →  use live  [UNVERSIONED]
+#   live path missing in all cases                                      →  ERROR     [NO_DB]
+#
+#   config_key is updated in $R_cfg so all downstream code sees the
 #   resolved path without needing to know about the versioning layer.
 
 sub load_databases_config {
@@ -26290,7 +26995,7 @@ sub load_databases_config {
 
     my (%dbs, $section);
     open my $fh, '<', $path
-        or do { log_message("WARNING: Cannot open databases.config [$path]: $!"); return {}; };
+        or do { log_message("WARNING: Cannot open db_freeze.config [$path]: $!"); return {}; };
 
     while (my $line = <$fh>) {
         chomp $line;
@@ -26324,32 +27029,70 @@ sub resolve_and_verify_databases {
 
     for my $name (sort keys %$databases_ref) {
         my $db         = $databases_ref->{$name};
-        my $root       = $db->{path}        // "";
         my $marker     = $db->{marker_file} // "";
         my $ref_md5    = lc($db->{marker_md5}  // "");
         my $config_key = $db->{config_key}  // "";
         my $note       = $db->{note}        // "";
 
+        # The live database path is read from $R_cfg via config_key.
+        # db_freeze.config intentionally does NOT store paths -- they live in
+        # eurlc-wgs.config (with __DB__ placeholders) for portability.
+        my $root = "";
+        if ($config_key ne "") {
+            my @kp = split /\./, $config_key;
+            if (@kp == 2) {
+                $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]} // "");
+            } elsif (@kp == 3) {
+                $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]}{$kp[2]} // "");
+            }
+        }
+        # Backward-compat: if path is still present in an old db_freeze.config
+        # and $root could not be resolved via config_key, fall back to it.
+        if ($root eq "" && defined $db->{path} && $db->{path} ne "") {
+            $root = fill_placeholders($db->{path});
+        }
+
+        # Skip databases whose program is currently disabled in the pipeline config.
+        # Derive the program name from config_key (e.g. "bakta.db_path" -> "bakta"),
+        # falling back to the section name itself.
+        {
+            my $prog = ($config_key =~ /^chewbbaca_schemas\./) ? "chewbbaca"
+                     : ($config_key =~ /^(\w+)\./) ? $1
+                     : $name;
+            my $prog_enabled = $R_cfg->{$prog}{enabled} // 1;
+            if (!$prog_enabled || $prog_enabled eq "0") {
+                push @lines, sprintf("%-28s  %-12s  %s\n",
+                    "db:$name", "DISABLED", "program '$prog' is disabled -- skipped");
+                next;
+            }
+        }
+
         my ($resolved, $status, $color, $detail) = ("", "UNKNOWN", "yellow", "");
 
         if ($root eq "") {
-            $status = "NO_PATH"; $color = "red"; $detail = "path not set in databases.config";
+            $status = "NO_PATH"; $color = "red"; $detail = "live db path not found via config_key=$config_key (check db_path in eurlc-wgs.config)";
             $errors++;
         }
         elsif ($ref_md5 ne "") {
-            # ── Versioned mode: look for path/<md5>/ ──────────────────────
-            my $versioned_dir    = "$root/$ref_md5";
+            # ── Versioned mode: look in frozen_dbs/<name>/<md5>/ ──────────
+            # frozen_dbs_root: explicit config > db-dir/frozen_dbs > dirname(root)/frozen_dbs
+            my $frozen_root   = $R_cfg->{general}{frozen_dbs_root} // "";
+            if ($frozen_root eq "") {
+                my $db_base = getdir("db");
+                $frozen_root = $db_base ne "" ? "$db_base/frozen_dbs"
+                                              : File::Basename::dirname($root) . "/frozen_dbs";
+            }
+            my $versioned_dir    = "$frozen_root/$name/$ref_md5";
             my $versioned_marker = "$versioned_dir/$marker";
 
             if (-d $versioned_dir) {
                 my $actual_md5 = $marker ne "" ? md5_file($versioned_marker) : "";
                 if ($actual_md5 =~ /^ERROR:/) {
-                    # marker file missing inside the versioned dir
                     $status = "MARKER_MISSING"; $color = "red";
                     $detail = "marker $marker not found in $versioned_dir";
                     $errors++;
-                    $resolved = _db_fallback_default($root, $name, \$status, \$color,
-                                                     \$warnings, \$detail);
+                    $resolved = _db_fallback_live($root, $name, \$status, \$color,
+                                                  \$warnings, \$detail);
                 }
                 elsif ($actual_md5 eq $ref_md5) {
                     $resolved = $versioned_dir;
@@ -26359,41 +27102,111 @@ sub resolve_and_verify_databases {
                     $status = "MD5_MISMATCH"; $color = "red";
                     $detail = "expected $ref_md5, got $actual_md5";
                     $errors++;
-                    log_message("WARNING: Database [$name]: MD5 mismatch in versioned "
+                    log_message("WARNING: Database [$name]: MD5 mismatch in frozen "
                                . "directory $versioned_dir\n"
                                . "  Expected: $ref_md5\n"
                                . "  Actual:   $actual_md5\n"
-                               . "  Falling back to $root/default/", "red");
-                    $resolved = _db_fallback_default($root, $name, \$status, \$color,
-                                                     \$warnings, \$detail);
+                               . "  Falling back to live database at $root", "red");
+                    $resolved = _db_fallback_live($root, $name, \$status, \$color,
+                                                  \$warnings, \$detail);
                 }
             }
             else {
-                # Versioned directory does not exist yet
-                log_message("WARNING: Database [$name]: versioned directory not found: "
-                           . "$versioned_dir -- falling back to $root/default/", "yellow");
+                log_message("WARNING: Database [$name]: frozen directory not found: "
+                           . "$versioned_dir -- falling back to live database at $root", "yellow");
                 $warnings++;
-                $resolved = _db_fallback_default($root, $name, \$status, \$color,
-                                                 \$warnings, \$detail);
+                $resolved = _db_fallback_live($root, $name, \$status, \$color,
+                                              \$warnings, \$detail);
             }
         }
         else {
-            # ── Unversioned mode: no marker_md5 set, use default/ ────────
-            $resolved = _db_fallback_default($root, $name, \$status, \$color,
-                                             \$warnings, \$detail);
-            $status = "UNVERSIONED" if $status eq "DEFAULT_OK";
+            # ── Unversioned mode: no marker_md5 set, use path directly ───
+            $resolved = _db_fallback_live($root, $name, \$status, \$color,
+                                          \$warnings, \$detail);
+            $status = "UNVERSIONED" if $status eq "LIVE_OK";
         }
 
-        # Update $R_cfg so downstream runsteps see the resolved path
+        # Update $R_cfg so downstream runsteps see the resolved path.
+        # Also update db_test to point into the resolved directory so that
+        # the legacy db_exists() / test_db_* checks don't look in the
+        # original (now possibly renamed/absent) live database directory.
         if ($resolved ne "" && $config_key ne "") {
-            my ($section, $field) = split /\./, $config_key, 2;
-            if (defined $section && defined $field) {
+            my @key_parts = split /\./, $config_key;
+            if (@key_parts == 2) {
+                my ($section, $field) = @key_parts;
                 $R_cfg->{$section}{$field} = $resolved;
+
+                # Rewrite db_test: replace the old db_path prefix with $resolved
+                my $old_db_path = $root;   # original path before resolution
+                my $old_test    = $R_cfg->{$section}{db_test} // "";
+                if ($old_test ne "" && $old_db_path ne "" && $old_db_path ne $resolved) {
+                    # db_test may still have __DB__ placeholders at this point
+                    # (fill_placeholders hasn't run on it yet); normalise first
+                    my $filled_test = fill_placeholder_string($old_test, $R_cfg->{$section});
+                    $filled_test = fill_placeholders($filled_test);
+                    if (index($filled_test, $old_db_path) == 0) {
+                        # Swap the prefix for the resolved path
+                        my $suffix = substr($filled_test, length($old_db_path));
+                        $R_cfg->{$section}{db_test} = $resolved . $suffix;
+                    }
+                }
+
+                # Bracken shares kraken2's database directory and is treated as
+                # an obligatory part of kraken2 analysis. When kraken2 resolves
+                # to a frozen path, propagate the same path to bracken so that
+                # bracken runsteps (-d flag) and db_test checks always point to
+                # the same directory as kraken2 -- no separate db_freeze.config
+                # entry and no duplicate copy of the database.
+                if ($section eq "kraken2" && $field eq "db_path") {
+                    $R_cfg->{bracken}{db_path} = $resolved;
+                    $R_cfg->{bracken}{db_test} = "$resolved/database150mers.kmer_distrib";
+                    log_message("NOTICE: db:bracken                  (inherited kraken2 resolved path → $resolved)");
+                }
+            }
+            elsif (@key_parts == 3) {
+                # Three-level key: e.g. "chewbbaca_schemas.pubmlst_campy_cg_v2.path"
+                my ($section, $subsection, $field) = @key_parts;
+                $R_cfg->{$section}{$subsection}{$field} = $resolved;
+
+                # For chewbbaca schema path updates: remap filter file into the
+                # frozen schema directory so filter commands point to the frozen copy.
+                if ($section eq "chewbbaca_schemas" && $field eq "path") {
+                    my $old_filter = $R_cfg->{chewbbaca_schemas}{$subsection}{filter} // "";
+                    if ($old_filter && $old_filter ne "unfiltered") {
+                        my $expanded = fill_placeholder_string($old_filter, {});
+                        $expanded    = fill_placeholders($expanded);
+                        if ($expanded ne "" && $expanded ne "unfiltered") {
+                            my $filter_bn     = File::Basename::basename($expanded);
+                            my $frozen_filter = "$resolved/$filter_bn";
+                            if (-f $frozen_filter) {
+                                $R_cfg->{chewbbaca_schemas}{$subsection}{filter} = $frozen_filter;
+                                log_message("NOTICE: db:$name filter → $frozen_filter");
+                            } else {
+                                log_message("NOTICE: db:$name filter not in frozen dir ($frozen_filter) -- keeping live path");
+                            }
+                        }
+                    }
+                }
             }
         }
 
         my $log_path = $resolved ne "" ? $resolved : "—";
-        log_message(sprintf("NOTICE: db:%-24s  %-12s  %s", $name, $status,
+        # Enrich status label with FROZEN/LIVE indicator for terminal output
+        my $display_status = $status;
+        if ($status eq "OK") {
+            my $frozen_root_check = $R_cfg->{general}{frozen_dbs_root} // "";
+            if ($frozen_root_check eq "") {
+                my $db_base = getdir("db");
+                $frozen_root_check = $db_base ne "" ? "$db_base/frozen_dbs"
+                                                    : File::Basename::dirname($root) . "/frozen_dbs";
+            }
+            if (index($resolved, $frozen_root_check) == 0) {
+                $display_status = "OK [FROZEN]";
+            } else {
+                $display_status = "OK [LIVE]";
+            }
+        }
+        log_message(sprintf("NOTICE: db:%-24s  %-14s  %s", $name, $display_status,
             ($detail ? "($detail)" : $note)), $color);
         push @lines, sprintf("%-28s  %-12s  %-44s  %s\n",
             $name, $status, length($log_path) > 44 ? "...".substr($log_path,-41) : $log_path,
@@ -26416,22 +27229,21 @@ sub resolve_and_verify_databases {
     return $errors;
 }
 
-# Internal: try path/default/, update status/color/warnings refs.
-sub _db_fallback_default {
+# Internal: fall back to the live (unversioned) database at $root.
+# Used when the frozen/versioned directory is missing or fails MD5 verification.
+sub _db_fallback_live {
     my ($root, $name, $status_ref, $color_ref, $warn_ref, $detail_ref) = @_;
-    my $default_dir = "$root/default";
-    if (-d $default_dir) {
-        $$status_ref = "DEFAULT_OK"; $$color_ref = "yellow";
-        $$detail_ref = "using $default_dir";
-        $$warn_ref++ unless $$status_ref eq "UNVERSIONED";
-        return $default_dir;
+    if (-d $root) {
+        $$status_ref = "LIVE_OK"; $$color_ref = "yellow";
+        $$detail_ref = "using live database at $root";
+        $$warn_ref++;
+        return $root;
     }
     else {
         $$status_ref = "NO_DB"; $$color_ref = "red";
-        $$detail_ref = "neither versioned dir nor default/ found under $root";
-        log_message("ERROR: Database [$name]: no usable database directory found. "
-                   . "Install the database in $root/default/ or provide a versioned "
-                   . "directory with marker_md5 in databases.config.", "red");
+        $$detail_ref = "database directory not found: $root";
+        log_message("ERROR: Database [$name]: no usable database directory found at $root. "
+                   . "Install the database there or set 'path' correctly in db_freeze.config.", "red");
         return "";
     }
 }
@@ -26443,8 +27255,8 @@ sub _write_config_log {
     my ($logdir) = @_;
     return unless defined $logdir && $logdir ne "";
 
-    my $db_path   = $R_cfg->{general}{databases_config} // "";
-    my $prog_path = $R_cfg->{general}{programs_config}  // "";
+    my $db_path   = $R_cfg->{general}{db_freeze_config} // "";
+    my $prog_path = $R_cfg->{general}{conda_manifest}  // "";
     my $cfg_path  = $rundata{config}{path}              // "";
     my $seal_path = $R_cfg->{general}{seal}             // "";
 
@@ -26457,8 +27269,8 @@ sub _write_config_log {
 
     for my $label_path (
         ["eurlc-wgs.config",   $cfg_path  ],
-        ["databases.config",   $db_path   ],
-        ["programs.config",    $prog_path ],
+        ["db_freeze.config",   $db_path   ],
+        ["conda_manifest.ini",    $prog_path ],
         ["config_seal.ini",    $seal_path ],
     ) {
         my ($label, $path) = @$label_path;
@@ -26517,8 +27329,8 @@ sub _verify_config_seal {
 
     my %files = (
         eurlc_wgs_config => $cfg_path,
-        databases_config => $db_path,
-        programs_config  => $prog_path,
+        db_freeze_config => $db_path,
+        conda_manifest  => $prog_path,
     );
 
     for my $key (keys %files) {
@@ -26586,7 +27398,7 @@ sub _write_yml_checksums {
 # Adapts to what it finds in the db directory:
 #   - If db_dir/yml/*.yml exist, they are used instead of built-in YML files
 #   - If db_dir/eurlc-wgs.config exists, that config is used (run with configfile=)
-#   - If databases.config exists, database status is shown
+#   - If db_freeze.config exists, database status is shown
 # Safe to run multiple times (skips already-installed environments).
 sub _cmd_setup {
     $S_SUPPRESS_STARTUP_LOG = 0;   # show all output from here on
@@ -26616,7 +27428,7 @@ sub _cmd_setup {
     # ── 2. Detect installation type ──────────────────────────────────
     my $custom_config = "$db_dir/eurlc-wgs.config";
     my $custom_ymls   = glob("$db_dir/yml/*.yml") ? 1 : 0;
-    my $db_config     = $R_cfg->{general}{databases_config} // "";
+    my $db_config     = $R_cfg->{general}{db_freeze_config} // "";
 
     if ($custom_ymls) {
         log_message("NOTICE: Found YML files in $db_dir/yml/ -- will use these for environment installation.");
@@ -26737,7 +27549,7 @@ sub _cmd_setup {
     log_message("NOTICE: ── Databases ────────────────────────────────────");
 
     if ($db_config ne "" && -f $db_config) {
-        # databases.config present -- show resolution status
+        # db_freeze.config present -- show resolution status
         my $dbs = load_databases_config($db_config);
         for my $name (sort keys %$dbs) {
             my $db     = $dbs->{$name};
@@ -26779,7 +27591,7 @@ sub _cmd_setup {
             }
         }
     } else {
-        # No databases.config -- use built-in db_test paths to check
+        # No db_freeze.config -- use built-in db_test paths to check
         my @db_tools = grep {
             ref($R_cfg->{$_}) eq 'HASH'
             && (   ($R_cfg->{$_}{db_path} // "") ne ""
@@ -26832,8 +27644,8 @@ sub _cmd_setup {
     if ($seal_path ne "" && -f $seal_path) {
         my $result = _verify_config_seal($seal_path,
             $rundata{config}{path} // "",
-            $R_cfg->{general}{databases_config} // "",
-            $R_cfg->{general}{programs_config} // "");
+            $R_cfg->{general}{db_freeze_config} // "",
+            $R_cfg->{general}{conda_manifest} // "");
         my $color = $result->{status} eq "SEAL VERIFIED" ? "green" : "red";
         log_message("NOTICE:   $result->{status}: $result->{name}", $color);
     } elsif ($seal_path ne "") {
@@ -26858,7 +27670,7 @@ sub _cmd_setup {
     log_message("NOTICE: ─────────────────────────────────────────────────");
 }
 
-# Find which tool config section corresponds to a databases.config entry.
+# Find which tool config section corresponds to a db_freeze.config entry.
 # Matches by db_path overlap or config_key section name.
 sub _find_tool_for_db {
     my ($db_name, $db) = @_;
@@ -26884,58 +27696,355 @@ sub fill_placeholder_string {
     return $str;
 }
 
-# --freeze-databases: copy each database from default/ to <md5>/, update databases.config
+# --freeze-databases[=name1,name2,...]: snapshot each live database into frozen_dbs/<name>/<md5>/
+#
+# Usage:
+#   eurlc-wgs --freeze-databases              # freeze all unfrozen databases
+#   eurlc-wgs --freeze-databases=kraken2      # freeze only kraken2
+#   eurlc-wgs --freeze-databases=kraken2,mash # freeze kraken2 and mash
+#
+# Directory layout after freezing:
+#
+#   eurlc-wgs_db/
+#     kraken2/              ← live database (unchanged)
+#     frozen_dbs/
+#       kraken2/
+#         a3f9b2c1.../      ← frozen copy, named after MD5 of marker_file
+#
+# frozen_dbs/ location defaults to <parent of first db path>/frozen_dbs, or can
+# be set explicitly with general.frozen_dbs_root in eurlc-wgs.config.
+#
+# When a database is re-frozen (live version has changed), the old marker_md5
+# line in db_freeze.config is commented out with a datestamp, and the new
+# value is written below it. This provides an in-file history of which frozen
+# versions have been used, and makes it easy to identify dangling frozen dirs
+# that are no longer referenced.
+# _generate_chewbbaca_schema_marker($schema_dir, $schema_name)
+#
+# Generates a schema_version.md5 file inside the given chewBBACA schema
+# directory.  The file contains a fingerprint built from the sorted list of
+# all *.fasta file names and their byte sizes.  Using names+sizes instead of
+# full MD5s keeps generation fast even for large schemas (thousands of loci),
+# while still reliably detecting additions, deletions or size-changing edits.
+#
+# The MD5 of this marker file is what gets stored in db_freeze.config and is
+# used by resolve_and_verify_databases to confirm the frozen copy matches.
+#
+sub _generate_chewbbaca_schema_marker {
+    my ($schema_dir, $schema_name) = @_;
+    my $marker_path = "$schema_dir/schema_version.md5";
+
+    opendir(my $dh, $schema_dir) or do {
+        log_message("WARNING: Cannot read schema directory [$schema_dir]: $!", "yellow");
+        return 0;
+    };
+    my @fasta_files = sort grep { /\.fasta$/i && -f "$schema_dir/$_" } readdir($dh);
+    closedir($dh);
+
+    unless (@fasta_files) {
+        log_message("WARNING: [$schema_name] No .fasta files found in schema directory [$schema_dir] -- cannot generate marker", "yellow");
+        return 0;
+    }
+
+    my $content = "";
+    $content .= "# chewBBACA schema version marker\n";
+    $content .= "# Schema:    $schema_name\n";
+    $content .= "# Generated: " . strftime("%Y-%m-%d %H:%M:%S", localtime) . "\n";
+    $content .= "# Loci:      " . scalar(@fasta_files) . "\n";
+    $content .= "# Method:    sorted-loci-name-size fingerprint\n";
+    $content .= "#\n";
+    for my $f (@fasta_files) {
+        my $size = -s "$schema_dir/$f" // 0;
+        $content .= "$f:$size\n";
+    }
+
+    open my $fh, '>', $marker_path or do {
+        log_message("WARNING: [$schema_name] Cannot write schema marker [$marker_path]: $!", "yellow");
+        return 0;
+    };
+    print $fh $content;
+    close $fh;
+
+    log_message("NOTICE: [$schema_name] Schema version marker generated: $marker_path ("
+              . scalar(@fasta_files) . " loci)");
+    return 1;
+}
+
 sub _cmd_freeze_databases {
     $S_SUPPRESS_STARTUP_LOG = 0;
-    my $db_path = $R_cfg->{general}{databases_config} // "";
+    my ($filter_arg) = @_;
+
+    # Parse optional filter: comma-separated list of database names to process
+    my %filter;
+    if (defined $filter_arg && $filter_arg ne "") {
+        %filter = map { $_ => 1 } split /\s*,\s*/, $filter_arg;
+        log_message("NOTICE: --freeze-databases filter: only processing: " . join(", ", sort keys %filter));
+    }
+
+    my $db_path  = $R_cfg->{general}{db_freeze_config} // "";
+    my $db_root_ = getdir("db");
+    # Resolve relative path against db root (safety net in case expansion block ran early)
+    if ($db_path ne "" && !File::Spec->file_name_is_absolute($db_path)) {
+        $db_path = File::Spec->catfile($db_root_, $db_path);
+    }
+
+    # If db_freeze.config is missing, offer to create a default one.
     unless ($db_path && -f $db_path) {
-        log_message("ERROR: --freeze-databases requires general.databases_config to be set.", "red");
-        return;
+        # Determine where to place it: db root is always the preferred location
+        if ($db_path eq "") {
+            $db_path = File::Spec->catfile($db_root_, "db_freeze.config");
+            log_message("NOTICE: general.db_freeze_config is not set -- will use [$db_path]", "yellow");
+        } else {
+            log_message("NOTICE: db_freeze.config not found at [$db_path]", "yellow");
+        }
+
+        my $create_it;
+        if ($ASSUME_YES) {
+            $create_it = 1;
+            log_message("NOTICE: --assume-yes: creating default db_freeze.config automatically");
+        } else {
+            $create_it = prompt_yes_no(
+                "db_freeze.config does not exist. Create a default one at [$db_path]?", 1);
+        }
+
+        unless ($create_it) {
+            log_message("INFO: Aborting --freeze-databases -- db_freeze.config is required.");
+            return;
+        }
+
+        write_default_databases_config($db_path)
+            or do {
+                log_message("ERROR: Could not create db_freeze.config at [$db_path].", "red");
+                return;
+            };
+
+        # Update config so the rest of this function can find it
+        $R_cfg->{general}{db_freeze_config} = $db_path;
+
+        log_message("NOTICE: A default db_freeze.config was created at [$db_path].");
+        log_message("NOTICE: Review it and adjust paths before rerunning --freeze-databases if needed.");
+        log_message("NOTICE: Continuing with freeze using the newly created config...");
     }
 
     my $dbs = load_databases_config($db_path);
     unless (%$dbs) {
-        log_message("ERROR: databases.config is empty or unreadable: $db_path", "red");
+        log_message("ERROR: db_freeze.config is empty or unreadable: $db_path", "red");
         return;
     }
 
-    # Collect databases that need freezing (have default/ but no marker_md5)
-    my @to_freeze;
-    for my $name (sort keys %$dbs) {
-        my $db      = $dbs->{$name};
-        my $root    = $db->{path}        // "";
-        my $marker  = $db->{marker_file} // "";
-        my $ref_md5 = $db->{marker_md5}  // "";
-        next if $ref_md5 ne "";    # already frozen
-        my $default_dir    = "$root/default";
-        my $marker_in_def  = "$default_dir/$marker";
-        next unless -d $default_dir;
-        unless (-f $marker_in_def) {
-            log_message("WARNING: [$name] default/ exists but marker file not found: $marker_in_def", "yellow");
-            next;
+    # Check if any enabled chewbbaca schemas are missing from the loaded config.
+    # This happens when db_freeze.config was created before chewbbaca support was
+    # added -- the file exists so write_default_databases_config was never called,
+    # and the chewbbaca entries were never appended.
+    {
+        my $chewbbaca_enabled = $R_cfg->{chewbbaca}{enabled} // 1;
+        if ($chewbbaca_enabled && $chewbbaca_enabled ne "0") {
+            my $schemas = $R_cfg->{chewbbaca_schemas} // {};
+            my @missing_schemas;
+            for my $schema_name (sort keys %$schemas) {
+                my $schema = $schemas->{$schema_name};
+                next unless ($schema->{enabled} // 1) && ($schema->{enabled} // 1) ne "0";
+                my $entry_name = "chewbbaca_$schema_name";
+                unless (exists $dbs->{$entry_name}) {
+                    push @missing_schemas, $schema_name;
+                }
+            }
+            if (@missing_schemas) {
+                log_message("NOTICE: db_freeze.config is missing chewBBACA schema entries: "
+                          . join(", ", @missing_schemas));
+                log_message("NOTICE: Appending missing chewBBACA schema entries to $db_path ...");
+                if (open my $fh_append, '>>', $db_path) {
+                    for my $schema_name (@missing_schemas) {
+                        my $schema      = $schemas->{$schema_name};
+                        my $schema_path = $schema->{path} // "";
+                        $schema_path    = fill_placeholders($schema_path);
+                        my $species_note = $schema->{species} // $schema_name;
+                        $species_note =~ s/,/, /g;
+                        print $fh_append "[chewbbaca_$schema_name]\n";
+                        print $fh_append "marker_file  = schema_version.md5\n";
+                        print $fh_append "marker_md5   =\n";
+                        print $fh_append "config_key   = chewbbaca_schemas.$schema_name.path\n";
+                        print $fh_append "note         = chewBBACA schema ($species_note)\n";
+                        print $fh_append "\n";
+                    }
+                    close $fh_append;
+                    log_message("NOTICE: db_freeze.config updated -- reloading...");
+                    $dbs = load_databases_config($db_path);
+                    unless (%$dbs) {
+                        log_message("ERROR: db_freeze.config is empty or unreadable after update: $db_path", "red");
+                        return;
+                    }
+                } else {
+                    log_message("WARNING: Cannot update db_freeze.config [$db_path]: $! -- chewBBACA schemas will be skipped", "yellow");
+                }
+            }
         }
-        my $actual_md5 = md5_file($marker_in_def);
-        if ($actual_md5 =~ /^ERROR:/) {
-            log_message("WARNING: [$name] cannot compute MD5 for $marker_in_def: $actual_md5", "yellow");
-            next;
-        }
-        push @to_freeze, { name => $name, root => $root, default_dir => $default_dir,
-                           marker => $marker, md5 => $actual_md5 };
     }
 
-    unless (@to_freeze) {
-        log_message("NOTICE: No databases need freezing -- all have marker_md5 set or no default/ directory.", "green");
+    # Determine frozen_dbs root.
+    # Priority: 1. explicit general.frozen_dbs_root in config
+    #           2. <db dir>/frozen_dbs  (the standard layout)
+    #           3. dirname of db_freeze.config file / frozen_dbs  (last resort)
+    my $frozen_root = $R_cfg->{general}{frozen_dbs_root} // "";
+    if ($frozen_root eq "") {
+        my $db_base = getdir("db");
+        if ($db_base ne "") {
+            $frozen_root = "$db_base/frozen_dbs";
+        } else {
+            $frozen_root = File::Basename::dirname($db_path) . "/frozen_dbs";
+        }
+    }
+    log_message("NOTICE: Frozen databases will be stored under: $frozen_root");
+
+    # Inspect each database:
+    #   - truth is whether frozen_dbs/<name>/<md5>/ exists on disk
+    #   - db_freeze.config is a pointer that must be consistent with that truth
+    #   - three outcomes per database:
+    #       SKIP_OK    : frozen dir exists AND config already has correct marker_md5
+    #       FIX_CONFIG : frozen dir exists but config marker_md5 is wrong/missing
+    #       FREEZE     : frozen dir does not exist yet -- copy needed
+    my (@to_freeze, @to_fix_config, @already_ok);
+    for my $name (sort keys %$dbs) {
+
+        # Apply name filter if specified
+        if (%filter && !$filter{$name}) {
+            log_message("NOTICE: [$name] not in filter -- skipping");
+            next;
+        }
+
+        my $db         = $dbs->{$name};
+        my $config_key = $db->{config_key} // "";
+        my $prog       = ($config_key =~ /^chewbbaca_schemas\./) ? "chewbbaca"
+                       : ($config_key =~ /^(\w+)\./) ? $1
+                       : $name;
+        my $prog_enabled = $R_cfg->{$prog}{enabled} // 1;
+        if (!$prog_enabled || $prog_enabled eq "0") {
+            log_message("NOTICE: [$name] -- program '$prog' is disabled -- skipping");
+            next;
+        }
+
+        # Resolve the live database path via config_key from the main config
+        # (db_path in eurlc-wgs.config, supporting __DB__ placeholders).
+        # db_freeze.config intentionally does NOT store paths.
+        my $root = "";
+        if ($config_key ne "") {
+            my @kp = split /\./, $config_key;
+            if (@kp == 2) {
+                $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]} // "");
+            } elsif (@kp == 3) {
+                $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]}{$kp[2]} // "");
+            }
+        }
+        # Backward-compat: old db_freeze.config entries may still carry a path field
+        if ($root eq "" && defined $db->{path} && $db->{path} ne "") {
+            $root = fill_placeholders($db->{path});
+        }
+
+        my $marker  = $db->{marker_file} // "";
+        my $ref_md5 = $db->{marker_md5}  // "";
+
+        unless ($root ne "" && -d $root) {
+            log_message("WARNING: [$name] live database directory not found: "
+                      . ($root || "(path not resolved -- check db_path in eurlc-wgs.config)")
+                      . " -- skipping", "yellow");
+            next;
+        }
+
+        # For chewbbaca schemas: auto-generate schema_version.md5 if not yet present.
+        # The marker is a fingerprint (sorted loci filenames + sizes) that identifies
+        # the schema version without requiring a full MD5 of all allele FASTA files.
+        my $marker_path = "$root/$marker";
+        if ($marker eq "schema_version.md5" && !-f $marker_path) {
+            log_message("NOTICE: [$name] generating schema version marker...");
+            _generate_chewbbaca_schema_marker($root, $name)
+                or do {
+                    log_message("WARNING: [$name] could not generate schema marker -- skipping", "yellow");
+                    next;
+                };
+        }
+
+        unless (-f $marker_path) {
+            log_message("WARNING: [$name] marker file not found: $marker_path -- skipping", "yellow");
+            next;
+        }
+        my $actual_md5 = md5_file($marker_path);
+        if ($actual_md5 =~ /^ERROR:/) {
+            log_message("WARNING: [$name] cannot compute MD5 for $marker_path: $actual_md5", "yellow");
+            next;
+        }
+
+        # Bracken requires its own marker file inside the kraken2 directory.
+        # Since bracken is an obligatory part of kraken2 analysis and shares
+        # the same database directory, we validate it here rather than as a
+        # separate db_freeze.config entry (which would cause a duplicate copy).
+        if ($name eq "kraken2") {
+            my $bracken_marker = "$root/database150mers.kmer_distrib";
+            unless (-f $bracken_marker) {
+                log_message("ERROR: Bracken marker file not found in kraken2 database directory:", "red");
+                log_message("ERROR:   $bracken_marker", "red");
+                log_message("ERROR: The kraken2 database must contain Bracken distribution files "
+                          . "(database*mers.kmer_distrib) before it can be frozen.", "red");
+                log_message("ERROR: Run 'bracken-build -d $root -t <threads> -k 35 -l 150' "
+                          . "to generate them, then retry --freeze-databases.", "red");
+                log_message("ERROR: Aborting freeze.", "red");
+                return;
+            }
+            log_message("NOTICE: [kraken2] Bracken marker file found: $bracken_marker -- OK");
+        }
+
+        # For chewbbaca schemas: capture any associated filter file path so it
+        # can be copied into the frozen schema directory during Phase A.
+        my $filter_file = "";
+        if ($config_key =~ /^chewbbaca_schemas\.(\w+)\./) {
+            my $schema_key = $1;
+            my $f = $R_cfg->{chewbbaca_schemas}{$schema_key}{filter} // "";
+            if ($f && $f ne "unfiltered") {
+                $f = fill_placeholder_string($f, {});
+                $f = fill_placeholders($f);
+                $filter_file = $f if $f ne "unfiltered" && -f $f;
+            }
+        }
+
+        my $frozen_dir = "$frozen_root/$name/$actual_md5";
+        if (-d $frozen_dir) {
+            if ($ref_md5 eq $actual_md5) {
+                # Frozen dir exists and config is correct -- nothing to do
+                log_message("NOTICE: [$name] already frozen and config up to date (md5=$actual_md5) -- skipping");
+                push @already_ok, $name;
+            } else {
+                # Frozen dir exists but config pointer is wrong/missing -- fix config only
+                log_message("NOTICE: [$name] frozen directory exists ($frozen_dir) but db_freeze.config "
+                          . "marker_md5 is [" . ($ref_md5 || "not set") . "] -- will update config");
+                push @to_fix_config, { name => $name, root => $root, marker => $marker,
+                                       md5 => $actual_md5, frozen_dir => $frozen_dir };
+            }
+        } else {
+            # Frozen dir does not exist -- full freeze needed
+            push @to_freeze, { name => $name, root => $root, marker => $marker,
+                                md5 => $actual_md5, frozen_dir => $frozen_dir,
+                                filter_file => $filter_file };
+        }
+    }
+
+    if (!@to_freeze && !@to_fix_config) {
+        log_message("NOTICE: All databases already frozen and config up to date -- nothing to do.", "green");
         return;
     }
 
     # Show plan and prompt
-    log_message("NOTICE: The following databases will be frozen:", "green");
-    for my $db (@to_freeze) {
-        my $target = "$db->{root}/$db->{md5}";
-        log_message(sprintf("NOTICE:   %-24s  %s/default/  →  %s",
-            $db->{name}, $db->{root}, $target));
+    if (@to_freeze) {
+        log_message("NOTICE: The following databases will be frozen (copy + config update):", "green");
+        for my $db (@to_freeze) {
+            log_message(sprintf("NOTICE:   %-24s  %s  →  %s", $db->{name}, $db->{root}, $db->{frozen_dir}));
+        }
     }
-    log_message("NOTICE: default/ directories will NOT be deleted. databases.config will be updated.");
+    if (@to_fix_config) {
+        log_message("NOTICE: The following databases only need a config update (frozen dir already exists):", "green");
+        for my $db (@to_fix_config) {
+            log_message(sprintf("NOTICE:   %-24s  marker_md5 → %s", $db->{name}, $db->{md5}));
+        }
+    }
+    log_message("NOTICE: Live database directories will NOT be modified. db_freeze.config will be updated.");
 
     unless ($ASSUME_YES) {
         my $ok = prompt_yes_no("Proceed with freezing databases?", 0);
@@ -26945,93 +28054,181 @@ sub _cmd_freeze_databases {
         }
     }
 
-    # Backup databases.config first
+    # Backup db_freeze.config first
     my $backup = "$db_path.bak." . strftime("%Y%m%d_%H%M%S", localtime);
     File::Copy::copy($db_path, $backup)
-        or log_message("WARNING: Could not back up databases.config to $backup: $!", "yellow");
+        or log_message("WARNING: Could not back up db_freeze.config to $backup: $!", "yellow");
 
     # Read raw config text for in-place update
     open my $fh_in, '<', $db_path or do {
-        log_message("ERROR: Cannot read databases.config: $!", "red"); return;
+        log_message("ERROR: Cannot read db_freeze.config: $!", "red"); return;
     };
     my $config_text = do { local $/; <$fh_in> };
     close $fh_in;
 
-    my @frozen_ok;
+    my (@frozen_ok, $config_changed);
+
+    # Phase A: databases that need copying
     for my $db (@to_freeze) {
-        my $target = "$db->{root}/$db->{md5}";
-        log_message("NOTICE: Copying $db->{name}: $db->{default_dir} → $target ...");
+        my $target = $db->{frozen_dir};
+        log_message("NOTICE: Freezing $db->{name}: $db->{root} → $target ...");
 
-        if (-d $target) {
-            log_message("NOTICE:   Target already exists, skipping copy.");
-        } else {
-            # Use File::Copy::Recursive if available, otherwise system cp
-            my $ok = system("cp", "-r", $db->{default_dir}, $target) == 0;
-            unless ($ok) {
-                log_message("ERROR: Copy failed for $db->{name}: $!", "red");
-                next;
-            }
-        }
+        ensure_dir("$frozen_root/$db->{name}");
 
-        # Verify MD5 in target
-        my $target_marker = "$target/$db->{marker}";
-        my $verify_md5 = md5_file($target_marker);
-        unless ($verify_md5 eq $db->{md5}) {
-            log_message("ERROR: MD5 mismatch after copy for $db->{name} -- target may be corrupt. "
-                       . "Not updating databases.config for this entry.", "red");
+        my $ok = system("cp", "-r", $db->{root}, $target) == 0;
+        unless ($ok) {
+            log_message("ERROR: Copy failed for $db->{name}: $!", "red");
             next;
         }
 
-        # Update marker_md5 in config text
-        $config_text =~ s/(\[$db->{name}\][^\[]*?marker_md5\s*=\s*)(\S*)/$1$db->{md5}/s;
+        # For chewbbaca schemas: also copy any associated filter file into the
+        # frozen schema directory. This keeps the frozen snapshot self-contained
+        # and allows resolve_and_verify_databases to remap {filter} to the frozen path.
+        if ($db->{filter_file} && -f $db->{filter_file}) {
+            my $filter_dest = "$target/" . File::Basename::basename($db->{filter_file});
+            if (File::Copy::copy($db->{filter_file}, $filter_dest)) {
+                log_message("NOTICE:   Filter file frozen: $filter_dest");
+            } else {
+                log_message("WARNING:  Could not copy filter file to frozen dir [$filter_dest]: $!", "yellow");
+            }
+        }
+
+        # Verify MD5 in frozen copy
+        my $target_marker = "$target/$db->{marker}";
+        my $verify_md5 = md5_file($target_marker);
+        unless ($verify_md5 eq $db->{md5}) {
+            log_message("ERROR: MD5 mismatch after copy for $db->{name} -- frozen copy may be corrupt. "
+                       . "Not updating db_freeze.config for this entry.", "red");
+            next;
+        }
+
+        _update_marker_md5_in_config(\$config_text, $db->{name}, $db->{md5});
+        $config_changed = 1;
         push @frozen_ok, $db->{name};
         log_message("NOTICE:   ✓ $db->{name} frozen: $db->{md5}", "green");
     }
 
-    if (@frozen_ok) {
+    # Phase B: databases where frozen dir already existed but config was out of sync
+    for my $db (@to_fix_config) {
+        _update_marker_md5_in_config(\$config_text, $db->{name}, $db->{md5});
+        $config_changed = 1;
+        push @frozen_ok, $db->{name};
+        log_message("NOTICE:   ✓ $db->{name} config updated: marker_md5 = $db->{md5}", "green");
+    }
+
+    if ($config_changed) {
         open my $fh_out, '>', $db_path or do {
-            log_message("ERROR: Cannot write databases.config: $! (backup at $backup)", "red");
+            log_message("ERROR: Cannot write db_freeze.config: $! (backup at $backup)", "red");
             return;
         };
         print $fh_out $config_text;
         close $fh_out;
-        log_message("NOTICE: databases.config updated. Backup at $backup.", "green");
+        log_message("NOTICE: db_freeze.config updated. Backup at $backup.", "green");
     }
 
-    my $not_frozen = scalar(@to_freeze) - scalar(@frozen_ok);
-    if ($not_frozen > 0) {
-        log_message("WARNING: $not_frozen database(s) could not be frozen -- see errors above.", "yellow");
+    my $attempted = scalar(@to_freeze) + scalar(@to_fix_config);
+    my $failed    = $attempted - scalar(@frozen_ok);
+    if ($failed > 0) {
+        log_message("WARNING: $failed database(s) could not be processed -- see errors above.", "yellow");
     } else {
         log_message("NOTICE: All databases frozen successfully. Run --generate-seal when ready.", "green");
     }
 }
 
-# --generate-seal[=NAME]: write config_seal.ini next to databases.config
+# _update_marker_md5_in_config(\$config_text, $db_name, $new_md5)
+#
+# Updates the marker_md5 line for $db_name in the raw config text.
+# If marker_md5 is already set to a DIFFERENT value, the old line is
+# commented out with a datestamp so the history is preserved in the file:
+#
+#   # marker_md5 = a3f9b2c1...   [replaced 2026-10-24 by freeze-databases]
+#   marker_md5 = 7d4e1f8a...
+#
+# If marker_md5 is not present at all, a new line is inserted after the
+# last key in the section.  If marker_md5 is already set to the same value,
+# the text is left unchanged.
+sub _update_marker_md5_in_config {
+    my ($text_ref, $db_name, $new_md5) = @_;
+
+    my $date  = strftime("%Y-%m-%d", localtime);
+    my $stamp = "replaced $date by --freeze-databases";
+
+    # Match the section and capture the marker_md5 line (if any).
+    # Handles three cases:
+    #   marker_md5 = <value>      -- existing non-empty value (update or skip if same)
+    #   marker_md5 =              -- empty value (just write the new md5)
+    #   (absent)                  -- insert a new line at end of section
+    #
+    # We do NOT touch lines that start with ; (comments), so a user who has
+    # hand-commented out their marker_md5 line keeps it commented.
+    my $replaced = 0;
+    $$text_ref =~ s{
+        (\[$db_name\]          # section header
+        .*?)                   # anything before marker_md5 (non-greedy, dotall)
+        (^[ \t]*marker_md5     # the key at start of line (preserve indentation)
+         [ \t]*=[ \t]*)        # = sign with optional spaces
+        (\S*)                  # current value (may be empty)
+        ([ \t]*(?:\#[^\n]*)?)  # optional trailing comment
+        (\n)                   # newline
+    }{
+        $replaced = 1;
+        if ($3 eq $new_md5) {
+            # Already correct -- leave unchanged
+            "$1$2$3$4$5"
+        } elsif ($3 eq "") {
+            # Was empty -- just fill in the value
+            "$1$2$new_md5$4$5"
+        } else {
+            # Had a different value -- comment out old line, write new below
+            "$1# $2$3$4  # [$stamp]$5${2}$new_md5$5"
+        }
+    }semx;
+
+    # If no marker_md5 line existed in the section (and we didn't replace one), append one
+    unless ($replaced) {
+        $$text_ref =~ s{(\[$db_name\][^\[]*?)(\n(?=\[|$))}{${1}\nmarker_md5 = $new_md5$2}s;
+    }
+}
+
+# --generate-seal[=NAME]: auto-generate conda_manifest.ini, then write config_seal.ini.
+#
+# Flow:
+#   1. Verify all databases are frozen (db_freeze.config complete).
+#   2. Snapshot all enabled conda environments → conda_manifest.ini (always overwritten).
+#   3. Fingerprint eurlc-wgs.config, db_freeze.config, conda_manifest.ini → config_seal.ini.
+#
+# conda_manifest.ini is always regenerated as part of sealing -- it is not a
+# file the user maintains by hand.  The seal is meaningless without it.
 sub _cmd_generate_seal {
     $S_SUPPRESS_STARTUP_LOG = 0;
     my ($seal_name) = @_;
 
-    my $db_path   = $R_cfg->{general}{databases_config} // "";
-    my $prog_path = $R_cfg->{general}{programs_config}  // "";
+    my $db_path   = $R_cfg->{general}{db_freeze_config} // "";
     my $cfg_path  = $rundata{config}{path}              // "";
     my $seal_path = $R_cfg->{general}{seal}             // "";
 
     unless ($db_path && -f $db_path) {
-        log_message("ERROR: --generate-seal requires databases.config to be found. "
-                   . "Set general.databases_config or place databases.config next to "
+        log_message("ERROR: --generate-seal requires db_freeze.config to be found. "
+                   . "Set general.db_freeze_config or place db_freeze.config next to "
                    . "eurlc-wgs.config.", "red");
         return;
     }
 
-    # Default seal path: next to config file if not specified
+    # Resolve the directory where seal and manifest will be written.
+    my $config_dir = $cfg_path ne ""
+        ? File::Basename::dirname($cfg_path)
+        : File::Basename::dirname($db_path);
+
     if ($seal_path eq "") {
-        my $config_dir = $cfg_path ne ""
-            ? File::Basename::dirname($cfg_path)
-            : File::Basename::dirname($db_path);
         $seal_path = "$config_dir/config_seal.ini";
     }
 
-    # Check all databases are frozen
+    # Derive conda_manifest path from seal path (always next to it)
+    my $manifest_path = File::Basename::dirname($seal_path) . "/conda_manifest.ini";
+    # Store resolved path so startup verification can find it
+    $R_cfg->{general}{conda_manifest} = $manifest_path;
+
+    # ── 1. Check all databases are frozen ───────────────────────────────────
     my $dbs = load_databases_config($db_path);
     my @unfrozen;
     for my $name (sort keys %$dbs) {
@@ -27040,36 +28237,79 @@ sub _cmd_generate_seal {
     }
     if (@unfrozen) {
         log_message("ERROR: Cannot generate seal -- the following databases are not frozen "
-                   . "(marker_md5 not set in databases.config):", "red");
+                   . "(marker_md5 not set in db_freeze.config):", "red");
         log_message("ERROR:   - $_", "red") for @unfrozen;
         log_message("ERROR: Run --freeze-databases first.", "red");
         return;
     }
 
-    # Compute fingerprints
+    # ── 2. Snapshot conda environments → conda_manifest.ini ─────────────────
+    log_message("NOTICE: Snapshotting conda environments → $manifest_path");
+
+    my (%seen_env, @envs_to_snap);
+    for my $tool (sort keys %$R_cfg) {
+        next unless ref($R_cfg->{$tool}) eq 'HASH';
+        my $env = $R_cfg->{$tool}{env} // "";
+        next if $env eq "" || $env eq "base";
+        next if $seen_env{$env}++;
+        next unless ($R_cfg->{$tool}{enabled} // 1);
+        push @envs_to_snap, { tool => $tool, env => $env };
+    }
+
+    my $created = strftime("%Y-%m-%d %H:%M:%S", localtime);
+
+    open my $mfh, '>', $manifest_path or do {
+        log_message("ERROR: Cannot write conda_manifest.ini [$manifest_path]: $!", "red");
+        return;
+    };
+    print $mfh "# conda_manifest.ini -- conda environment fingerprints\n";
+    print $mfh "# Auto-generated by --generate-seal on $created\n";
+    print $mfh "# Do not edit by hand. Regenerate with: eurlc-wgs --generate-seal\n\n";
+
+    my $snap_errors = 0;
+    for my $entry (sort { $a->{env} cmp $b->{env} } @envs_to_snap) {
+        my ($tool, $env) = @{$entry}{qw(tool env)};
+        my $fp = conda_env_fingerprint($env);
+        if (defined $fp) {
+            print $mfh "[$env]\n";
+            print $mfh "explicit_list_md5 = $fp\n";
+            print $mfh "tool              = $tool\n\n";
+            log_message("NOTICE:   OK  $env");
+        } else {
+            log_message("WARNING: Could not fingerprint conda env [$env] (not installed?)", "yellow");
+            print $mfh "[$env]\n";
+            print $mfh "; WARNING: environment not found at seal time\n";
+            print $mfh "explicit_list_md5 =\n";
+            print $mfh "tool              = $tool\n\n";
+            $snap_errors++;
+        }
+    }
+    close $mfh;
+
+    if ($snap_errors) {
+        log_message("WARNING: $snap_errors environment(s) could not be fingerprinted -- "
+                   . "install missing tools before sealing.", "yellow");
+    }
+
+    # ── 3. Fingerprint all three config files → config_seal.ini ─────────────
     my %fp;
-    $fp{eurlc_wgs_config} = ($cfg_path  && -f $cfg_path)  ? md5_file($cfg_path)  : "";
-    $fp{databases_config} = ($db_path   && -f $db_path)   ? md5_file($db_path)   : "";
-    $fp{programs_config}  = ($prog_path && -f $prog_path) ? md5_file($prog_path) : "";
+    $fp{eurlc_wgs_config} = ($cfg_path       && -f $cfg_path)       ? md5_file($cfg_path)       : "";
+    $fp{db_freeze_config} = ($db_path        && -f $db_path)        ? md5_file($db_path)        : "";
+    $fp{conda_manifest}   = ($manifest_path  && -f $manifest_path)  ? md5_file($manifest_path)  : "";
 
-    my $created   = strftime("%Y-%m-%d %H:%M:%S", localtime);
-
-    open my $fh, '>', $seal_path or do {
-        log_message("ERROR: Cannot write $seal_path: $!", "red");
+    open my $sfh, '>', $seal_path or do {
+        log_message("ERROR: Cannot write config_seal.ini [$seal_path]: $!", "red");
         return;
     };
 
-    print $fh <<"SEAL";
+    print $sfh <<"SEAL";
 # config_seal.ini -- configuration attestation
 #
 # This file locks the configuration to a named, approved state.
 # If present, the pipeline verifies fingerprints at startup and warns
 # if any config file has changed since the seal was generated.
 #
-# To verify manually:
-#   md5sum eurlc-wgs.config databases.config programs.config
-#
-# To regenerate:
+# To regenerate (also regenerates conda_manifest.ini):
 #   eurlc-wgs --generate-seal="$seal_name"
 #
 # To unseal (run without verification): delete or move this file.
@@ -27081,309 +28321,644 @@ created_by  = (fill in your name)
 description = (fill in: purpose, validated species, accreditation reference, etc.)
 
 [fingerprints]
-eurlc_wgs_config   = $fp{eurlc_wgs_config}
-databases_config   = $fp{databases_config}
-programs_config    = $fp{programs_config}
+eurlc_wgs_config = $fp{eurlc_wgs_config}
+db_freeze_config = $fp{db_freeze_config}
+conda_manifest   = $fp{conda_manifest}
 SEAL
 
-    close $fh;
+    close $sfh;
 
     log_message("NOTICE: Config seal generated: $seal_path", "green");
     log_message("NOTICE: Seal name: $seal_name");
-    log_message("NOTICE: Open the file and fill in 'created_by' and 'description'.");
-    log_message("NOTICE: Reference this seal name in your method log when recording runs.");
+    log_message("NOTICE: Open $seal_path and fill in 'created_by' and 'description'.");
+    log_message("NOTICE: Reference this seal name in your method documentation when recording runs.");
 }
 
-# --install-scheme[=Species]: download a cgMLST/wgMLST schema from Chewie-NS and
-# (optionally) prepare it for use. The full schema is always stored intact; a
-# separate filter file (targets list) is used at runtime via --genes-list so that
-# the schema never needs to be re-downloaded when the target set changes.
+# ---------------------------------------------------------------------------
+# load_schema_catalogs()
 #
-# Usage:
-#   eurlc-wgs --install-scheme=campylobacter
-#   eurlc-wgs --install-scheme=listeria
-#   eurlc-wgs --install-scheme            (lists available species)
+# Scans db/chewbbaca/catalog/*.json and merges all catalog files into a flat
+# hash of available schemas keyed by schema name.  Multiple catalog files are
+# merged; if the same schema name appears in more than one catalog, the last
+# file wins (alphabetical order).
 #
-# After download, the function prints what to add to databases.config.
-sub _cmd_install_scheme {
+# Returns: %catalog  (schema_name => catalog entry hashref)
+# ---------------------------------------------------------------------------
+sub load_schema_catalogs {
+    my $db = peekdir("db");
+    return () if $db eq "";
+
+    my $catalog_dir = "$db/chewbbaca/catalog";
+    return () unless -d $catalog_dir;
+
+    my %catalog;
+    for my $json_file (sort glob("$catalog_dir/*.json")) {
+        open(my $fh, "<:utf8", $json_file) or next;
+        my $content = do { local $/; <$fh> };
+        close $fh;
+
+        # Parse JSON: prefer JSON (XS) if available, fall back to JSON::PP (Perl core).
+        my $data;
+        eval {
+            local $@;
+            eval { require JSON; $data = JSON::decode_json($content) };
+            if ($@) {
+                require JSON::PP;
+                $data = JSON::PP::decode_json($content);
+            }
+        };
+        if ($@ || !defined $data) {
+            (my $err = $@) =~ s/ at .* line \d+.*//s;
+            log_message("WARNING: Could not parse catalog $json_file: $err", "yellow");
+            next;
+        }
+
+        my $cat_name = $data->{catalog_name} // basename($json_file, ".json");
+        my $schemas  = $data->{schemas} // [];
+        for my $entry (@$schemas) {
+            my $name = $entry->{name} or next;
+            $entry->{_catalog_name} = $cat_name;
+            $entry->{_catalog_file} = $json_file;
+            $catalog{$name} = $entry;
+        }
+    }
+    return %catalog;
+}
+
+# ---------------------------------------------------------------------------
+# _cmd_list_schemas()
+#
+# Lists installed schemas (from discover_installed_schemas) and available
+# schemas (from catalog JSONs in db/chewbbaca/catalog/).
+# ---------------------------------------------------------------------------
+sub _cmd_list_schemas {
     $S_SUPPRESS_STARTUP_LOG = 0;
-    my ($species_arg) = @_;
 
-    # ── Known schemas on Chewie-NS ────────────────────────────────────────────
-    # Full species list: https://chewbbaca.online/
-    # IDs verified 2025: chewBBACA DownloadSchema -sp <id> -sc 1 -o <outdir>
-    # chewBBACA creates a named subdirectory inside -o; we pass schemas/ as -o.
-    # Named shortcuts for the four primary food/zoonotic pathogen species.
-    # For any other species use: eurlc-wgs --install-scheme=<sp_id>.<sc_id>
-    # Full species list: https://chewbbaca.online/
-    my %known_schemes = (
-        campylobacter => {
-            label       => "Campylobacter jejuni cgMLST (Chewie-NS sp=6 sc=1)",
-            species_id  => 6,
-            schema_id   => 1,
-            filter_hint => "campylobacter_cgmlst_targets.txt",
-            note        => "Full wgMLST schema; use a targets file (--genes-list) to select cgMLST loci at runtime.",
-        },
-        listeria => {
-            label       => "Listeria monocytogenes cgMLST (Chewie-NS sp=18 sc=1)",
-            species_id  => 18,
-            schema_id   => 1,
-            filter_hint => "",
-            note        => "",
-        },
-        salmonella => {
-            label       => "Salmonella enterica cgMLST (Chewie-NS sp=14 sc=1)",
-            species_id  => 14,
-            schema_id   => 1,
-            filter_hint => "",
-            note        => "",
-        },
-        ecoli => {
-            label       => "Escherichia coli cgMLST (Chewie-NS sp=10 sc=1)",
-            species_id  => 10,
-            schema_id   => 1,
-            filter_hint => "ecoli_cgmlst_targets.txt",
-            note        => "Use a targets file to limit to cgMLST core loci.",
-        },
-    );
+    # ── Color shortcuts ───────────────────────────────────────────────────────
+    my $C_RESET  = colorize_for_screen("reset");
+    my $C_BOLD   = colorize_for_screen("bold");
+    my $C_DIM    = colorize_for_screen("dark");
+    my $C_CYAN   = colorize_for_screen("cyan");
+    my $C_GREEN  = colorize_for_screen("green");
+    my $C_YELLOW = colorize_for_screen("yellow");
+    my $C_WHITE  = colorize_for_screen("bold white");
 
-    # ── No species given: list available ─────────────────────────────────────
-    unless (defined $species_arg && $species_arg ne "") {
+    # ── Helper: print a section header ───────────────────────────────────────
+    my $LINE = "─" x 60;
+    my $DBL  = "═" x 60;
+
+    my $p = sub { print @_, "\n" };   # plain print + newline
+
+    $p->("");
+    $p->( $C_BOLD . $C_CYAN . $DBL . $C_RESET );
+    $p->( $C_BOLD . "  chewBBACA schema catalog" . $C_RESET );
+    $p->( $C_BOLD . $C_CYAN . $DBL . $C_RESET );
+
+    # ── Installed schemas ─────────────────────────────────────────────────────
+    my %installed = discover_installed_schemas();
+    my $n_inst = scalar keys %installed;
+
+    $p->("");
+    $p->( $C_BOLD . "  Installed schemas  ($n_inst)" . $C_RESET );
+    $p->( $C_DIM  . "  $LINE" . $C_RESET );
+
+    if (%installed) {
+        for my $name (sort keys %installed) {
+            my $s = $installed{$name};
+            my $enabled = ($s->{enabled} // 1);
+            my $status_c = $enabled ? $C_GREEN : $C_YELLOW;
+            my $status   = $enabled ? "enabled" : "disabled";
+
+            my $filter_raw = $s->{filter} // "";
+            my $filter_str = ($filter_raw eq "" || $filter_raw eq "unfiltered")
+                             ? "(wgMLST / unfiltered)"
+                             : "filter: " . basename($filter_raw);
+
+            my $desc    = $s->{description} // $s->{species} // "";
+            my $dir     = $s->{_schema_dir} // "";
+
+            $p->("");
+            $p->( "  " . $C_WHITE . $name . $C_RESET
+                  . "  " . $status_c . "[$status]" . $C_RESET );
+            $p->( "    " . $C_DIM . $desc . $C_RESET )         if $desc ne "";
+            $p->( "    " . $C_DIM . $filter_str . $C_RESET );
+            $p->( "    " . $C_DIM . "dir: $dir" . $C_RESET )   if $dir ne "";
+        }
+    } else {
+        $p->( "  " . $C_DIM . "(none installed)" . $C_RESET );
+        $p->( "  " . $C_DIM . "Use --install-schema=<name> to install a schema." . $C_RESET );
+    }
+
+    # ── Available schemas from catalog ───────────────────────────────────────
+    my %catalog = load_schema_catalogs();
+    my $n_cat = scalar keys %catalog;
+
+    $p->("");
+    $p->( $C_BOLD . "  Available in catalog  ($n_cat)" . $C_RESET );
+    $p->( $C_DIM  . "  $LINE" . $C_RESET );
+
+    if (%catalog) {
+        for my $name (sort keys %catalog) {
+            my $e       = $catalog{$name};
+            my $label   = $e->{label} // $name;
+            my $species = ref($e->{species}) eq 'ARRAY'
+                          ? join(", ", @{$e->{species}}) : ($e->{species} // "");
+            my $cat_n   = $e->{_catalog_name} // "";
+            my $is_inst = exists $installed{$name};
+            my $inst_tag = $is_inst
+                ? "  " . $C_GREEN . "[installed]" . $C_RESET
+                : "";
+
+            $p->("");
+            $p->( "  " . $C_WHITE . $name . $C_RESET . $inst_tag );
+            $p->( "    " . $label );
+            $p->( "    " . $C_DIM . $species . $C_RESET )  if $species ne "";
+            $p->( "    " . $C_DIM . "catalog: $cat_n" . $C_RESET ) if $cat_n ne "";
+
+            # Filters
+            if (ref($e->{filters}) eq 'HASH') {
+                my @fkeys = sort { # default filter first, then alphabetical
+                    my $ad = ($e->{filters}{$a}{default} // 0);
+                    my $bd = ($e->{filters}{$b}{default} // 0);
+                    $bd <=> $ad || $a cmp $b
+                } keys %{$e->{filters}};
+
+                for my $fn (@fkeys) {
+                    my $fi  = $e->{filters}{$fn};
+                    my $def = ($fi->{default} // 0);
+                    my $lbl = $fi->{label} // $fn;
+                    my $def_tag = $def
+                        ? "  " . $C_YELLOW . "[default filter]" . $C_RESET
+                        : "";
+                    $p->( sprintf("    %s  %-10s%s  %s%s",
+                          $C_DIM . "filter:" . $C_RESET,
+                          $fn, $C_RESET, $lbl, $def_tag) );
+                }
+            }
+        }
+    } else {
+        my $db = peekdir("db");
+        $p->( "  " . $C_DIM . "(no catalog files found in $db/chewbbaca/catalog/)" . $C_RESET );
+        $p->( "  " . $C_DIM . "Place JSON catalog files there, or run --update-catalog." . $C_RESET );
+    }
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    $p->("");
+    $p->( $C_DIM . "  $LINE" . $C_RESET );
+    $p->( "  Install a schema:    " . $C_CYAN . "eurlc-wgs --install-schema=<name>" . $C_RESET );
+    $p->( "  Install all:         " . $C_CYAN . "eurlc-wgs --install-schema=all" . $C_RESET );
+    $p->( "  Import a local dir:  " . $C_CYAN . "eurlc-wgs --import-schema=<dir>" . $C_RESET );
+    $p->("");
+}
+
+# ---------------------------------------------------------------------------
+# _cmd_install_schema($name_arg)
+#
+# Installs one or all schemas from the catalog.
+# --install-schema=<name>   install a named schema
+# --install-schema=all      install everything in the catalog
+# --install-schema          show help / list catalog
+# ---------------------------------------------------------------------------
+sub _cmd_install_schema {
+    $S_SUPPRESS_STARTUP_LOG = 0;
+    my ($name_arg) = @_;
+
+    my %catalog = load_schema_catalogs();
+
+    # ── No argument: show help ────────────────────────────────────────────────
+    unless (defined $name_arg && $name_arg ne "") {
         log_message("NOTICE:");
-        log_message("NOTICE: Usage:  eurlc-wgs --install-scheme=<species>");
-        log_message("NOTICE:         eurlc-wgs --install-scheme=all");
-        log_message("NOTICE:         eurlc-wgs --install-scheme=<sp_id>.<sc_id>   (any Chewie-NS schema by number)");
+        log_message("NOTICE: Usage:  eurlc-wgs --install-schema=<name>");
+        log_message("NOTICE:         eurlc-wgs --install-schema=all");
         log_message("NOTICE:");
-        log_message("NOTICE: Named species shortcuts:");
-        for my $key (sort keys %known_schemes) {
-            log_message(sprintf("NOTICE:   %-16s %s", $key, $known_schemes{$key}{label}));
+        if (%catalog) {
+            log_message("NOTICE: Available schemas in catalog:");
+            for my $n (sort keys %catalog) {
+                log_message(sprintf("NOTICE:   %-35s %s", $n, $catalog{$n}{label} // ""));
+            }
+        } else {
+            my $db = peekdir("db");
+            log_message("NOTICE: No catalog files found in $db/chewbbaca/catalog/");
+            log_message("NOTICE: Run --list-schemas for details.");
         }
         log_message("NOTICE:");
-        log_message("NOTICE: Full species list: https://chewbbaca.online/");
-        log_message("NOTICE:");
-        log_message("NOTICE: Examples:");
-        log_message("NOTICE:   eurlc-wgs --install-scheme=campylobacter");
-        log_message("NOTICE:   eurlc-wgs --install-scheme=6.1        (same as campylobacter)");
-        log_message("NOTICE:   eurlc-wgs --install-scheme=all");
+        log_message("NOTICE: See all schemas and status:  eurlc-wgs --list-schemas");
         return;
     }
 
-    # ── Numeric mode: --install-scheme=<sp_id>.<sc_id> ───────────────────────
-    if ($species_arg =~ /^(\d+)\.(\d+)$/) {
-        my ($sp_id, $sc_id) = ($1, $2);
-        log_message("NOTICE:");
-        log_message("NOTICE: Numeric mode: Chewie-NS species=$sp_id  schema=$sc_id");
-        # Check if this matches a named scheme (for filter hints)
-        my ($named) = grep { $known_schemes{$_}{species_id} == $sp_id
-                           && $known_schemes{$_}{schema_id}  == $sc_id
-                         } keys %known_schemes;
-        my $sc_ref = $named
-            ? $known_schemes{$named}
-            : { label => "Chewie-NS sp=${sp_id} sc=${sc_id}",
-                species_id => $sp_id, schema_id => $sc_id,
-                filter_hint => "", note => "" };
-        _install_one_scheme($sc_ref, \%known_schemes);
-        return;
-    }
-
-    # ── Install all schemes ───────────────────────────────────────────────────
-    if (lc($species_arg) eq "all") {
-        my @all_keys = sort keys %known_schemes;
-        log_message("NOTICE:");
-        log_message("NOTICE: Installing all " . scalar(@all_keys) . " available schemes:");
-        log_message("NOTICE:   - $known_schemes{$_}{label}") for @all_keys;
-        log_message("NOTICE:");
-        my $db_check = peekdir("db");
-        if ($db_check eq "") {
-            log_message("ERROR: No database directory configured. Set general.db in eurlc-wgs.config.", "red");
+    # ── Install all ───────────────────────────────────────────────────────────
+    if (lc($name_arg) eq "all") {
+        unless (%catalog) {
+            log_message("ERROR: No schemas found in catalog.", "red");
             return;
         }
+        my @all = sort keys %catalog;
+        log_message("NOTICE:");
+        log_message("NOTICE: Installing all " . scalar(@all) . " catalog schemas:");
+        log_message("NOTICE:   - $catalog{$_}{label}") for @all;
+        log_message("NOTICE:");
         my @failed;
-        for my $k (@all_keys) {
+        for my $n (@all) {
             log_message("NOTICE:");
             log_message("NOTICE: ════════════════════════════════════════════════════════");
-            log_message("NOTICE: Installing: $known_schemes{$k}{label}");
+            log_message("NOTICE: Installing: $catalog{$n}{label} [$n]");
             log_message("NOTICE: ════════════════════════════════════════════════════════");
-            my $ok = _install_one_scheme($known_schemes{$k}, \%known_schemes);
-            push @failed, $known_schemes{$k}{label} unless $ok;
+            my $ok = _install_one_schema($catalog{$n});
+            push @failed, $n unless $ok;
         }
         log_message("NOTICE:");
         log_message("NOTICE: ════════════════════════════════════════════════════════");
         if (@failed) {
-            log_message("WARNING: The following schemes failed to install:", "yellow");
-            log_message("WARNING:   - $_") for @failed;
+            log_message("WARNING: Failed to install: " . join(", ", @failed), "yellow");
         } else {
-            log_message("NOTICE: ✓  All schemes installed successfully.", "green");
+            log_message("NOTICE: ✓  All schemas installed successfully.", "green");
         }
-        log_message("NOTICE: Add the databases.config snippets printed above for each scheme.");
         return;
     }
 
-    # ── Named species ─────────────────────────────────────────────────────────
-    my $key = lc($species_arg);
-    $key =~ s/[\s_-]+//g;   # normalize: "C. jejuni" → "cjejuni", "e-coli" → "ecoli"
-
-    my $match;
-    for my $k (sort keys %known_schemes) {
-        if ($k eq $key || index($k, $key) == 0 || index($key, $k) == 0) {
-            $match = $k;
-            last;
+    # ── Named schema ──────────────────────────────────────────────────────────
+    my $entry = $catalog{$name_arg};
+    unless ($entry) {
+        # Fuzzy match
+        my ($match) = grep { index($_, $name_arg) >= 0 || index($name_arg, $_) >= 0 }
+                      sort keys %catalog;
+        if ($match) {
+            log_message("NOTICE: Interpreting '$name_arg' as '$match'.");
+            $entry = $catalog{$match};
+        } else {
+            log_message("ERROR: Schema '$name_arg' not found in catalog.", "red");
+            log_message("NOTICE: Run --list-schemas to see available schemas.");
+            return;
         }
     }
 
-    unless (defined $match) {
-        log_message("ERROR: Unknown species '$species_arg'.", "red");
-        log_message("NOTICE: Run 'eurlc-wgs --install-scheme' (no argument) to list available species.");
-        log_message("NOTICE: Use '--install-scheme=<sp_id>.<sc_id>' to install any schema by number.");
-        return;
-    }
-
-    _install_one_scheme($known_schemes{$match}, \%known_schemes);
+    _install_one_schema($entry);
 }
 
-# _install_one_scheme($sc_hashref, $known_schemes_hashref)
-# $sc_hashref must have: species_id, schema_id, label, filter_hint, note
+# ---------------------------------------------------------------------------
+# _install_one_schema($catalog_entry_hashref)
 #
-# chewBBACA 3.x DownloadSchema behaviour:
-#   -o <container_dir>  must be empty or non-existent.
-#   chewBBACA creates a named subdirectory inside it, e.g.:
-#       <container_dir>/Campylobacter_jejuni_wgMLST/
-#   The .fasta files land there, NOT directly in <container_dir>.
+# Downloads (or otherwise installs) one schema based on its catalog entry,
+# then writes a schema.ini into the schema directory.
 #
-# PrepExternalSchema must therefore target the subdirectory, not the container.
-# After PrepExternalSchema the final structure is:
-#   schemas/<container_dir>/<chewbbaca_schema_name>/   ← ready to use
+# The schema is placed directly at:
+#   db/chewbbaca/schemas/<schema_name>/
+#
+# chewBBACA DownloadSchema creates a named subdir inside the -o target, so
+# we use a temporary download container and then rename the inner subdir to
+# the canonical name.
 #
 # Returns 1 on success, 0 on failure.
-sub _install_one_scheme {
-    my ($sc, $known_schemes) = @_;
+# ---------------------------------------------------------------------------
+sub _install_one_schema {
+    my ($entry) = @_;
     my $db = peekdir("db");
     if ($db eq "") {
         log_message("ERROR: No database directory configured. Set general.db in eurlc-wgs.config.", "red");
         return 0;
     }
 
-    my $chewy_env  = $R_cfg->{chewbbaca}{env} // "eurlc-wgs-chewbbaca";
-    my $sp_id      = $sc->{species_id};
-    my $sc_id      = $sc->{schema_id};
+    my $schema_name = $entry->{name}
+        or do { log_message("ERROR: Catalog entry has no 'name' field.", "red"); return 0; };
 
-    # Container dir: empty wrapper that chewBBACA downloads into.
-    # Named after sp/sc so it is predictable and unique.
-    my $container  = "$db/chewbbaca/schemas/sp${sp_id}_sc${sc_id}";
+    my $label      = $entry->{label}   // $schema_name;
+    my $method     = ($entry->{install} // {})->{method} // "chewie-ns-download";
+    my $chewy_env  = $R_cfg->{chewbbaca}{env} // "eurlc-wgs-chewbbaca";
+    my $cpu        = ($entry->{install} // {})->{cpu} // $R_cfg->{general}{threads} // 4;
+
+    my $schema_dir = "$db/chewbbaca/schemas/$schema_name";
 
     log_message("NOTICE:");
-    log_message("NOTICE: ── Install scheme: $sc->{label} ─────────────────────");
-    log_message("NOTICE:   Download container : $container/");
-    log_message("NOTICE:   Chewie-NS          : species=$sp_id  schema=$sc_id");
-    log_message("NOTICE:   conda env          : $chewy_env");
+    log_message("NOTICE: ── Install schema: $label ──");
+    log_message("NOTICE:   Schema name  : $schema_name");
+    log_message("NOTICE:   Method       : $method");
+    log_message("NOTICE:   Target dir   : $schema_dir/");
+    log_message("NOTICE:   conda env    : $chewy_env");
     log_message("NOTICE:");
 
     ensure_dir("$db/chewbbaca/schemas");
 
-    # ── Check / clear existing container ─────────────────────────────────────
-    if (-d $container) {
-        my @contents = grep { -d $_ } glob("$container/*/");
-        if (@contents) {
-            log_message("NOTICE: Schema already downloaded: $container");
-            my $go = $ASSUME_YES || prompt_yes_no("  Remove and re-download?", 0);
+    # ── Already installed? ────────────────────────────────────────────────────
+    if (-d $schema_dir) {
+        my @fastas = glob("$schema_dir/*.fasta");
+        if (@fastas) {
+            log_message("NOTICE: Schema already installed at $schema_dir");
+            my $go = $ASSUME_YES || prompt_yes_no("  Remove and re-install?", 0);
             unless ($go) {
-                log_message("NOTICE: Skipping $sc->{label}.");
-                # Report path of existing schema for the config snippet below.
-                my ($existing) = @contents;
-                $existing =~ s{/$}{};
-                _print_schema_config($sc, $sp_id, $sc_id, $db, $existing);
+                log_message("NOTICE: Keeping existing installation.");
+                # Update schema.ini with catalog metadata (non-destructive merge)
+                _write_schema_ini($schema_dir, $entry, undef);
                 return 1;
             }
-            log_message("NOTICE: Removing existing download...");
-            system("rm -rf \"\Q$container\E\"");
+            log_message("NOTICE: Removing existing installation...");
+            system("rm -rf \"\Q$schema_dir\E\"");
         }
-        # Empty container is fine — chewBBACA accepts it.
     }
 
-    # ── Download from Chewie-NS ───────────────────────────────────────────────
-    log_message("NOTICE: Downloading schema from Chewie-NS (this may take a while)...");
-    my $dl_cmd = "conda run -n $chewy_env chewBBACA.py DownloadSchema"
-               . " -sp $sp_id -sc $sc_id -o \"$container\" --cpu 4";
-    log_message("NOTICE: Running: $dl_cmd");
-    my $rc = system($dl_cmd);
+    # ── Download: Chewie-NS ───────────────────────────────────────────────────
+    if ($method eq "chewie-ns-download") {
+        my $meta    = $entry->{source_meta} // {};
+        my $sp_id   = $meta->{species_id}
+            or do { log_message("ERROR: Catalog entry for $schema_name missing source_meta.species_id", "red"); return 0; };
+        my $sc_id   = $meta->{schema_id} // 1;
 
-    if ($rc != 0) {
-        log_message("ERROR: Schema download failed (exit code $rc).", "red");
-        log_message("NOTICE: Check your internet connection and that Chewie-NS is reachable.");
-        log_message("NOTICE: URL: https://chewbbaca.online/");
-        return 0;
-    }
+        # chewBBACA needs an empty container dir; it creates a named subdir inside.
+        my $dl_container = "$db/chewbbaca/schemas/.dl_${schema_name}_$$";
+        ensure_dir($dl_container);
 
-    # chewBBACA created exactly one subdir inside $container
-    my @subdirs = grep { -d $_ } glob("$container/*/");
-    unless (@subdirs) {
-        log_message("ERROR: Download appeared to succeed but no schema subdirectory found in $container", "red");
-        return 0;
-    }
-    my $raw_schema = $subdirs[0];
-    $raw_schema =~ s{/$}{};
-    log_message("NOTICE: ✓  Schema downloaded to $raw_schema", "green");
+        log_message("NOTICE: Downloading from Chewie-NS (species=$sp_id schema=$sc_id)...\n");
+        my $dl_cmd = "conda run -n $chewy_env --no-capture-output chewBBACA.py DownloadSchema"
+                   . " -sp $sp_id -sc $sc_id -o \"$dl_container\" --cpu $cpu";
+        log_message("NOTICE: Running: $dl_cmd");
+        my $rc = system($dl_cmd);
 
-    # ── PrepExternalSchema — run on the subdir, not the container ────────────
-    log_message("NOTICE: Running PrepExternalSchema...");
-    my $prep_out = "${raw_schema}_prepared";
-    my $prep_cmd = "conda run -n $chewy_env chewBBACA.py PrepExternalSchema"
-                 . " -g \"$raw_schema\" -o \"$prep_out\" --cpu 4";
-    log_message("NOTICE: Running: $prep_cmd");
-    my $rc2 = system($prep_cmd);
+        if ($rc != 0) {
+            log_message("ERROR: DownloadSchema failed (exit $rc).", "red");
+            system("rm -rf \"\Q$dl_container\E\"");
+            return 0;
+        }
 
-    my $final_schema;
-    if ($rc2 == 0 && -d $prep_out) {
-        system("rm -rf \"\Q$raw_schema\E\"");
-        rename $prep_out, $raw_schema
-            or log_message("WARNING: Could not rename prepared schema dir; using as-is.");
-        $final_schema = $raw_schema;
-        log_message("NOTICE: ✓  Schema prepared and ready at $final_schema", "green");
+        # Move the inner subdir to $schema_dir
+        my @subdirs = grep { -d $_ } glob("$dl_container/*/");
+        unless (@subdirs) {
+            log_message("ERROR: Download succeeded but no schema subdir found in $dl_container", "red");
+            system("rm -rf \"\Q$dl_container\E\"");
+            return 0;
+        }
+        my $inner = $subdirs[0];
+        $inner =~ s{/$}{};
+
+        rename($inner, $schema_dir)
+            or do {
+                log_message("ERROR: Could not move $inner → $schema_dir: $!", "red");
+                system("rm -rf \"\Q$dl_container\E\"");
+                return 0;
+            };
+        system("rm -rf \"\Q$dl_container\E\"");
+        log_message("NOTICE: ✓  Schema downloaded to $schema_dir", "green");
+
     } else {
-        log_message("WARNING: PrepExternalSchema failed — keeping raw downloaded schema.", "yellow");
-        log_message("WARNING: Re-run PrepExternalSchema manually if chewBBACA reports format errors.");
-        $final_schema = $raw_schema;
+        log_message("ERROR: Unknown install method '$method' for schema $schema_name.", "red");
+        log_message("NOTICE: Supported methods: chewie-ns-download");
+        return 0;
     }
 
-    _print_schema_config($sc, $sp_id, $sc_id, $db, $final_schema);
+    # ── PrepExternalSchema ────────────────────────────────────────────────────
+    # Uses ensure_schema_prepared() which handles short/ dir detection.
+    log_message("NOTICE: Running PrepExternalSchema to prepare the schema...\n");
+    unless (ensure_schema_prepared($schema_dir, $schema_name)) {
+        log_message("WARNING: PrepExternalSchema failed — schema may not be usable.", "yellow");
+        # Don't abort — the schema is on disk; user may fix manually.
+    }
+
+    # ── Resolve and install filter files ─────────────────────────────────────
+    my $active_filter = _install_schema_filters($schema_dir, $entry, $db);
+
+    # ── Write schema.ini ─────────────────────────────────────────────────────
+    _write_schema_ini($schema_dir, $entry, $active_filter);
+
+    log_message("NOTICE:");
+    log_message("NOTICE: ✓  Schema '$schema_name' installed and ready.", "green");
+    log_message("NOTICE:    Path: $schema_dir");
+    log_message("NOTICE:    Run --list-schemas to verify.");
     return 1;
 }
 
-sub _print_schema_config {
-    my ($sc, $sp_id, $sc_id, $db, $schema_path) = @_;
+# ---------------------------------------------------------------------------
+# _install_schema_filters($schema_dir, $entry, $db)
+#
+# Looks for filter files for each named filter in the catalog entry.
+# Priority: file_url download → bundled pipeline resource → already on disk.
+# Filter files are placed in $schema_dir/filters/<name>.txt
+#
+# Returns the name of the default filter (or undef if none).
+# ---------------------------------------------------------------------------
+sub _install_schema_filters {
+    my ($schema_dir, $entry, $db) = @_;
+    my $filters = $entry->{filters} // {};
+    return undef unless %$filters;
 
-    # ── Filter file hint ──────────────────────────────────────────────────────
-    my $filter_path = "";
-    if (($sc->{filter_hint} // "") ne "") {
-        $filter_path = "$db/chewbbaca/filters/$sc->{filter_hint}";
-        if (-f $filter_path) {
-            log_message("NOTICE: ✓  Filter file found: $filter_path", "green");
-        } else {
-            log_message("NOTICE:");
-            log_message("NOTICE: Optional targets file not found: $filter_path");
-            log_message("NOTICE: Place a list of locus names (one per line) there to run with");
-            log_message("NOTICE: a cgMLST subset instead of the full wgMLST schema.");
+    my $filter_dir = "$schema_dir/filters";
+    ensure_dir($filter_dir);
+
+    my $default_filter;
+
+    for my $fname (sort keys %$filters) {
+        my $fi = $filters->{$fname};
+        $default_filter = $fname if ($fi->{default} // 0);
+
+        # Target path
+        my $target_file = "$filter_dir/$fname.txt";
+
+        # Skip if filter has no file (e.g. wgmlst = run unfiltered)
+        unless (defined $fi->{file}) {
+            log_message("NOTICE:   Filter '$fname': no file (run unfiltered)");
+            next;
+        }
+
+        next if -f $target_file;   # already present
+
+        # Try file_url first
+        if (($fi->{file_url} // "") ne "") {
+            log_message("NOTICE:   Downloading filter '$fname' from $fi->{file_url} ...");
+            my $rc = system("curl -fsSL -o \"\Q$target_file\E\" \"$fi->{file_url}\"");
+            if ($rc == 0 && -f $target_file) {
+                log_message("NOTICE:   ✓  Filter '$fname' downloaded.", "green");
+                next;
+            }
+            log_message("WARNING:   Filter '$fname' download failed — trying bundled.", "yellow");
+        }
+
+        # Try bundled resource (pipeline installation dir / share/filters/)
+        if ($fi->{bundled} // 0) {
+            my $schema_name = $entry->{name} // "";
+            # Look for a bundled filter alongside the pipeline script, then in
+            # share/chewbbaca/filters/ relative to the script.
+            my $script_dir = dirname(abs_path($0));
+            my @search_paths = (
+                "$script_dir/share/chewbbaca/filters/${schema_name}/${fname}.txt",
+                "$script_dir/share/chewbbaca/filters/${fname}.txt",
+                "$db/chewbbaca/filters/${schema_name}_${fname}.txt",
+                "$db/chewbbaca/filters/${fname}.txt",
+            );
+            my ($found) = grep { -f $_ } @search_paths;
+            if ($found) {
+                system("cp \"\Q$found\E\" \"\Q$target_file\E\"");
+                log_message("NOTICE:   ✓  Filter '$fname' copied from $found", "green");
+                next;
+            }
+            log_message("WARNING:   Filter '$fname' marked bundled but not found in:", "yellow");
+            log_message("WARNING:     $_") for @search_paths;
+        }
+
+        log_message("NOTICE:   Filter '$fname': place a locus list at $target_file");
+    }
+
+    return $default_filter;
+}
+
+# ---------------------------------------------------------------------------
+# _write_schema_ini($schema_dir, $catalog_entry, $default_filter_name)
+#
+# Writes (or overwrites) $schema_dir/schema.ini from the catalog entry.
+# Existing ini fields not covered by the catalog are preserved if the file
+# already exists.
+# ---------------------------------------------------------------------------
+sub _write_schema_ini {
+    my ($schema_dir, $entry, $default_filter) = @_;
+
+    my $ini_path = "$schema_dir/schema.ini";
+
+    my $name        = $entry->{name}        // basename($schema_dir);
+    my $label       = $entry->{label}       // $name;
+    my $description = $entry->{description} // $label;
+    my $version     = $entry->{version}     // "1";
+    my $source      = $entry->{source}      // "unknown";
+    my $source_url  = ($entry->{source_meta} // {})->{url} // "";
+    my $species_ref = $entry->{species}     // [];
+    my $species_str = ref($species_ref) eq 'ARRAY' ? join(", ", @$species_ref) : $species_ref;
+
+    # Build filter value: name of default filter, or "unfiltered"
+    my $filter_val = $default_filter // "unfiltered";
+    # Point to the actual file if it exists
+    if ($default_filter) {
+        my $fpath = "$schema_dir/filters/${default_filter}.txt";
+        $filter_val = "filters/${default_filter}.txt" if -f $fpath;
+    }
+
+    open(my $fh, ">:utf8", $ini_path)
+        or do { log_message("WARNING: Could not write $ini_path: $!", "yellow"); return; };
+
+    print $fh "; schema.ini — auto-generated by eurlc-wgs --install-schema\n";
+    print $fh "; Edit only if you need to override pipeline behaviour.\n";
+    print $fh "\n";
+    print $fh "[schema]\n";
+    print $fh "name        = $name\n";
+    print $fh "label       = $label\n";
+    print $fh "description = $description\n";
+    print $fh "version     = $version\n";
+    print $fh "species     = $species_str\n";
+    print $fh "source      = $source\n";
+    print $fh "source_url  = $source_url\n";
+    print $fh "filter      = $filter_val\n";
+    print $fh "enabled     = 1\n";
+
+    # Write source_meta fields for provenance
+    my $meta = $entry->{source_meta} // {};
+    if (%$meta) {
+        print $fh "\n[source_meta]\n";
+        for my $k (sort keys %$meta) {
+            next if $k eq "url";   # already in [schema]
+            print $fh "$k = $meta->{$k}\n";
         }
     }
 
-    # ── databases.config snippet ──────────────────────────────────────────────
-    my $schema_key = (split m{/}, $schema_path)[-1];
-    my $filter_val = (-f $filter_path) ? $filter_path : "unfiltered";
-    log_message("NOTICE:");
-    log_message("NOTICE: ── Add to databases.config ────────────────────────────");
-    log_message("NOTICE:");
-    log_message("NOTICE: [chewbbaca_schemas.$schema_key]");
-    log_message("NOTICE: enabled  = 1");
-    log_message("NOTICE: path     = $schema_path");
-    log_message("NOTICE: filter   = $filter_val");
-    log_message("NOTICE: species  = $sc->{label}");
-    log_message("NOTICE: note     = Downloaded from Chewie-NS sp=$sp_id sc=$sc_id");
-    log_message("NOTICE:");
-    if (($sc->{note} // "") ne "") {
-        log_message("NOTICE: Note: $sc->{note}");
+    close $fh;
+    log_message("NOTICE: ✓  Wrote schema.ini to $ini_path", "green");
+}
+
+# ---------------------------------------------------------------------------
+# _cmd_import_schema($dir)
+#
+# Imports a locally available schema directory into db/chewbbaca/schemas/.
+# The directory must contain .fasta files. A schema.ini is created if absent.
+# ---------------------------------------------------------------------------
+sub _cmd_import_schema {
+    $S_SUPPRESS_STARTUP_LOG = 0;
+    my ($dir) = @_;
+
+    unless (defined $dir && $dir ne "" && -d $dir) {
         log_message("NOTICE:");
+        log_message("NOTICE: Usage:  eurlc-wgs --import-schema=<path/to/schema/dir>");
+        log_message("NOTICE:");
+        log_message("NOTICE: The directory must contain .fasta files (one per locus).");
+        log_message("NOTICE: A schema.ini will be created from a template that you can edit.");
+        log_message("NOTICE:");
+        if (defined $dir && $dir ne "" && !-d $dir) {
+            log_message("ERROR: Directory not found: $dir", "red");
+        }
+        return;
     }
-    log_message("NOTICE: ✓  Done.", "green");
+
+    my @fastas = glob("$dir/*.fasta");
+    unless (@fastas) {
+        log_message("ERROR: No .fasta files found in $dir", "red");
+        log_message("NOTICE: The schema directory must contain one .fasta file per locus.");
+        return;
+    }
+
+    my $db = peekdir("db");
+    if ($db eq "") {
+        log_message("ERROR: No database directory configured. Set general.db in eurlc-wgs.config.", "red");
+        return;
+    }
+
+    my $basename    = basename($dir);
+    my $schema_name = $basename;
+    $schema_name    =~ s/[^A-Za-z0-9_-]/_/g;
+    my $schema_dir  = "$db/chewbbaca/schemas/$schema_name";
+
+    log_message("NOTICE:");
+    log_message("NOTICE: ── Import schema ──────────────────────────────────────");
+    log_message("NOTICE:   Source      : $dir");
+    log_message("NOTICE:   Schema name : $schema_name");
+    log_message("NOTICE:   Target dir  : $schema_dir");
+    log_message("NOTICE:   Loci found  : " . scalar(@fastas));
+    log_message("NOTICE:");
+
+    if (-d $schema_dir) {
+        my $go = $ASSUME_YES || prompt_yes_no("  Target already exists. Overwrite?", 0);
+        unless ($go) {
+            log_message("NOTICE: Aborted.");
+            return;
+        }
+        system("rm -rf \"\Q$schema_dir\E\"");
+    }
+
+    system("cp -r \"\Q$dir\E\" \"\Q$schema_dir\E\"") == 0
+        or do { log_message("ERROR: Failed to copy $dir → $schema_dir: $!", "red"); return; };
+
+    log_message("NOTICE: ✓  Copied to $schema_dir", "green");
+
+    # Write a template schema.ini if not already present
+    unless (-f "$schema_dir/schema.ini") {
+        my $fake_entry = {
+            name        => $schema_name,
+            label       => $schema_name,
+            description => "Imported from $dir",
+            version     => "1",
+            source      => "custom",
+            species     => [],
+            source_meta => {},
+        };
+        _write_schema_ini($schema_dir, $fake_entry, undef);
+        log_message("NOTICE: Edit $schema_dir/schema.ini to set species, description, etc.");
+    }
+
+    # Run PrepExternalSchema
+    log_message("NOTICE: Running PrepExternalSchema...");
+    ensure_schema_prepared($schema_dir, $schema_name);
+
+    log_message("NOTICE:");
+    log_message("NOTICE: ✓  Schema '$schema_name' imported.", "green");
+    log_message("NOTICE:    Run --list-schemas to verify.");
+}
+
+# ---------------------------------------------------------------------------
+# _cmd_update_catalog($url)
+#
+# Stub for v1: placeholder for downloading updated catalog JSON files.
+# ---------------------------------------------------------------------------
+sub _cmd_update_catalog {
+    $S_SUPPRESS_STARTUP_LOG = 0;
+    my ($url) = @_;
+    log_message("NOTICE:");
+    log_message("NOTICE: --update-catalog is not yet implemented in this version.");
+    log_message("NOTICE: To add schemas to the catalog, place JSON files in:");
+    my $db = peekdir("db");
+    log_message("NOTICE:   $db/chewbbaca/catalog/");
+    log_message("NOTICE: See the builtin.json distributed with the pipeline for the format.");
+    log_message("NOTICE:");
 }
 
 sub md5_file {
@@ -30629,13 +32204,36 @@ sub check_conda_tool {
    }
 
    ################## test database
-   
+   # Skip for programs whose database is managed by db_freeze.config
+   # (resolve_and_verify_databases already verified those at startup and
+   # updated $R_cfg->{$program}{db_path} to the correct resolved path).
+   # Running db_exists() on top of that would use the still-raw db_test
+   # path and could give a misleading "Try downloading?" prompt.
+   my $managed_by_db_manifest = do {
+       my $db_path = $R_cfg->{general}{db_freeze_config} // "";
+       my $result = 0;
+       if ($db_path ne "" && -f $db_path) {
+           my $dbs = load_databases_config($db_path);
+           # Check if any entry in db_freeze.config maps to this program via config_key
+           $result = grep { ($dbs->{$_}{config_key} // "") =~ /^\Q$program\E\./ } keys %$dbs;
+       }
+       # Bracken is an obligatory part of kraken2 analysis and shares kraken2's
+       # database directory. Its db_path and db_test are propagated automatically
+       # by resolve_and_verify_databases when kraken2 is resolved. Treat it as
+       # managed (skip the legacy db_exists prompt) whenever kraken2 is managed.
+       if (!$result && $program eq "bracken" && $db_path ne "" && -f $db_path) {
+           my $dbs = load_databases_config($db_path);
+           $result = grep { ($dbs->{$_}{config_key} // "") =~ /^kraken2\./ } keys %$dbs;
+       }
+       $result;
+   };
+
    my $test = $R_cfg->{$program}->{db_test};
    _fill_placeholders__safe_replace(\$test, "__ENV__", $env);
    $test = fill_placeholders($test);
-   
-   if($test) {
-      
+
+   if($test && !$managed_by_db_manifest) {
+
      if ( ! db_exists($program) ) {
 
        # Need installation. Default answer when actually prompted differs:

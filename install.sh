@@ -34,6 +34,7 @@ OPTIONAL_ENV_DIR="${ENV_DIR}/optional"
 TEMPLATE_DIR="${SRC_DIR}/templates"
 ASSET_DIR="${SRC_DIR}/assets"
 HELP_FILE="${SRC_DIR}/docs/help.txt"
+RESOURCE_DIR="${SRC_DIR}/resources"
 
 MAIN_ENV="eurlc-wgs"
 MAIN_YML="${CORE_ENV_DIR}/eurlc-wgs.yml"
@@ -189,6 +190,7 @@ TARGET_SHARE="${CONDA_BASE_ACTUAL}/share/eurlc-wgs"
 TARGET_TEMPLATES="${TARGET_SHARE}/templates"
 TARGET_ASSETS="${TARGET_SHARE}/assets"
 TARGET_ENVS="${TARGET_SHARE}/envs"
+TARGET_RESOURCES="${TARGET_SHARE}/resources"
 
 echo
 echo ">>> Main environment: ${EURLC_ENV_PATH}"
@@ -198,6 +200,7 @@ mkdir -p "${TARGET_BIN}"
 mkdir -p "${TARGET_TEMPLATES}"
 mkdir -p "${TARGET_ASSETS}"
 mkdir -p "${TARGET_ENVS}"
+mkdir -p "${TARGET_RESOURCES}"
 
 # -----------------------------------------------------------------------------
 # Install executable scripts
@@ -252,7 +255,14 @@ if [[ -d "${ASSET_DIR}" ]]; then
 else
     echo "WARNING: Missing assets directory: ${ASSET_DIR}"
 fi
-
+echo
+echo ">>> Installing resources into ${TARGET_RESOURCES}"
+if [[ -d "${RESOURCE_DIR}" ]]; then
+    cp -pr "${RESOURCE_DIR}/." "${TARGET_RESOURCES}/"
+    echo ">>> Resources installed."
+else
+    echo "WARNING: Missing resources directory: ${RESOURCE_DIR} (skipping)"
+fi
 echo
 echo ">>> Installing help file"
 if [[ -f "${HELP_FILE}" ]]; then

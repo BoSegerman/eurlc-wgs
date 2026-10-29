@@ -29116,10 +29116,13 @@ sub _cmd_install_efsa_schemas {
         $clone_target = "$tmpdir/$EFSA_REPO_NAME";
 
         log_message("NOTICE: Cloning EFSA repository (shallow clone, this may take a minute)...");
-        my $clone_out = `git clone --depth 1 --quiet "$EFSA_REPO_URL" \"\Q$clone_target\E\" 2>&1`;
-        if ($? != 0 || !-d $clone_target) {
-            log_message("ERROR: git clone failed:\n$clone_out", "red");
-            log_message("NOTICE: Make sure the network can reach dev.azure.com from this machine.");
+        # Use list form — no shell involved, no path escaping issues.
+        # Git prints progress to stderr which goes to the terminal (desirable).
+        my $clone_rc = system("git", "clone", "--depth", "1", "--no-tags",
+                              $EFSA_REPO_URL, $clone_target);
+        if ($clone_rc != 0 || !-d $clone_target) {
+            log_message("ERROR: git clone failed (exit " . ($clone_rc >> 8) . ").", "red");
+            log_message("NOTICE: Test manually: git clone --depth 1 \"$EFSA_REPO_URL\" /tmp/efsa-test");
             return;
         }
         log_message("NOTICE: ✓  Clone complete.", "green");

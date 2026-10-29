@@ -113,8 +113,9 @@ foreach my $arg (@ARGV) {
     if ($arg =~ /^(?:--?)?assume-yes$/)               { $ASSUME_YES = 1; }
     if ($arg =~ /^(?:--?)?setup$/)                    { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?freeze-databases(?:=|$)/)   { $S_SUPPRESS_STARTUP_LOG = 1; }
-    if ($arg =~ /^(?:--?)?generate-seal(?:=|$)/)      { $S_SUPPRESS_STARTUP_LOG = 1; }
-    if ($arg =~ /^(?:--?)?install-scheme(?:=|$)/)     { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?generate-seal(?:=|$)/)        { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?install-scheme(?:=|$)/)       { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?install-efsa-schemas(?:=|$)/){ $S_SUPPRESS_STARTUP_LOG = 1; }
 }
 
 
@@ -2552,6 +2553,7 @@ my %early_handled_args = (
     "list-schemas"     => 1,   # list installed and available schemas
     "import-schema"    => 1,   # also matches --import-schema=Dir (prefix match below)
     "update-catalog"   => 1,   # also matches --update-catalog[=url]
+    "install-efsa-schemas" => 1,  # install EFSA One Health cgMLST schemas (also matches =species,...)
 );
 # generate-seal=Name and install-scheme/schema=Species are passed as keys with the =... suffix
 for my $key (keys %args_handled) {
@@ -2559,6 +2561,7 @@ for my $key (keys %args_handled) {
     $early_handled_args{$key} = 1 if $key =~ /^install-scheme=/;
     $early_handled_args{$key} = 1 if $key =~ /^install-schema=/;
     $early_handled_args{$key} = 1 if $key =~ /^import-schema=/;
+    $early_handled_args{$key} = 1 if $key =~ /^install-efsa-schemas=/;
     $early_handled_args{$key} = 1 if $key =~ /^update-catalog/;
 }
 
@@ -2708,7 +2711,8 @@ if ( $R_cfg->{general}{archive_results} ) {
     my $found_install_schema = exists $args{"install-schema"};
     my $found_list_schemas   = exists $args{"list-schemas"};
     my $found_import_schema  = exists $args{"import-schema"};
-    my $found_update_catalog = exists $args{"update-catalog"};
+    my $found_update_catalog    = exists $args{"update-catalog"};
+    my $found_install_efsa     = exists $args{"install-efsa-schemas"};
 
     if ($found_setup) {
         _cmd_setup();
@@ -2753,6 +2757,12 @@ if ( $R_cfg->{general}{archive_results} ) {
         my $url_arg = $args{"update-catalog"};
         $url_arg = undef if defined $url_arg && $url_arg eq "";
         _cmd_update_catalog($url_arg);
+        close_logfile();
+        exit 0;
+    }
+    if ($found_install_efsa) {
+        my $efsa_arg = $args{"install-efsa-schemas"} // "";
+        _cmd_install_efsa_schemas($efsa_arg);
         close_logfile();
         exit 0;
     }
@@ -28959,6 +28969,438 @@ sub _cmd_update_catalog {
     log_message("NOTICE:   $db/chewbbaca/catalog/");
     log_message("NOTICE: See the builtin.json distributed with the pipeline for the format.");
     log_message("NOTICE:");
+}
+
+# ---------------------------------------------------------------------------
+# _cmd_install_efsa_schemas()
+#
+# Downloads cgMLST schemas and allele filters from the EFSA One Health
+# Azure DevOps repository:
+#   https://dev.azure.com/efsa-devops/EFSA/_git/efsa.wgs.onehealth
+#
+# What EFSA publishes:
+#   data/Campylobacter_schema/CAMPISO-PubMLST-8/   ← already PrepExternalSchema'd
+#     *.fasta, short/*.fasta                         ← allele sequences
+#     Campylobacter_jejuni_coli.trn                  ← prodigal training file
+#     list_loci_cgMLST_CAMPISO.txt                   ← cgMLST loci filter
+#   data/chewbbaca_filters/
+#     cgMLST_ecoli.txt                               ← E. coli cgMLST loci filter
+#     cgMLST_salmonella.txt                          ← Salmonella cgMLST loci filter
+#
+# After this command:
+#   db/chewbbaca/schemas/CAMPISO-PubMLST-8/         ← installed & ready
+#   db/chewbbaca/filters/cgMLST_ecoli.txt
+#   db/chewbbaca/filters/cgMLST_salmonella.txt
+#
+# Note: E. coli and Salmonella schemas must be installed separately (PubMLST wgMLST).
+# The filters downloaded here will be applied automatically once those schemas are
+# installed and have matching filter paths.
+# ---------------------------------------------------------------------------
+sub _cmd_install_efsa_schemas {
+    $S_SUPPRESS_STARTUP_LOG = 0;
+    my ($arg) = @_;
+    $arg //= "";
+
+    my $EFSA_REPO_URL  = "https://dev.azure.com/efsa-devops/EFSA/_git/efsa.wgs.onehealth";
+    my $EFSA_REPO_NAME = "efsa.wgs.onehealth";
+
+    # ── Species definitions ───────────────────────────────────────────────────
+    # Each entry describes one species:
+    #   install_type  : "efsa_campy"  — copy schema from EFSA repo (no chewieNS download)
+    #                   "chewie_ns"   — install via chewieNS catalog, then wire EFSA filter
+    #   schema_name   : canonical name in db/chewbbaca/schemas/ and catalog
+    #   filter_file   : filename in EFSA repo data/chewbbaca_filters/ (undef = no EFSA filter)
+    #   aliases       : additional names accepted on the command line
+    my @SPECIES_ORDER = qw(campylobacter ecoli salmonella listeria);
+    my %SPECIES_DEF = (
+        campylobacter => {
+            label        => "Campylobacter jejuni/coli (EFSA CAMPISO-PubMLST-8, cgMLST, no filter)",
+            install_type => "efsa_campy",
+            schema_name  => "CAMPISO-PubMLST-8",
+            filter_file  => undef,
+            aliases      => [qw(campy campylobacter_jejuni campylobacter_coli)],
+        },
+        ecoli => {
+            label        => "Escherichia coli (chewieNS wgMLST + EFSA cgMLST filter)",
+            install_type => "chewie_ns",
+            schema_name  => "internal_ecoli_cNS",
+            filter_file  => "cgMLST_ecoli.txt",
+            aliases      => [qw(e.coli e_coli escherichia escherichia_coli)],
+        },
+        salmonella => {
+            label        => "Salmonella enterica (chewieNS wgMLST + EFSA cgMLST filter)",
+            install_type => "chewie_ns",
+            schema_name  => "internal_salmonella_cNS",
+            filter_file  => "cgMLST_salmonella.txt",
+            aliases      => [qw(salmonella_enterica)],
+        },
+        listeria => {
+            label        => "Listeria monocytogenes (chewieNS wgMLST, already cgMLST, no filter)",
+            install_type => "chewie_ns",
+            schema_name  => "internal_listeria_cNS",
+            filter_file  => undef,
+            aliases      => [qw(listeria_monocytogenes)],
+        },
+    );
+
+    # ── Parse species selection ───────────────────────────────────────────────
+    my @selected;
+    if ($arg eq "" || $arg eq "1" || lc($arg) eq "all") {
+        @selected = @SPECIES_ORDER;
+    } else {
+        # Build alias map
+        my %alias_map;
+        for my $key (@SPECIES_ORDER) {
+            $alias_map{$key} = $key;
+            $alias_map{$_}   = $key for @{ $SPECIES_DEF{$key}{aliases} // [] };
+        }
+        my %seen;
+        for my $tok (split /[,\s]+/, lc($arg)) {
+            $tok =~ s/^\s+|\s+$//g;
+            next if $tok eq "";
+            my $resolved = $alias_map{$tok};
+            unless (defined $resolved) {
+                log_message("WARNING: Unknown species '$tok' — skipping.", "yellow");
+                log_message("NOTICE:  Valid choices: " . join(", ", @SPECIES_ORDER));
+                next;
+            }
+            push @selected, $resolved unless $seen{$resolved}++;
+        }
+        unless (@selected) {
+            log_message("ERROR: No valid species specified.", "red");
+            log_message("NOTICE: Usage: --install-efsa-schemas[=campylobacter,ecoli,salmonella,listeria]");
+            return;
+        }
+    }
+
+    # ── Announce ──────────────────────────────────────────────────────────────
+    log_message("NOTICE:");
+    log_message("NOTICE: ── Download & install EFSA One Health schemas ────────────");
+    log_message("NOTICE:   Source    : $EFSA_REPO_URL");
+    log_message("NOTICE:   Species   : " . join(", ", @selected));
+    log_message("NOTICE:   After this command your pipeline is ready to run.");
+    log_message("NOTICE:");
+
+    # ── Prerequisites ─────────────────────────────────────────────────────────
+    my $git_version = `git --version 2>&1`;
+    unless ($git_version =~ /git version/) {
+        log_message("ERROR: 'git' is not available. Install git and try again.", "red");
+        return;
+    }
+
+    my $db = peekdir("db");
+    if (!$db || $db eq "") {
+        log_message("ERROR: No database directory configured. Set general.db in eurlc-wgs.config.", "red");
+        return;
+    }
+
+    my $schemas_root = "$db/chewbbaca/schemas";
+    my $filters_root = "$db/chewbbaca/filters";
+    ensure_dir($schemas_root);
+    ensure_dir($filters_root);
+
+    # ── Load catalog for chewieNS installations ───────────────────────────────
+    my %catalog = load_schema_catalogs();
+
+    # ── Decide if we need the EFSA repo clone ─────────────────────────────────
+    # Clone is needed if: Campylobacter is selected (schema lives in repo),
+    # or E. coli / Salmonella are selected (filter files live in repo).
+    my $need_clone = grep { $SPECIES_DEF{$_}{install_type} eq "efsa_campy"
+                         || defined $SPECIES_DEF{$_}{filter_file} }
+                     @selected;
+
+    my $clone_target;
+    if ($need_clone) {
+        require File::Temp;
+        my $tmpdir = File::Temp::tempdir(CLEANUP => 1);
+        $clone_target = "$tmpdir/$EFSA_REPO_NAME";
+
+        log_message("NOTICE: Cloning EFSA repository (shallow clone, this may take a minute)...");
+        my $clone_out = `git clone --depth 1 --quiet \"\Q$EFSA_REPO_URL\E\" \"\Q$clone_target\E\" 2>&1`;
+        if ($? != 0 || !-d $clone_target) {
+            log_message("ERROR: git clone failed:\n$clone_out", "red");
+            log_message("NOTICE: Make sure the network can reach dev.azure.com from this machine.");
+            return;
+        }
+        log_message("NOTICE: ✓  Clone complete.", "green");
+    }
+
+    # ── Process each selected species ─────────────────────────────────────────
+    my %results;   # species_key => 'ok'|'skipped'|'error'  + details
+
+    for my $key (@selected) {
+        my $def  = $SPECIES_DEF{$key};
+        my $type = $def->{install_type};
+        my $sn   = $def->{schema_name};
+        my $schema_dir = "$schemas_root/$sn";
+
+        log_message("NOTICE:");
+        log_message("NOTICE: ════ $def->{label} ════");
+
+        # ── Campylobacter: copy schema from EFSA repo ─────────────────────────
+        if ($type eq "efsa_campy") {
+            my $camp_src = "$clone_target/data/Campylobacter_schema/CAMPISO-PubMLST-8";
+            unless (-d $camp_src) {
+                log_message("ERROR: Campylobacter schema not found in repo at $camp_src", "red");
+                $results{$key} = "error";
+                next;
+            }
+
+            if (-d $schema_dir) {
+                my $go = $ASSUME_YES || prompt_yes_no(
+                    "  Schema [$sn] already exists. Replace?", 0);
+                if ($go) {
+                    system("rm -rf \"\Q$schema_dir\E\"");
+                } else {
+                    log_message("NOTICE: Keeping existing [$sn].");
+                    $results{$key} = "skipped";
+                    next;
+                }
+            }
+
+            if (_install_efsa_campylobacter($camp_src, $schema_dir, $sn)) {
+                $results{$key} = "ok";
+            } else {
+                $results{$key} = "error";
+            }
+            next;
+        }
+
+        # ── chewieNS species: install from PubMLST catalog if not present ─────
+        if ($type eq "chewie_ns") {
+            my $schema_ok = 0;
+
+            if (-d $schema_dir && scalar(glob("$schema_dir/*.fasta")) > 0) {
+                log_message("NOTICE: Schema [$sn] already installed.");
+                $schema_ok = 1;
+            } else {
+                # Look up in catalog
+                my $cat_entry = $catalog{$sn};
+                unless ($cat_entry) {
+                    # Try partial match
+                    ($cat_entry) = map { $catalog{$_} }
+                                   grep { index($_, $sn) >= 0 || index($sn, $_) >= 0 }
+                                   sort keys %catalog;
+                }
+                if ($cat_entry) {
+                    log_message("NOTICE: Installing schema [$sn] from chewieNS catalog...");
+                    $schema_ok = _install_one_schema($cat_entry);
+                } else {
+                    log_message("WARNING: Schema [$sn] not found in catalog.", "yellow");
+                    log_message("NOTICE:  Run --install-schema=$sn after adding the catalog entry.");
+                    log_message("NOTICE:  (Place the catalog JSON in $db/chewbbaca/catalog/)");
+                    $results{$key} = "no_catalog";
+                    next;
+                }
+            }
+
+            unless ($schema_ok) {
+                $results{$key} = "error";
+                next;
+            }
+
+            # Wire EFSA filter if this species has one
+            my $ffile = $def->{filter_file};
+            unless (defined $ffile) {
+                # Listeria: schema is already cgMLST, no filter needed
+                log_message("NOTICE: ✓  [$sn] ready (no filter; schema is already cgMLST).", "green");
+                $results{$key} = "ok";
+                next;
+            }
+
+            # Copy filter from EFSA repo
+            my $src  = "$clone_target/data/chewbbaca_filters/$ffile";
+            my $dest = "$filters_root/$ffile";
+
+            unless (-f $src) {
+                log_message("WARNING: Filter '$ffile' not found in EFSA repo (structure may have changed).", "yellow");
+                $results{$key} = "error";
+                next;
+            }
+
+            system("cp \"\Q$src\E\" \"\Q$dest\E\"") == 0
+                or do {
+                    log_message("WARNING: Could not copy $ffile: $!", "yellow");
+                    $results{$key} = "error";
+                    next;
+                };
+            log_message("NOTICE: ✓  Filter saved: $dest", "green");
+
+            # Wire filter into schema.ini
+            my $wired = _efsa_wire_filter_to_schema(
+                filter_path  => $dest,
+                schema_hints => [$sn],
+                schemas_root => $schemas_root,
+            );
+            if ($wired) {
+                log_message("NOTICE: ✓  Filter wired to schema [$wired].", "green");
+                $results{$key} = "ok";
+            } else {
+                log_message("WARNING: Could not update schema.ini for [$sn].", "yellow");
+                log_message("NOTICE:  Manually set:  filter = $dest  in $schema_dir/schema.ini");
+                $results{$key} = "partial";
+            }
+            next;
+        }
+
+        log_message("WARNING: Unknown install_type '$type' for $key — skipping.", "yellow");
+        $results{$key} = "error";
+    }
+
+    # ── Final summary ─────────────────────────────────────────────────────────
+    log_message("NOTICE:");
+    log_message("NOTICE: ════════════════════════════════════════════════════════");
+    log_message("NOTICE: Summary");
+    log_message("NOTICE: ════════════════════════════════════════════════════════");
+
+    my $all_ok = 1;
+    for my $key (@selected) {
+        my $res   = $results{$key} // "error";
+        my $label = $SPECIES_DEF{$key}{label};
+        my $sn    = $SPECIES_DEF{$key}{schema_name};
+        if ($res eq "ok") {
+            log_message("NOTICE:   [OK]      $label", "green");
+        } elsif ($res eq "skipped") {
+            log_message("NOTICE:   [kept]    $label (existing, not replaced)");
+        } elsif ($res eq "partial") {
+            log_message("NOTICE:   [partial] $label — schema installed, set filter manually", "yellow");
+            $all_ok = 0;
+        } elsif ($res eq "no_catalog") {
+            log_message("NOTICE:   [waiting] $label — catalog entry needed; install schema then re-run", "yellow");
+            $all_ok = 0;
+        } else {
+            log_message("NOTICE:   [ERROR]   $label", "red");
+            $all_ok = 0;
+        }
+    }
+
+    log_message("NOTICE:");
+    if ($all_ok) {
+        log_message("NOTICE: ✓  All done. Run analyses normally — schemas and filters are wired.", "green");
+    } else {
+        log_message("NOTICE: Some steps need attention (see above).", "yellow");
+        log_message("NOTICE: Re-run --install-efsa-schemas after resolving to complete setup.");
+    }
+    log_message("NOTICE: Run --list-schemas to verify installed schemas.");
+    log_message("NOTICE: ════════════════════════════════════════════════════════");
+    log_message("NOTICE:");
+}
+
+# ---------------------------------------------------------------------------
+# _install_efsa_campylobacter($src, $target, $schema_name)
+#
+# Copies the already-prepped EFSA Campylobacter schema to the target dir and
+# writes schema.ini.  No filter is applied (the schema IS the cgMLST set).
+# The training file (Campylobacter_jejuni_coli.trn) is included in the schema.
+# ---------------------------------------------------------------------------
+sub _install_efsa_campylobacter {
+    my ($src, $target, $schema_name) = @_;
+
+    log_message("NOTICE: Installing Campylobacter schema [$schema_name]...");
+
+    system("cp -r \"\Q$src\E\" \"\Q$target\E\"") == 0
+        or do { log_message("ERROR: Failed to copy schema: $!", "red"); return 0; };
+
+    my $loci_count = scalar(glob("$target/*.fasta"));
+
+    # schema.ini: filter=unfiltered because CAMPISO-PubMLST-8 *is* cgMLST (1142 loci).
+    # The training file is already in $target/ — ensure_schema_prepared will find it.
+    my $ini_entry = {
+        name        => $schema_name,
+        label       => "Campylobacter cgMLST — EFSA CAMPISO (PubMLST-8)",
+        description => "EFSA One Health validated Campylobacter cgMLST schema. "
+                     . "Based on PubMLST wgMLST v8, reduced to $loci_count cgMLST loci. "
+                     . "Training file (Campylobacter_jejuni_coli.trn) included. No filter required.",
+        version     => "8",
+        source      => "efsa",
+        species     => ["Campylobacter jejuni", "Campylobacter coli"],
+        source_meta => {
+            url         => "https://dev.azure.com/efsa-devops/EFSA/_git/efsa.wgs.onehealth",
+            repo        => "efsa.wgs.onehealth",
+            schema_path => "data/Campylobacter_schema/CAMPISO-PubMLST-8",
+            downloaded  => strftime("%Y-%m-%d", localtime),
+        },
+    };
+    _write_schema_ini($target, $ini_entry, undef);   # undef = unfiltered
+
+    # Short/ already present → ensure_schema_prepared is a no-op
+    ensure_schema_prepared($target, $schema_name);
+
+    log_message("NOTICE: ✓  Campylobacter schema installed: $loci_count loci, no filter (cgMLST).", "green");
+    return 1;
+}
+
+# ---------------------------------------------------------------------------
+# _efsa_wire_filter_to_schema(filter_path => ..., schema_hints => [...], schemas_root => ...)
+#
+# Looks for an installed chewieNS schema that matches one of the hint names.
+# If found, updates its schema.ini to point to the EFSA filter.
+# Returns the schema name if wired, undef otherwise.
+# ---------------------------------------------------------------------------
+sub _efsa_wire_filter_to_schema {
+    my (%args) = @_;
+    my $filter_path  = $args{filter_path}  // return undef;
+    my $schema_hints = $args{schema_hints} // [];
+    my $schemas_root = $args{schemas_root} // return undef;
+
+    return undef unless -d $schemas_root;
+
+    for my $hint (@$schema_hints) {
+        my $schema_dir = "$schemas_root/$hint";
+        next unless -d $schema_dir;
+
+        my $ini_path = "$schema_dir/schema.ini";
+        unless (-f $ini_path) {
+            log_message("INFO: Found schema dir [$hint] but no schema.ini — skipping filter wire");
+            next;
+        }
+
+        # Read existing schema.ini, update filter line
+        open(my $fh_in, '<:utf8', $ini_path)
+            or do { log_message("WARNING: Cannot read $ini_path: $!"); next; };
+        my @lines = <$fh_in>;
+        close $fh_in;
+
+        my $found_filter = 0;
+        for my $line (@lines) {
+            if ($line =~ s{^(\s*filter\s*=\s*).*}{$1$filter_path}) {
+                $found_filter = 1;
+            }
+        }
+        unless ($found_filter) {
+            # No existing filter line in [schema] section — append after [schema] header
+            my @new_lines;
+            my $in_schema = 0;
+            my $added = 0;
+            for my $line (@lines) {
+                push @new_lines, $line;
+                if (!$added && $line =~ /^\[schema\]/) {
+                    $in_schema = 1;
+                }
+                if ($in_schema && !$added && $line =~ /^(name|label|description|version|species|source)\s*=/) {
+                    # keep going, add after last header-like field we see
+                }
+                if ($in_schema && !$added && ($line =~ /^\[/ && $line !~ /^\[schema\]/ || eof)) {
+                    # next section or end of file: inject before this line
+                    pop @new_lines;
+                    push @new_lines, "filter      = $filter_path\n";
+                    push @new_lines, $line;
+                    $added = 1;
+                }
+            }
+            push @new_lines, "filter      = $filter_path\n" unless $added;
+            @lines = @new_lines;
+        }
+
+        open(my $fh_out, '>:utf8', $ini_path)
+            or do { log_message("WARNING: Cannot update $ini_path: $!"); next; };
+        print $fh_out @lines;
+        close $fh_out;
+
+        return $hint;   # success
+    }
+
+    return undef;   # no matching schema found
 }
 
 sub md5_file {

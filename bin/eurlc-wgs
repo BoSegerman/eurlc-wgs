@@ -29021,25 +29021,28 @@ sub _cmd_install_efsa_schemas {
             aliases      => [qw(campy campylobacter_jejuni campylobacter_coli)],
         },
         ecoli => {
-            label        => "Escherichia coli (chewieNS wgMLST + EFSA cgMLST filter)",
-            install_type => "chewie_ns",
-            schema_name  => "internal_ecoli_cNS",
-            filter_file  => "cgMLST_ecoli.txt",
-            aliases      => [qw(e.coli e_coli escherichia escherichia_coli)],
+            label          => "Escherichia coli (chewieNS wgMLST + EFSA cgMLST filter)",
+            install_type   => "chewie_ns",
+            schema_name    => "internal_ecoli_cNS",
+            filter_file    => "cgMLST_ecoli.txt",
+            chewie_species => "Escherichia coli",
+            aliases        => [qw(e.coli e_coli escherichia escherichia_coli)],
         },
         salmonella => {
-            label        => "Salmonella enterica (chewieNS wgMLST + EFSA cgMLST filter)",
-            install_type => "chewie_ns",
-            schema_name  => "internal_salmonella_cNS",
-            filter_file  => "cgMLST_salmonella.txt",
-            aliases      => [qw(salmonella_enterica)],
+            label          => "Salmonella enterica (chewieNS wgMLST + EFSA cgMLST filter)",
+            install_type   => "chewie_ns",
+            schema_name    => "internal_salmonella_cNS",
+            filter_file    => "cgMLST_salmonella.txt",
+            chewie_species => "Salmonella enterica",
+            aliases        => [qw(salmonella_enterica)],
         },
         listeria => {
-            label        => "Listeria monocytogenes (chewieNS wgMLST, already cgMLST, no filter)",
-            install_type => "chewie_ns",
-            schema_name  => "internal_listeria_cNS",
-            filter_file  => undef,
-            aliases      => [qw(listeria_monocytogenes)],
+            label          => "Listeria monocytogenes (chewieNS wgMLST, already cgMLST, no filter)",
+            install_type   => "chewie_ns",
+            schema_name    => "internal_listeria_cNS",
+            filter_file    => undef,
+            chewie_species => "Listeria monocytogenes",
+            aliases        => [qw(listeria_monocytogenes)],
         },
     );
 
@@ -29153,7 +29156,7 @@ sub _cmd_install_efsa_schemas {
                 my $go = $ASSUME_YES || prompt_yes_no(
                     "  Schema [$sn] already exists. Replace?", 0);
                 if ($go) {
-                    system("rm -rf \"\Q$schema_dir\E\"");
+                    system("rm", "-rf", $schema_dir);
                 } else {
                     log_message("NOTICE: Keeping existing [$sn].");
                     $results{$key} = "skipped";
@@ -29169,7 +29172,7 @@ sub _cmd_install_efsa_schemas {
             next;
         }
 
-        # ── chewieNS species: install from PubMLST catalog if not present ─────
+        # ── chewieNS species: install from PubMLST/chewieNS if not present ──────
         if ($type eq "chewie_ns") {
             my $schema_ok = 0;
 
@@ -29177,21 +29180,24 @@ sub _cmd_install_efsa_schemas {
                 log_message("NOTICE: Schema [$sn] already installed.");
                 $schema_ok = 1;
             } else {
-                # Look up in catalog
+                # Try catalog first, then fall back to live chewieNS API lookup.
                 my $cat_entry = $catalog{$sn};
                 unless ($cat_entry) {
-                    # Try partial match
                     ($cat_entry) = map { $catalog{$_} }
                                    grep { index($_, $sn) >= 0 || index($sn, $_) >= 0 }
                                    sort keys %catalog;
                 }
+                unless ($cat_entry) {
+                    # Build entry on-the-fly by querying chewbbaca.online API
+                    log_message("NOTICE: Schema [$sn] not in local catalog — querying chewbbaca.online...");
+                    $cat_entry = _efsa_build_chewie_catalog_entry($sn, $def->{chewie_species});
+                }
                 if ($cat_entry) {
-                    log_message("NOTICE: Installing schema [$sn] from chewieNS catalog...");
+                    log_message("NOTICE: Installing schema [$sn] from chewieNS...");
                     $schema_ok = _install_one_schema($cat_entry);
                 } else {
-                    log_message("WARNING: Schema [$sn] not found in catalog.", "yellow");
-                    log_message("NOTICE:  Run --install-schema=$sn after adding the catalog entry.");
-                    log_message("NOTICE:  (Place the catalog JSON in $db/chewbbaca/catalog/)");
+                    log_message("WARNING: Could not find schema [$sn] in catalog or chewbbaca.online.", "yellow");
+                    log_message("NOTICE:  Add a catalog JSON to $db/chewbbaca/catalog/ and re-run.");
                     $results{$key} = "no_catalog";
                     next;
                 }
@@ -29221,7 +29227,7 @@ sub _cmd_install_efsa_schemas {
                 next;
             }
 
-            system("cp \"\Q$src\E\" \"\Q$dest\E\"") == 0
+            system("cp", $src, $dest) == 0
                 or do {
                     log_message("WARNING: Could not copy $ffile: $!", "yellow");
                     $results{$key} = "error";
@@ -29301,7 +29307,7 @@ sub _install_efsa_campylobacter {
 
     log_message("NOTICE: Installing Campylobacter schema [$schema_name]...");
 
-    system("cp -r \"\Q$src\E\" \"\Q$target\E\"") == 0
+    system("cp", "-r", $src, $target) == 0
         or do { log_message("ERROR: Failed to copy schema: $!", "red"); return 0; };
 
     my $loci_count = scalar(glob("$target/*.fasta"));
@@ -29331,6 +29337,100 @@ sub _install_efsa_campylobacter {
 
     log_message("NOTICE: ✓  Campylobacter schema installed: $loci_count loci, no filter (cgMLST).", "green");
     return 1;
+}
+
+# ---------------------------------------------------------------------------
+# _efsa_build_chewie_catalog_entry($schema_name, $species_name_hint)
+#
+# Queries chewbbaca.online to find the species ID matching $species_name_hint,
+# then picks the first (wgMLST) schema for that species.
+# Returns a catalog-entry hashref suitable for _install_one_schema, or undef.
+# ---------------------------------------------------------------------------
+sub _efsa_build_chewie_catalog_entry {
+    my ($schema_name, $species_hint) = @_;
+    return undef unless defined $species_hint && $species_hint ne "";
+
+    my $NS_BASE = "https://chewbbaca.online/NS/api";
+
+    # Fetch species list
+    my $sp_json = `curl -fsSL --max-time 15 "$NS_BASE/species" 2>/dev/null`;
+    unless ($sp_json && $sp_json =~ /\[/) {
+        log_message("WARNING: Could not reach chewbbaca.online to look up species ID.", "yellow");
+        return undef;
+    }
+
+    # Parse with JSON/JSON::PP (same approach as load_schema_catalogs)
+    my $sp_data;
+    eval {
+        local $@;
+        eval { require JSON; $sp_data = JSON::decode_json($sp_json) };
+        if ($@) { require JSON::PP; $sp_data = JSON::PP::decode_json($sp_json) }
+    };
+    if ($@ || !defined $sp_data) {
+        log_message("WARNING: Could not parse chewbbaca.online species response.", "yellow");
+        return undef;
+    }
+
+    # The API returns {"result": [{"name": "...", "id": N}, ...]}
+    my $sp_list = ref($sp_data) eq 'HASH' ? ($sp_data->{result} // []) : $sp_data;
+    my ($sp_id, $sp_name_found);
+    for my $sp (@$sp_list) {
+        my $name = ref($sp) eq 'HASH' ? ($sp->{name} // $sp->{species_name} // "") : "";
+        if ($name =~ /\Q$species_hint\E/i || index(lc($name), lc($species_hint)) >= 0) {
+            $sp_id         = $sp->{id} // $sp->{species_id};
+            $sp_name_found = $name;
+            last;
+        }
+    }
+
+    unless (defined $sp_id) {
+        log_message("WARNING: '$species_hint' not found in chewbbaca.online species list.", "yellow");
+        return undef;
+    }
+
+    log_message("NOTICE:   Found on chewbbaca.online: '$sp_name_found' (species_id=$sp_id)");
+
+    # Fetch schemas for this species; pick schema_id=1 (wgMLST) by default
+    my $sc_json = `curl -fsSL --max-time 15 "$NS_BASE/species/$sp_id/schemas" 2>/dev/null`;
+    my ($sc_id, $sc_name) = (1, "wgMLST");
+    if ($sc_json && $sc_json =~ /\[|\{/) {
+        my $sc_data;
+        eval {
+            local $@;
+            eval { require JSON; $sc_data = JSON::decode_json($sc_json) };
+            if ($@) { require JSON::PP; $sc_data = JSON::PP::decode_json($sc_json) }
+        };
+        if (!$@ && defined $sc_data) {
+            my $sc_list = ref($sc_data) eq 'HASH' ? ($sc_data->{result} // []) : $sc_data;
+            # Prefer schema named "wgMLST" or pick the first
+            for my $sc (@$sc_list) {
+                next unless ref($sc) eq 'HASH';
+                my $id   = $sc->{id} // $sc->{schema_id} // next;
+                my $name = $sc->{name} // $sc->{schema_name} // "";
+                if ($name =~ /wgMLST/i || !defined $sc_id) {
+                    $sc_id   = $id;
+                    $sc_name = $name;
+                    last if $name =~ /wgMLST/i;
+                }
+            }
+        }
+    }
+
+    log_message("NOTICE:   Using schema: '$sc_name' (schema_id=$sc_id)");
+
+    return {
+        name        => $schema_name,
+        label       => "$sp_name_found $sc_name (chewieNS)",
+        description => "Downloaded from chewbbaca.online via --install-efsa-schemas",
+        source      => "chewie-ns",
+        species     => [$sp_name_found],
+        install     => { method => "chewie-ns-download" },
+        source_meta => {
+            species_id => $sp_id,
+            schema_id  => $sc_id,
+            downloaded => strftime("%Y-%m-%d", localtime),
+        },
+    };
 }
 
 # ---------------------------------------------------------------------------

@@ -17461,15 +17461,19 @@ sub fill_placeholders {
     if( $cmd =~ /__DIR-HOME__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-HOME__", getdir("home") ); }
     if( $cmd =~ /__DIR-OUT__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-OUT__", getdir("out") ); }
     if( $cmd =~ /__DIR-DB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-DB__", getdir("db") ); }
-    if( $cmd =~ /__DB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DB__", getdir("db") ); }
     # Database path placeholders -- resolved at command-build time so that
     # resolve_and_verify_databases() can update $R_cfg paths to frozen copies
     # before the command is assembled (direct Perl interpolation in heredocs
     # bakes values at template-definition time, before resolution runs).
+    # NOTE: __KRAKENDB__ etc. may expand to strings containing __DB__, so
+    # __DB__ must be resolved AFTER the tool-specific DB placeholders.
     if( $cmd =~ /__KRAKENDB__/ )    { _fill_placeholders__safe_replace(\$cmd, "__KRAKENDB__",    $R_cfg->{kraken2}{db_path}    // getdir("db") . "/kraken2" ); }
     if( $cmd =~ /__BRACKENDB__/ )   { _fill_placeholders__safe_replace(\$cmd, "__BRACKENDB__",   $R_cfg->{bracken}{db_path}    // getdir("db") . "/kraken2" ); }
     if( $cmd =~ /__RESFINDERDB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__RESFINDERDB__", $R_cfg->{resfinder}{db_path}  // getdir("db") . "/resfinder" ); }
     if( $cmd =~ /__BAKTADB__/ )     { _fill_placeholders__safe_replace(\$cmd, "__BAKTADB__",     $R_cfg->{bakta}{db_path}      // getdir("db") . "/bakta/db-light" ); }
+    # Resolve __DB__ last so it catches any tokens introduced by the tool-specific
+    # expansions above (e.g. $R_cfg->{kraken2}{db_path} == "__DB__/kraken2").
+    if( $cmd =~ /__DB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DB__", getdir("db") ); }
     if( $cmd =~ /__DIR-QC__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-QC__", getdir("out,results,qc" ) ); }
     if( $cmd =~ /__DIR-QC1__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-QC1__", getdir("out,results,qc,stage1_rawdata" ) ); }    
     if( $cmd =~ /__DIR-QC2__/ ) { _fill_placeholders__safe_replace(\$cmd, "__DIR-QC2__", getdir("out,results,qc,stage2_trimmeddata" ) ); }    
@@ -28780,21 +28784,22 @@ sub _install_schema_filters {
             log_message("WARNING:   Filter '$fname' download failed — trying bundled.", "yellow");
         }
 
-        # Try bundled resource (pipeline installation dir / share/filters/)
+        # Try bundled resource (pipeline installation assets)
         if ($fi->{bundled} // 0) {
             my $schema_name = $entry->{name} // "";
-            # Look for a bundled filter alongside the pipeline script, then in
-            # share/chewbbaca/filters/ relative to the script.
-            my $script_dir = dirname(abs_path($0));
+            # Canonical location: share/eurlc-wgs/assets/chewbbaca/filters/<schema_name>/<fname>.txt
+            # Fallback: alongside the pipeline script (development installs).
+            my $assets_root = peekdir("conda") . "/share/eurlc-wgs/assets/chewbbaca";
+            my $script_dir  = dirname(abs_path($0));
             my @search_paths = (
-                "$script_dir/share/chewbbaca/filters/${schema_name}/${fname}.txt",
-                "$script_dir/share/chewbbaca/filters/${fname}.txt",
-                "$db/chewbbaca/filters/${schema_name}_${fname}.txt",
-                "$db/chewbbaca/filters/${fname}.txt",
+                "$assets_root/filters/${schema_name}/${fname}.txt",
+                "$assets_root/filters/${fname}.txt",
+                "$script_dir/assets/chewbbaca/filters/${schema_name}/${fname}.txt",
+                "$script_dir/assets/chewbbaca/filters/${fname}.txt",
             );
             my ($found) = grep { -f $_ } @search_paths;
             if ($found) {
-                system("cp \"\Q$found\E\" \"\Q$target_file\E\"");
+                system("cp", $found, $target_file);
                 log_message("NOTICE:   ✓  Filter '$fname' copied from $found", "green");
                 next;
             }
@@ -29005,42 +29010,68 @@ sub _cmd_install_efsa_schemas {
     my $EFSA_REPO_URL  = "https://dev.azure.com/efsa-devops/EFSA/_git/efsa.wgs.onehealth";
     my $EFSA_REPO_NAME = "efsa.wgs.onehealth";
 
+    # Bundled chewBBACA assets live under share/eurlc-wgs/assets/chewbbaca/
+    # relative to the pipeline's conda/install prefix.
+    my $chewbbaca_assets = peekdir("conda") . "/share/eurlc-wgs/assets/chewbbaca";
+
     # ── Species definitions ───────────────────────────────────────────────────
     # Each entry describes one species:
-    #   install_type  : "efsa_campy"  — copy schema from EFSA repo (no chewieNS download)
-    #                   "chewie_ns"   — install via chewieNS catalog, then wire EFSA filter
-    #   schema_name   : canonical name in db/chewbbaca/schemas/ and catalog
-    #   filter_file   : filename in EFSA repo data/chewbbaca_filters/ (undef = no EFSA filter)
-    #   aliases       : additional names accepted on the command line
+    #   install_type      : "efsa_campy"  — copy schema from EFSA repo (no chewieNS download)
+    #                       "chewie_ns"   — install via chewieNS catalog
+    #   schema_name       : canonical name in db/chewbbaca/schemas/ and catalog
+    #   filter_efsa       : path under $chewbbaca_assets to the EFSA-compatible filter
+    #                       (uses INNUENDO locus names; required for EFSA upload). undef = no filter.
+    #   filter_chewiens   : path under $chewbbaca_assets to the chewieNS filter
+    #                       (uses wgMLST locus names; for internal analysis). undef = same as EFSA.
+    #   mapping_asset     : path under $chewbbaca_assets to the INNUENDO↔wgMLST mapping TSV.
+    #                       Used to generate EFSA-compatible output files after chewBBACA runs.
+    #   aliases           : additional names accepted on the command line
     my @SPECIES_ORDER = qw(campylobacter ecoli salmonella listeria);
     my %SPECIES_DEF = (
         campylobacter => {
-            label        => "Campylobacter jejuni/coli (EFSA CAMPISO-PubMLST-8, cgMLST, no filter)",
-            install_type => "efsa_campy",
-            schema_name  => "CAMPISO-PubMLST-8",
-            filter_file  => undef,
-            aliases      => [qw(campy campylobacter_jejuni campylobacter_coli)],
+            label           => "Campylobacter jejuni/coli (EFSA CAMPISO-PubMLST-8, cgMLST, no filter)",
+            install_type    => "efsa_campy",
+            schema_name     => "CAMPISO-PubMLST-8",
+            filter_efsa     => undef,
+            filter_chewiens => undef,
+            mapping_asset   => undef,
+            aliases         => [qw(campy campylobacter_jejuni campylobacter_coli)],
         },
         ecoli => {
-            label        => "Escherichia coli (chewieNS wgMLST + EFSA cgMLST filter)",
-            install_type => "chewie_ns",
-            schema_name  => "chewie_ns_ecoli",
-            filter_file  => "cgMLST_ecoli.txt",
-            aliases      => [qw(e.coli e_coli escherichia escherichia_coli)],
+            label           => "Escherichia coli (chewieNS wgMLST + cgMLST filter)",
+            install_type    => "chewie_ns",
+            schema_name     => "chewie_ns_ecoli",
+            # Asset paths are relative to $chewbbaca_assets and use the schema name
+            # as directory, matching what _install_schema_filters expects.
+            # EFSA filter: exact INNUENDO-named loci as published by EFSA.
+            # Required for uploading results to the EFSA One Health database.
+            filter_efsa     => "filters/chewie_ns_ecoli/cgmlst_efsa.txt",
+            # chewieNS filter: same loci in the new wgMLST naming used by chewieNS schemas.
+            # Use this for internal analysis when EFSA upload compatibility is not required.
+            filter_chewiens => "filters/chewie_ns_ecoli/cgmlst_chewiens.txt",
+            aliases         => [qw(e.coli e_coli escherichia escherichia_coli)],
         },
         salmonella => {
-            label        => "Salmonella enterica (chewieNS wgMLST + EFSA cgMLST filter)",
-            install_type => "chewie_ns",
-            schema_name  => "chewie_ns_salmonella",
-            filter_file  => "cgMLST_salmonella.txt",
-            aliases      => [qw(salmonella_enterica)],
+            label           => "Salmonella enterica (chewieNS wgMLST + cgMLST filter)",
+            install_type    => "chewie_ns",
+            schema_name     => "chewie_ns_salmonella",
+            # EFSA and chewieNS filters are equivalent (100% loci overlap after name mapping).
+            # We provide both for clarity; efsa uses INNUENDO names, chewiens uses wgMLST names.
+            filter_efsa     => "filters/chewie_ns_salmonella/cgmlst_efsa.txt",
+            filter_chewiens => "filters/chewie_ns_salmonella/cgmlst_chewiens.txt",
+            aliases         => [qw(salmonella_enterica)],
         },
         listeria => {
-            label        => "Listeria monocytogenes (chewieNS wgMLST, already cgMLST, no filter)",
-            install_type => "chewie_ns",
-            schema_name  => "chewie_ns_listeria",
-            filter_file  => undef,
-            aliases      => [qw(listeria_monocytogenes)],
+            label           => "Listeria monocytogenes (chewieNS wgMLST, no cgMLST filter)",
+            install_type    => "chewie_ns",
+            schema_name     => "chewie_ns_listeria",
+            filter_efsa     => undef,
+            filter_chewiens => undef,
+            # No filter for Listeria (schema is already cgMLST-sized).
+            # The INNUENDO↔wgMLST mapping for EFSA output translation is a bundled
+            # pipeline asset (assets/chewbbaca/mappings/chewie_ns_listeria/id_mapping.tsv)
+            # read at runtime — it does not need to be copied to the database.
+            aliases         => [qw(listeria_monocytogenes)],
         },
     );
 
@@ -29096,20 +29127,17 @@ sub _cmd_install_efsa_schemas {
     }
 
     my $schemas_root = "$db/chewbbaca/schemas";
-    my $filters_root = "$db/chewbbaca/filters";
     ensure_dir($schemas_root);
-    ensure_dir($filters_root);
 
     # ── Ensure builtin catalog is present, then load all catalogs ────────────
     _efsa_ensure_builtin_catalog($db);
     my %catalog = load_schema_catalogs();
 
     # ── Decide if we need the EFSA repo clone ─────────────────────────────────
-    # Clone is needed if: Campylobacter is selected (schema lives in repo),
-    # or E. coli / Salmonella are selected (filter files live in repo).
-    my $need_clone = grep { $SPECIES_DEF{$_}{install_type} eq "efsa_campy"
-                         || defined $SPECIES_DEF{$_}{filter_file} }
-                     @selected;
+    # Clone is needed only for Campylobacter (schema lives in EFSA repo).
+    # Filters and mappings for E. coli / Salmonella / Listeria are now bundled
+    # as pipeline assets and do NOT require cloning the EFSA repo.
+    my $need_clone = grep { $SPECIES_DEF{$_}{install_type} eq "efsa_campy" } @selected;
 
     my $clone_target;
     if ($need_clone) {
@@ -29202,46 +29230,92 @@ sub _cmd_install_efsa_schemas {
                 next;
             }
 
-            # Wire EFSA filter if this species has one
-            my $ffile = $def->{filter_file};
-            unless (defined $ffile) {
-                # Listeria: schema is already cgMLST, no filter needed
-                log_message("NOTICE: ✓  [$sn] ready (no filter; schema is already cgMLST).", "green");
-                $results{$key} = "ok";
-                next;
+            # ── Install bundled filters and mappings ───────────────────────────
+            # Filters and mappings are bundled as pipeline assets (no network required).
+            # They are copied into the schema directory:
+            #   $schema_dir/filters/cgmlst_efsa.txt       — EFSA-compatible (INNUENDO names)
+            #   $schema_dir/filters/cgmlst_chewiens.txt   — chewieNS-native (wgMLST names)
+            #   $schema_dir/mappings/id_mapping.tsv        — INNUENDO ↔ wgMLST mapping
+            # Existing files are never overwritten (custom filters survive reinstalls).
+
+            my $any_asset_installed = 0;
+            my $any_asset_failed    = 0;
+
+            # Helper: copy one asset file to destination, skip if dest already exists.
+            my $copy_asset = sub {
+                my ($asset_rel, $dest_path) = @_;
+                return 1 unless defined $asset_rel;   # no asset defined for this species
+
+                my $src = "$chewbbaca_assets/$asset_rel";
+                unless (-f $src) {
+                    log_message("WARNING: Bundled asset not found: $src", "yellow");
+                    log_message("NOTICE:  Run 'git pull' to update the pipeline, then re-run --install-efsa-schemas.");
+                    return 0;
+                }
+
+                if (-f $dest_path) {
+                    log_message("NOTICE:  Asset already present (not overwriting): $dest_path");
+                    return 1;
+                }
+
+                ensure_dir(File::Basename::dirname($dest_path));
+                if (system("cp", $src, $dest_path) == 0) {
+                    log_message("NOTICE: ✓  Installed: $dest_path", "green");
+                    return 1;
+                } else {
+                    log_message("WARNING: Could not copy asset to $dest_path: $!", "yellow");
+                    return 0;
+                }
+            };
+
+            # Copy EFSA filter (INNUENDO names — required for EFSA upload)
+            if (defined $def->{filter_efsa}) {
+                my $ok = $copy_asset->($def->{filter_efsa}, "$schema_dir/filters/cgmlst_efsa.txt");
+                $ok ? $any_asset_installed++ : $any_asset_failed++;
             }
 
-            # Copy filter from EFSA repo
-            my $src  = "$clone_target/data/chewbbaca_filters/$ffile";
-            my $dest = "$filters_root/$ffile";
-
-            unless (-f $src) {
-                log_message("WARNING: Filter '$ffile' not found in EFSA repo (structure may have changed).", "yellow");
-                $results{$key} = "error";
-                next;
+            # Copy chewieNS filter (wgMLST names — for internal analysis)
+            if (defined $def->{filter_chewiens}) {
+                my $ok = $copy_asset->($def->{filter_chewiens}, "$schema_dir/filters/cgmlst_chewiens.txt");
+                $ok ? $any_asset_installed++ : $any_asset_failed++;
             }
 
-            system("cp", $src, $dest) == 0
-                or do {
-                    log_message("WARNING: Could not copy $ffile: $!", "yellow");
-                    $results{$key} = "error";
-                    next;
-                };
-            log_message("NOTICE: ✓  Filter saved: $dest", "green");
+            # NOTE: INNUENDO↔wgMLST mapping TSVs are static pipeline assets read at
+            # runtime from assets/chewbbaca/mappings/<schema_name>/id_mapping.tsv.
+            # They are NOT copied to the database — no installation step needed here.
 
-            # Wire filter into schema.ini
-            my $wired = _efsa_wire_filter_to_schema(
-                filter_path  => $dest,
-                schema_hints => [$sn],
-                schemas_root => $schemas_root,
-            );
-            if ($wired) {
-                log_message("NOTICE: ✓  Filter wired to schema [$wired].", "green");
-                $results{$key} = "ok";
-            } else {
-                log_message("WARNING: Could not update schema.ini for [$sn].", "yellow");
-                log_message("NOTICE:  Manually set:  filter = $dest  in $schema_dir/schema.ini");
+            if ($any_asset_failed) {
                 $results{$key} = "partial";
+                next;
+            }
+
+            # Wire the EFSA filter (or chewieNS filter if no EFSA filter) into schema.ini.
+            # We use the relative path so the schema stays relocatable.
+            my $active_filter_rel;
+            if (defined $def->{filter_efsa}) {
+                $active_filter_rel = "filters/cgmlst_efsa.txt";
+            } elsif (defined $def->{filter_chewiens}) {
+                $active_filter_rel = "filters/cgmlst_chewiens.txt";
+            }
+
+            if (defined $active_filter_rel) {
+                my $wired = _efsa_wire_filter_to_schema(
+                    filter_path  => $active_filter_rel,   # relative path → stored as-is in schema.ini
+                    schema_hints => [$sn],
+                    schemas_root => $schemas_root,
+                );
+                if ($wired) {
+                    log_message("NOTICE: ✓  Filter wired to schema [$wired] (filter = $active_filter_rel).", "green");
+                    $results{$key} = "ok";
+                } else {
+                    log_message("WARNING: Could not update schema.ini for [$sn].", "yellow");
+                    log_message("NOTICE:  Manually set:  filter = $active_filter_rel  in $schema_dir/schema.ini");
+                    $results{$key} = "partial";
+                }
+            } else {
+                # No filter for this species (Listeria): schema used as-is; mapping still installed.
+                log_message("NOTICE: ✓  [$sn] ready (no cgMLST filter; mapping installed for EFSA translation).", "green");
+                $results{$key} = "ok";
             }
             next;
         }
@@ -29374,11 +29448,10 @@ sub _efsa_ensure_builtin_catalog {
         "cpu": 4
       },
       "filters": {
-        "cgmlst": {
-          "label": "cgMLST core loci",
-          "description": "Campylobacter cgMLST target loci",
-          "file": "filters/cgmlst_targets.txt",
-          "file_url": "",
+        "cgmlst_chewiens": {
+          "label": "cgMLST (chewieNS wgMLST names)",
+          "description": "Campylobacter cgMLST loci. This filter is not from EFSA and is not compatible with EFSA One Health database uploads. For EFSA-compatible Campylobacter typing, install the CAMPISO-PubMLST-8 schema instead.",
+          "file": "filters/cgmlst_chewiens.txt",
           "bundled": true,
           "default": true
         },
@@ -29394,7 +29467,7 @@ sub _efsa_ensure_builtin_catalog {
     {
       "name": "chewie_ns_listeria",
       "label": "Listeria monocytogenes wgMLST (Chewie-NS)",
-      "description": "Full wgMLST schema for Listeria monocytogenes from Chewie-NS.",
+      "description": "Full wgMLST schema for Listeria monocytogenes from Chewie-NS. The schema is already a cgMLST set; no locus filter is applied. An ID mapping (INNUENDO names) is bundled for EFSA upload compatibility.",
       "version": "1",
       "species": ["Listeria monocytogenes"],
       "source": "chewie-ns",
@@ -29408,18 +29481,11 @@ sub _efsa_ensure_builtin_catalog {
         "cpu": 4
       },
       "filters": {
-        "cgmlst": {
-          "label": "cgMLST core loci",
-          "description": "Listeria cgMLST target loci",
-          "file": "filters/cgmlst_targets.txt",
-          "file_url": "",
-          "bundled": true,
-          "default": true
-        },
         "wgmlst": {
-          "label": "Full wgMLST (unfiltered)",
+          "label": "Full wgMLST (unfiltered, default for Listeria)",
+          "description": "All loci in the wgMLST schema. Listeria schema is already cgMLST-sized; no filter required.",
           "file": null,
-          "default": false
+          "default": true
         }
       }
     },
@@ -29441,12 +29507,19 @@ sub _efsa_ensure_builtin_catalog {
         "cpu": 4
       },
       "filters": {
-        "cgmlst": {
-          "label": "cgMLST core loci",
-          "file": "filters/cgmlst_targets.txt",
-          "file_url": "",
+        "cgmlst_efsa": {
+          "label": "cgMLST (EFSA-compatible, INNUENDO names)",
+          "description": "Salmonella cgMLST loci as defined by EFSA. Compatible with EFSA One Health database uploads. 100% loci overlap with the chewieNS filter after ID mapping.",
+          "file": "filters/cgmlst_efsa.txt",
           "bundled": true,
           "default": true
+        },
+        "cgmlst_chewiens": {
+          "label": "cgMLST (chewieNS wgMLST names)",
+          "description": "Same cgMLST loci in the wgMLST naming used by chewieNS schemas. For internal analysis.",
+          "file": "filters/cgmlst_chewiens.txt",
+          "bundled": true,
+          "default": false
         },
         "wgmlst": {
           "label": "Full wgMLST (unfiltered)",
@@ -29473,12 +29546,19 @@ sub _efsa_ensure_builtin_catalog {
         "cpu": 4
       },
       "filters": {
-        "cgmlst": {
-          "label": "cgMLST core loci",
-          "file": "filters/cgmlst_targets.txt",
-          "file_url": "",
+        "cgmlst_efsa": {
+          "label": "cgMLST (EFSA-compatible, INNUENDO names)",
+          "description": "E. coli cgMLST loci as defined by EFSA. Use this filter when results will be uploaded to the EFSA One Health database.",
+          "file": "filters/cgmlst_efsa.txt",
           "bundled": true,
           "default": true
+        },
+        "cgmlst_chewiens": {
+          "label": "cgMLST (chewieNS wgMLST names)",
+          "description": "Same cgMLST loci in the wgMLST naming used by chewieNS schemas. For internal analysis.",
+          "file": "filters/cgmlst_chewiens.txt",
+          "bundled": true,
+          "default": false
         },
         "wgmlst": {
           "label": "Full wgMLST (unfiltered)",
@@ -29505,7 +29585,10 @@ END_BUILTIN_JSON
 # _efsa_wire_filter_to_schema(filter_path => ..., schema_hints => [...], schemas_root => ...)
 #
 # Looks for an installed chewieNS schema that matches one of the hint names.
-# If found, updates its schema.ini to point to the EFSA filter.
+# If found, updates its schema.ini with the given filter value.
+# filter_path may be a relative path (e.g. "filters/cgmlst_efsa.txt") — it is
+# written as-is so the schema stays relocatable.  discover_installed_schemas()
+# resolves relative paths against the schema directory at runtime.
 # Returns the schema name if wired, undef otherwise.
 # ---------------------------------------------------------------------------
 sub _efsa_wire_filter_to_schema {

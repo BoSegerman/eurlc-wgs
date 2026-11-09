@@ -13657,6 +13657,15 @@ sub discover_installed_schemas {
                 # Relative path → resolve against schema dir
                 $filter = File::Spec->catfile($schema_dir, $filter);
             }
+            # Verify the resolved filter file actually exists.
+            # If it doesn't, treat the schema as unfiltered and warn — this prevents
+            # chewBBACA from crashing with a stale filter name in schema.ini (e.g. "cgmlst"
+            # from an old installation before filters were moved inside the schema directory).
+            unless (-f $filter) {
+                log_message("WARNING: Filter file for schema [$entry] does not exist: $filter", "yellow");
+                log_message("WARNING:   Running schema [$entry] without filter. Re-run --install-schema or --install-efsa-schemas to fix.", "yellow");
+                $filter = "";
+            }
         }
 
         my $enabled = $s->{enabled} // 1;
@@ -28756,11 +28765,15 @@ sub _install_schema_filters {
     my $filter_dir = "$schema_dir/filters";
     ensure_dir($filter_dir);
 
+    # Only return a default filter name if the default filter has an actual file.
+    # A filter with file=null (e.g. "wgmlst" for Listeria) means "run unfiltered"
+    # and must not be written to schema.ini as a filter name, since discover_installed_schemas
+    # would try to resolve it as a path and pass it to chewBBACA via --genes-list.
     my $default_filter;
 
     for my $fname (sort keys %$filters) {
         my $fi = $filters->{$fname};
-        $default_filter = $fname if ($fi->{default} // 0);
+        $default_filter = $fname if (($fi->{default} // 0) && defined $fi->{file});
 
         # Target path
         my $target_file = "$filter_dir/$fname.txt";

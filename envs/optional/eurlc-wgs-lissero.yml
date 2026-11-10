@@ -1,0 +1,6 @@
+name: eurlc-wgs-lissero
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - lissero=0.4.9

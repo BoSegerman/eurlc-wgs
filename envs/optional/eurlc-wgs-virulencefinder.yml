@@ -1,0 +1,6 @@
+name: eurlc-wgs-virulencefinder
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - virulencefinder=3.2.1

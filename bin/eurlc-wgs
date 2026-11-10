@@ -261,6 +261,13 @@ my @constants_fq_extensions = (
 
 
 my %runstep;
+
+# "$i,$name" => 1 once a per-sample runstep has been attempted for sample
+# $i (run, failed, skipped as already done, or passed over in sequential
+# mode). Parent process only. Used by data keys that must wait until a
+# whole group has finished, not just until its first member succeeded
+# (see all_assemblers_settled).
+our %S_RUNSTEP_ATTEMPTED;
 my @runorder_loop1 = ();
 my @runorder_post1 = ();
 
@@ -325,18 +332,32 @@ my %data_key = (
         },
     },
     species_determined => {
+        # "Species determination is finished" -- not "a species is known".
+        # main_results.taxonomy.species starts out as "n/a" (new_sample_struct),
+        # so checking it for definedness was true from the very start: in
+        # parallel mode downsampling_bbmap (and everything else requiring
+        # this key) could start before find_species_kraken2 had finished.
+        # Now true when:
+        #   - species determination has written its result (species_method
+        #     is set by its result parsing, also when the call is "n/a"), or
+        #   - find_species_kraken2 does not apply (kraken2 disabled) or has
+        #     already been attempted and failed -- there will be no species,
+        #     so steps waiting for one must not wait forever.
         check => sub {
             my ($i) = @_;
-            my $s = $R_samples->[$i]{main_results}{taxonomy}{species};
-            return ( defined $s && $s ne '' ) ? 1 : 0;
+            my $method = $R_samples->[$i]{main_results}{taxonomy}{species_method} // "n/a";
+            return 1 if $method ne "n/a" && $method ne "";
+            my $d = $runstep{find_species_kraken2} or return 1;
+            my $applies = eval { exists $d->{applies_if} ? $d->{applies_if}->($i) : 1 };
+            return 1 unless $applies;
+            return $S_RUNSTEP_ATTEMPTED{"$i,find_species_kraken2"} ? 1 : 0;
         },
     },
     spades_assembled => {
         check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{spades}{total_length} ? 1 : 0; },
     },
-    shovill_assembled => {
-        check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{shovill}{total_length} ? 1 : 0; },
-    },
+    # shovill_spades_assembled / shovill_skesa_assembled are added by
+    # define_shovill_runstep() together with their runsteps.
     skesa_assembled => {
         check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{skesa}{total_length} ? 1 : 0; },
     },
@@ -374,6 +395,17 @@ my %data_key = (
             my $method = $R_samples->[$i]{main_results}{mlst}{method} // "";
             return ($method ne "" && $method ne "n/a") ? 1 : 0;
         },
+    },
+    # v1 typing/characterisation steps (stubs until built out -- the stub
+    # result_parsing sets results.<step>.status, the real ones should too).
+    sistr_done           => { check => sub { my ($i) = @_; return defined result_field($i, "sistr", "status")           ? 1 : 0; } },
+    seqsero2_done        => { check => sub { my ($i) = @_; return defined result_field($i, "seqsero2", "status")        ? 1 : 0; } },
+    ectyper_done         => { check => sub { my ($i) = @_; return defined result_field($i, "ectyper", "status")         ? 1 : 0; } },
+    lissero_done         => { check => sub { my ($i) = @_; return defined result_field($i, "lissero", "status")         ? 1 : 0; } },
+    virulencefinder_done => { check => sub { my ($i) = @_; return defined result_field($i, "virulencefinder", "status") ? 1 : 0; } },
+    plasmidfinder_done   => { check => sub { my ($i) = @_; return defined result_field($i, "plasmidfinder", "status")   ? 1 : 0; } },
+    main_serotype_present => {
+        check => sub { my ($i) = @_; return defined result_field($i, "select_main_serotype", "status") ? 1 : 0; },
     },
     amrfinderplus_done => {
         check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{amrfinderplus}{hit_count} ? 1 : 0; },
@@ -575,6 +607,8 @@ sub warn_on_field_mismatch {
 my %INTERNAL_SUB = (
     fastq_qc => \&fastq_qc,
     write_main_mlst_result => \&write_main_mlst_result,
+    write_stub_result      => \&write_stub_result,
+    write_main_serotype_result => \&write_main_serotype_result,
 );
 
 # Composite data_keys added after %data_key is fully defined -- these
@@ -585,18 +619,80 @@ my %INTERNAL_SUB = (
 for my $key_name (qw(any_assembler_done any_mlst_done any_amr_done)) {
     # defined below
 }
+# Reads results.<step>.<field> WITHOUT autovivifying results.<step>.
+# A plain $R_samples->[$i]{results}{x}{status} in a data-key check creates
+# an empty results.x for every sample it is asked about, and the report
+# then treats x as having run (it checks 'exists results.x').
+sub result_field {
+    my ($i, $step, $field) = @_;
+    my $r = $R_samples->[$i]{results} or return undef;
+    my $s = $r->{$step};
+    return ( ref $s eq 'HASH' ) ? $s->{$field} : undef;
+}
+
+# Keys produced by the members of a runstep group (e.g. every
+# *_assembled key of the 'assembler' group, including fasta_imported from
+# check_for_fasta). Derived from the runstep declarations, so a new group
+# member is picked up without editing any list here.
+sub group_produced_keys {
+    my ($group) = @_;
+    my %seen;
+    return grep { !$seen{$_}++ }
+           map  { @{ $runstep{$_}{produces} // [] } }
+           group_members($group);
+}
+
 $data_key{any_assembler_done} = {
     check => sub {
         my ($i) = @_;
-        # fasta_imported is the "assembler" for FASTA-type samples; it must
-        # be included here so select_main_assembly's requires gate is satisfied
-        # for FASTA samples (the four real assemblers never run for those).
-        for my $k (qw(spades_assembled shovill_assembled skesa_assembled unicycler_assembled fasta_imported)) {
+        # fasta_imported (check_for_fasta, also in the 'assembler' group) is
+        # the "assembler" for FASTA-type samples, so this is satisfied for
+        # FASTA samples too.
+        for my $k ( group_produced_keys('assembler') ) {
             return 1 if exists $data_key{$k} && $data_key{$k}{check}->($i);
         }
         return 0;
     },
 };
+
+# "Settled": a runstep that applies to this sample has either produced its
+# keys or has already been attempted (finished, failed, or -- in sequential
+# mode -- passed over), so nothing more will come from it. A runstep that
+# does not apply (config off, wrong species, missing definition) counts as
+# settled. Used for "wait until the whole group is finished" gates.
+sub runstep_settled {
+    my ($name, $i) = @_;
+    my $def = $runstep{$name} or return 1;
+    my $applies = eval { exists $def->{applies_if} ? $def->{applies_if}->($i) : 1 };
+    return 1 unless $applies && runstep_species_applies($def, $i);
+    return 1 if $S_RUNSTEP_ATTEMPTED{"$i,$name"};
+    my @prod = @{ $def->{produces} // [] };
+    return 1 if @prod && !grep { !( exists $data_key{$_} && $data_key{$_}{check}->($i) ) } @prod;
+    return 0;
+}
+
+sub group_settled {
+    my ($group, $i) = @_;
+    for my $name ( group_members($group) ) {
+        return 0 unless runstep_settled($name, $i);
+    }
+    return 1;
+}
+
+# Group gates for the select_main_* steps. Without them the parallel
+# scheduler would run the selection as soon as the FIRST group member
+# finished, before slower members had a chance (in sequential mode the
+# list order already guarantees it).
+$data_key{all_assemblers_settled} = { check => sub { group_settled('assembler',          $_[0]) } };
+$data_key{all_mlst_settled}       = { check => sub { group_settled('mlst_determination', $_[0]) } };
+$data_key{all_amr_settled}        = { check => sub { group_settled('amr',                $_[0]) } };
+$data_key{all_serotyping_settled} = { check => sub { group_settled('serotyping',         $_[0]) } };
+
+# Kraken2 contamination screening has run (or does not apply). Species-
+# specific typing steps wait for it, so they only start once both the
+# species call and the contamination picture are known.
+$data_key{kraken2_settled} = { check => sub { runstep_settled('Kraken2', $_[0]) } };
+
 $data_key{any_mlst_done} = {
     check => sub {
         my ($i) = @_;
@@ -730,6 +826,7 @@ my $S_control_dir = peekdir("out,control");
 # run_step() before each dispatch. Both start false; either can be set
 # any time a command file arrives in $S_control_dir.
 my $S_paused    = 0;   # true: block dispatch of new work
+my $S_paused_since;    # time() when the current pause began (for the status board)
 my $S_terminate = 0;   # true: gracefully exit once current step finishes
 
 # PID of the currently-running forked child (0 when none is running).
@@ -965,7 +1062,9 @@ my %QC_MEASURE_DEF = (
 my @measures = sort keys %QC_MEASURE_DEF;
 
     
-my @ASSEMBLER_TIEBREAK = qw(spades shovill skesa unicycler);
+# Tiebreak order for the 'assembler' group (equal score -> earlier wins).
+# Group members not listed here sort after these, alphabetically.
+my @ASSEMBLER_TIEBREAK = qw(spades skesa shovill_spades shovill_skesa unicycler);
    
 ## default config name
 $rundata{config}{source} = "built-in defaults"; 
@@ -1030,19 +1129,22 @@ $rundata{config}{defaults} = {
     general => {
         threads    => 4,
 
-        # Companion config files. Values are resolved relative to the main
-        # config file's directory if given as relative paths, or as absolute
-        # paths if they start with /. If left empty the pipeline looks for
-        # the default filename in the same directory as eurlc-wgs.config.
-        # This means --config automatically carries the whole config tree
-        # without needing to specify each companion file separately.
+        # Companion config files. Relative paths are resolved against the
+        # DATABASE directory (falling back to the config file's directory
+        # only when no database directory is set); absolute paths are used
+        # as-is. An empty value disables that companion file.
         #
-        # Example: if eurlc-wgs.config is at /db/campy.config, the pipeline
-        # will look for /db/db_freeze.config, /db/conda_manifest.ini etc.
-        # unless overridden here.
+        # Example: with the database directory /db, the pipeline looks for
+        # /db/db_freeze.config, /db/conda_manifest.ini etc. unless
+        # overridden here.
         db_freeze_config => "db_freeze.config",
         conda_manifest   => "conda_manifest.ini",
         seal             => "config_seal.ini",
+
+        # Where --freeze-databases stores frozen copies and where a run
+        # looks for them (frozen_dbs/<name>/<md5>/). Empty = <db dir>/frozen_dbs.
+        # A relative path is resolved against the database directory.
+        frozen_dbs_root  => "",
 
         # Parallel execution mode (§ parallel scheduler).
         # "off" = strictly sequential, identical behaviour to before this
@@ -1111,7 +1213,10 @@ $rundata{config}{defaults} = {
         chewbbaca_write_md5 => 0,  # CRC32+SHA256 is the standard pair; MD5 is extra, off by default
         assume_yes => 0, 
         test_software => 1,  
-        timeout => "15m",
+        # Wall-time limit per runstep (safety net against hung tools).
+        # Assemblers declare a longer limit of their own (see runstep
+        # 'timeout'); any tool can be overridden with [<tool>] timeout.
+        timeout => "30m",
         machine_aliases      => "M01137=SVA miSeq",
         # Max age (days) of a cached strict-version-check result before it's
         # re-verified against the live conda env, even if the YAML hasn't
@@ -1307,14 +1412,31 @@ $rundata{config}{defaults} = {
             install_version  => "4.0.0",             
     },
     shovill => {
+            # Tool-level config: conda env, version, master on/off switch.
+            # Which inner assemblers shovill is run with is chosen per
+            # variant in [shovill_spades] / [shovill_skesa] below; a variant
+            # runs only if both shovill.enabled and <variant>.enabled are on.
+            # 'arguments' here is added to every variant.
             version_check => "loose",
-            required => 1,
-            enabled   => 1,
+            required => 0,
+            enabled   => 0,
             arguments => "",
             env       => "eurlc-wgs-shovill",
             yml       => "core/eurlc-wgs-shovill.yml",
             package_name  => "shovill",
             install_version  => "1.1.0",             
+    },
+    shovill_spades => {
+            # Shovill with SPAdes as the inner assembler (the shovill default).
+            # --depth 0: no extra subsampling -- reads are already trimmed and
+            # downsampled by the pipeline, so all assemblers get the same reads.
+            enabled   => 1,
+            arguments => "--depth 0",
+    },
+    shovill_skesa => {
+            # Shovill with SKESA as the inner assembler.
+            enabled   => 0,
+            arguments => "--depth 0",
     },
     skesa => {
             version_check => "loose",
@@ -1430,6 +1552,114 @@ $rundata{config}{defaults} = {
             package_name  => "multiqc",
             install_version  => "1.27.1",
     },    
+    # --- v1 typing / characterisation tools ---
+    # Off by default; switch on per tool (they only run for the species
+    # they apply to, see the runstep 'species' field).
+    sistr => {
+            # SISTR (sistr_cmd): Salmonella serovar prediction from the
+            # assembly (antigen genes + cgMLST-330). Off until verified on
+            # the target installation; runs only for Salmonella samples.
+            # NOTE: on first use sistr_cmd downloads its own database (from
+            # Zenodo) -- needs network once, not yet covered by db_freeze.
+            version_check => "loose",
+            required  => 0,
+            enabled   => 0,
+            arguments => "--qc",
+            # Which SISTR field becomes the serotype: "serovar" (SISTR's own
+            # overall prediction -- default) or "serovar_cgmlst" (cgMLST-330
+            # based; what the SVA Salmonella pipeline reports).
+            serovar_field => "serovar",
+            # SISTR qc_status values for which its serotype is used; for any
+            # other status select_main_serotype falls back to SeqSero2.
+            # "PASS,WARNING" (default) or "PASS" (SVA Salmonella pipeline).
+            use_if_qc => "PASS,WARNING",
+            env       => "eurlc-wgs-sistr",
+            yml       => "optional/eurlc-wgs-sistr.yml",
+            package_name  => "sistr_cmd",
+            program_name  => "sistr",
+            install_version  => "1.1.3",
+    },
+    seqsero2 => {
+            # SeqSero2: Salmonella serotyping, run on the main assembly in
+            # k-mer mode (-m k -t 4), as in the SVA Salmonella pipeline.
+            # Fallback for SISTR in select_main_serotype.
+            version_check => "loose",
+            required  => 0,
+            enabled   => 0,
+            arguments => "",
+            env       => "eurlc-wgs-seqsero2",
+            yml       => "optional/eurlc-wgs-seqsero2.yml",
+            package_name  => "seqsero2",
+            program_name  => "SeqSero2_package.py",
+            install_version  => "1.3.1",
+            # SeqSero2 notes that are informative only and should not raise a
+            # sample warning ("|"-separated, compared case-insensitively,
+            # trailing "." ignored). Default list from the SVA pipeline.
+            accepted_notes => "Detected a deletion in gene oafA that causes O5- variant of Typhimurium|Detected Sdf I that is characteristic of commonly circulating strains of serotype Enteritidis",
+    },
+    ectyper => {
+            # ECTyper: E. coli O:H serotyping (+ pathotype and Shiga toxin
+            # subtypes with --pathotype). Runs for E. coli and Shigella.
+            # Add --verify for ECTyper's own species check (uses a species
+            # sketch that may need downloading on first use).
+            version_check => "loose",
+            required  => 0,
+            enabled   => 0,
+            arguments => "--pathotype",
+            env       => "eurlc-wgs-ectyper",
+            yml       => "optional/eurlc-wgs-ectyper.yml",
+            package_name  => "ectyper",
+            program_name  => "ectyper",
+            install_version  => "2.0.0",
+    },
+    lissero => {
+            # LisSero: Listeria monocytogenes molecular serogroup.
+            version_check => "loose",
+            required  => 0,
+            enabled   => 0,
+            arguments => "--min_id 95 --min_cov 95",
+            env       => "eurlc-wgs-lissero",
+            yml       => "optional/eurlc-wgs-lissero.yml",
+            package_name  => "lissero",
+            program_name  => "lissero",
+            install_version  => "0.4.9",
+    },
+    virulencefinder => {
+            # VirulenceFinder (CGE): virulence genes incl. stx subtypes and eae.
+            # 'databases' = comma-separated VirulenceFinder database names
+            # (empty = all databases in virulencefinder_db).
+            version_check => "loose",
+            required  => 0,
+            enabled   => 0,
+            arguments => "",
+            databases => "virulence_ecoli,stx",
+            db_path   => "__DB__/virulencefinder",
+            env       => "eurlc-wgs-virulencefinder",
+            yml       => "optional/eurlc-wgs-virulencefinder.yml",
+            package_name  => "virulencefinder",
+            program_name  => "python",
+            test_command  => "python -m virulencefinder -h",
+            install_version  => "3.2.1",
+            db_test   => "__DB__/virulencefinder/virulencefinder_db/config",
+            install_db => "mkdir -p __DB__/virulencefinder; cd __DB__/virulencefinder; git clone https://bitbucket.org/genomicepidemiology/virulencefinder_db.git",
+    },
+    plasmidfinder => {
+            # PlasmidFinder (CGE): plasmid replicon typing, all species.
+            version_check => "loose",
+            required  => 0,
+            enabled   => 0,
+            arguments => "",
+            db_path   => "__DB__/plasmidfinder",
+            env       => "eurlc-wgs-plasmidfinder",
+            yml       => "optional/eurlc-wgs-plasmidfinder.yml",
+            package_name  => "plasmidfinder",
+            # Bioconda has 2.1.6 (3.x is only on PyPI): plasmidfinder.py,
+            # results in <outdir>/data.json (legacy JSON format).
+            program_name  => "plasmidfinder.py",
+            install_version  => "2.1.6",
+            db_test   => "__DB__/plasmidfinder/plasmidfinder_db/config",
+            install_db => "mkdir -p __DB__/plasmidfinder; cd __DB__/plasmidfinder; git clone https://bitbucket.org/genomicepidemiology/plasmidfinder_db.git",
+    },
     amrfinderplus => {
             version_check => "loose",
             required => 0,
@@ -1524,13 +1754,14 @@ $rundata{config}{defaults} = {
             maxdepth   => 100,
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
-            gc         => 30,
+            gc         => 52,   # was 30 (copied from Campylobacter); S. enterica ~52.1 %
             schema     => "chewie_ns_salmonella",
             filter     => "cgMLST_salmonella",
         },
         "Listeria monocytogenes" => {
             genomesize => 3000000,
             maxdepth   => 100,
+            gc         => 38,   # was missing (fell back to 0); L. monocytogenes ~38 %
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
             schema     => "chewie_ns_listeria",
@@ -2119,6 +2350,25 @@ if (-f $rundata{config}{path}) {
                         }
                     }
 
+                    # Per-tool parallel resource overrides are not in the
+                    # defaults (most tools never set them) but are valid in
+                    # any existing tool section -- see get_runstep_resources.
+                    if ( $param eq 'timeout' && $section ne 'general' && exists $R_cfg->{$section} ) {
+                        $R_cfg->{$section}{timeout} = $value;
+                        log_message("INFO: [$section] timeout override: [$value]");
+                        next;
+                    }
+                    if ( $param =~ /^parallel_(?:threads|ram_gb)$/
+                         && $section ne 'general' && exists $R_cfg->{$section} ) {
+                        if (is_number($value) && $value > 0) {
+                            $R_cfg->{$section}{$param} = $value;
+                            log_message("INFO: [$section] parallel resource override: [$param=$value]");
+                        } else {
+                            log_message("WARNING: [$section:$param] value [$value] must be a positive number -- ignored", "red");
+                        }
+                        next;
+                    }
+
                     if (exists $R_cfg->{$section}{$param} ){
                       if ($R_cfg->{$section}{$param} ne $value) {
                           $R_cfg->{$section}{$param} = $value;
@@ -2141,8 +2391,8 @@ if (-f $rundata{config}{path}) {
 log_message("NOTICE: Configuration source: $rundata{config}{source}");
 
 # Resolve companion config file paths (db_freeze_config, conda_manifest, seal)
-# relative to the main config file's directory. This means --config carries
-# the whole config tree automatically without extra parameters.
+# relative to the database directory (config file's directory only if no
+# database directory is set).
 {
     # Prefer db root as the base directory for companion config files.
     # This keeps the entire configuration tree inside eurlc-wgs_db/ regardless
@@ -2419,6 +2669,23 @@ foreach my $key (keys %args) {
     if ($key =~ /^([^\.]+)\.(.+)$/) {
         my ($section, $param) = ($1, $2);
 
+        if ( $param eq 'timeout' && $section ne 'general' && exists $R_cfg->{$section} ) {
+            $R_cfg->{$section}{timeout} = $value;
+            $args_handled{$key} = 1;
+            log_message("NOTICE: Overriding from launch-arguments: $section.timeout=$value");
+            $rundata{config}{overrides} .= "$section.timeout=$value\n";
+            next;
+        }
+        if ( $param =~ /^parallel_(?:threads|ram_gb)$/ && $section ne 'general'
+             && exists $R_cfg->{$section} ) {
+            graceful_die("Argument [$key=$value]: must be a positive number")
+                unless is_number($value) && $value > 0;
+            $R_cfg->{$section}{$param} = $value;
+            $args_handled{$key} = 1;
+            log_message("NOTICE: Overriding from launch-arguments: $section.$param=$value");
+            $rundata{config}{overrides} .= "$section.$param=$value\n";
+            next;
+        }
         if (exists $R_cfg->{$section} && exists $R_cfg->{$section}{$param}) {
             my $apply_value = $value;
 
@@ -2633,21 +2900,29 @@ if (lc($R_cfg->{general}->{trimming} // "") eq "fastp" && $R_cfg->{fastp}{enable
 # name, or a selection criterion like "fewest_contigs500" -- see
 # select_assembly_winner()). If it names a specific assembler, that assembler
 # must actually be enabled, or there will be nothing for it to select.
-if (lc($R_cfg->{general}->{main_assembly} // "") eq "spades" && $R_cfg->{spades}->{enabled} != 1 ) {
-    log_message("NOTICE: Adjusting parameter: spades.enabled=1");
-    $R_cfg->{spades}->{enabled} = 1;
-}
-if (lc($R_cfg->{general}->{main_assembly} // "") eq "skesa" && $R_cfg->{skesa}->{enabled} != 1) {
-    log_message("NOTICE: Adjusting parameter: skesa.enabled=1");
-    $R_cfg->{skesa}->{enabled} = 1;
-}
-if (lc($R_cfg->{general}->{main_assembly} // "") eq "shovill" && $R_cfg->{shovill}->{enabled} != 1) {
-    log_message("NOTICE: Adjusting parameter: shovill.enabled=1");
-    $R_cfg->{shovill}->{enabled} = 1;
-}
-if (lc($R_cfg->{general}->{main_assembly} // "") eq "unicycler" && $R_cfg->{unicycler}->{enabled} != 1 ) {
-    log_message("NOTICE: Adjusting parameter: unicycler.enabled=1");
-    $R_cfg->{unicycler}->{enabled} = 1;
+#
+# Generic: any value that is the name of a config section with an
+# 'enabled' switch is treated as an assembler name (the runsteps are not
+# defined yet at this point, so the config is what we can check). Shovill
+# variants (shovill_spades, shovill_skesa) also need the [shovill] tool
+# switch on.
+{
+    my $ma = lc( $R_cfg->{general}{main_assembly} // "" );
+
+    # Before shovill was split into variants, "shovill" meant shovill
+    # running SPAdes -- keep old configs working.
+    if ( $ma eq "shovill" ) {
+        log_message("NOTICE: general.main_assembly=shovill now means shovill_spades (shovill with SPAdes) -- adjusting");
+        $ma = $R_cfg->{general}{main_assembly} = "shovill_spades";
+    }
+
+    if ( $ma ne "" && ref $R_cfg->{$ma} eq 'HASH' && exists $R_cfg->{$ma}{enabled} ) {
+        for my $section ( $ma =~ /^shovill_/ ? ( 'shovill', $ma ) : ( $ma ) ) {
+            next if ( $R_cfg->{$section}{enabled} // 0 ) == 1;
+            log_message("NOTICE: Adjusting parameter: $section.enabled=1 (needed for main_assembly=$ma)");
+            $R_cfg->{$section}{enabled} = 1;
+        }
+    }
 }
 
 
@@ -3809,6 +4084,8 @@ $runstep_name = "find_species_kraken2";
 $runstep{$runstep_name} = {
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 8 },
+      # [kraken2] parallel_threads/parallel_ram_gb also apply to this step
+      config_section => 'kraken2',
 
       message    => "Determining species (using kraken2)...",
       long_name  => "species identification (using kraken2)",
@@ -7568,9 +7845,11 @@ sub postprocess_check_for_fasta {
 $runstep_name = "spades";
 
 $runstep{$runstep_name} = {
-      requires   => ['trimmed_downsampled_fastq'],
+      # Assemblies of larger genomes / long reads can take well over the
+      # general timeout; this is only a safety net against a hung run.
+      timeout    => "120m",
       # Resources for parallel scheduler (§ parallel_mode=on)
-      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 16 },
+      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 8 },  # typical bacterial isolate at ~100X; raise with [<tool>] parallel_ram_gb for large genomes/high depth
 
       message    => "Running Spades...",
       long_name  => "Spades",
@@ -7702,7 +7981,7 @@ sub postprocess_spades {
     log_message("NOTICE: Contigs (500+): $contigs500", "green");
     log_message("NOTICE: N50: $n50", "green");    
     log_message("NOTICE: gc_content: $gc", "green");
-    if($assemblystats->{total_coverage}>0){  log_message("NOTICE: Total coverage: $cov", "green"); }
+    if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
    
     return 1; # success
 }
@@ -7714,156 +7993,124 @@ sub postprocess_spades {
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-## runstep shovill
+## runsteps shovill_spades / shovill_skesa
+##
+## Shovill wraps a "real" assembler (SPAdes, SKESA, ...) and adds its own
+## read correction and contig polishing/filtering. Each inner assembler is
+## its own runstep -- one runstep, one result -- generated by
+## define_shovill_runstep() so the code exists once. Every variant is a
+## normal member of the 'assembler' group: its own output file
+## (__BASE__.<name>.fasta), its own quast/mlst results, and it competes in
+## select_main_assembly like any other assembler.
+##
+## Config:
+##   [shovill]          the tool: env, yml, version. enabled = master switch
+##   [shovill_spades]   enabled, arguments (added to the shovill command line)
+##   [shovill_skesa]    enabled, arguments
+## A variant runs when BOTH shovill.enabled and <variant>.enabled are on.
+## shovill.arguments (if any) applies to every variant.
+##
+## Adding a variant (e.g. megahit): add a [shovill_megahit] defaults
+## section and one define_shovill_runstep() call below, then add the name
+## to @PER_SAMPLE_RUNSTEPS.
+##
+## Shovill does not support single-end reads, so the variants simply do not
+## apply to SE samples (the other enabled assemblers cover them).
 
-$runstep_name = "shovill";
+sub define_shovill_runstep {
+    my ($name, $inner) = @_;
 
-$runstep{$runstep_name} = {
-      # Resources for parallel scheduler (§ parallel_mode=on)
-      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 8 },
+    my $label = "Shovill ($inner)";
 
-      message    => "Running Shovill...",
-      long_name  => "Shovill",
-      output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/Shovill",
-      resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.shovill.fasta",
-      resultfiles_status => "NA",
+    $data_key{"${name}_assembled"} = {
+        check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{$name}{total_length} ? 1 : 0; },
+    };
 
-      group      => 'assembler',
-      requires   => [ 'trimmed_downsampled_fastq' ],
-      produces   => [ 'shovill_assembled' ],
-      applies_if => sub {
-          my ($i) = @_;
-          return 0 if $R_samples->[$i]{type} eq 'FASTA';
-          return $R_cfg->{shovill}{enabled} ? 1 : 0;
-      },
-};
+    $runstep{$name} = {
+        # Resources for parallel scheduler (§ parallel_mode=on)
+        resources  => { threads => $R_cfg->{general}{threads}, ram_gb => ($inner eq 'skesa' ? 4 : 8) },
+        config_section => 'shovill',
+        timeout    => "120m",
 
-# TEMPLATES---------------------------------
+        message    => "Running $label...",
+        long_name  => $label,
+        output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/" . ucfirst($name),
+        resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.$name.fasta",
+        resultfiles_status => "NA",
 
+        group      => 'assembler',
+        requires   => [ 'trimmed_downsampled_fastq' ],
+        produces   => [ "${name}_assembled" ],
+        applies_if => sub {
+            my ($i) = @_;
+            return 0 unless $R_samples->[$i]{type} eq 'PE';
+            return ( $R_cfg->{shovill}{enabled} && $R_cfg->{$name}{enabled} ) ? 1 : 0;
+        },
+    };
 
+    my $args = join ' ', grep { defined && $_ ne '' }
+                         ( $R_cfg->{shovill}{arguments}, $R_cfg->{$name}{arguments} );
 
-
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{shovill}->{env} --no-capture-output shovill 
-       --R1 '__R1TD__' 
-       --R2 '__R2TD__' 
-       --cpus __THREADS__ 
-       $R_cfg->{shovill}->{arguments} 
-       --outdir __OUTDIR__/__BASE__ 
-       >> __DIR-LOG__/shovill_logs.txt 
+    $runstep{$name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+    conda run -n $R_cfg->{shovill}->{env} --no-capture-output shovill
+       --assembler $inner
+       --R1 '__R1TD__'
+       --R2 '__R2TD__'
+       --cpus __THREADS__
+       $args
+       --force
+       --outdir __OUTDIR__/__BASE__
+       >> __DIR-LOG__/${name}_logs.txt
        __HIDE-STDERR__
-    __NEWCOMMAND__   
-    cp __OUTDIR__/__BASE__/contigs.fa __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.shovill.fasta
+    __NEWCOMMAND__
+    cp __OUTDIR__/__BASE__/contigs.fa __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.$name.fasta
 CMD
+    $runstep{$name}{cmd_template}{SE}    = "";   # shovill does not support single-end reads
+    $runstep{$name}{cmd_template}{FASTA} = "";
 
+    $runstep{$name}{test} = sub { return check_conda_tool("shovill"); };
 
-$runstep{$runstep_name}{cmd_template}{SE} = "";  #shovill do not support single end reads
+    $runstep{$name}{preprocessing} = sub {
+        my ($samplenr) = @_;
+        my $sample_name = $R_samples->[$samplenr]{name};
+        my $sample_type = $R_samples->[$samplenr]{type};
+        return "" unless $sample_type eq 'PE';
 
-$runstep{$runstep_name}{cmd_template}{FASTA} = "";
+        my $resultfile = fill_placeholders($runstep{$name}{resultfile}, $samplenr);
+        log_message("INFO: Preparing to run step $name on sample $sample_name ");
 
-# TEST---------------------------------
-$runstep{$runstep_name}{test} = \&test_shovill;
-
-sub test_shovill {
-
-   return check_conda_tool("shovill");
- 
-
-}
-
-# PRE---------------------------------
-
-$runstep{$runstep_name}{preprocessing} = \&preprocess_shovill;
-
-sub preprocess_shovill {
-
-    my ($samplenr) = @_;
-
-    my $runstep_name = "shovill";
-    my $sample_name  = $R_samples->[$samplenr]{name};
-    my $sample_type  = $R_samples->[$samplenr]{type};
-
-    if ($sample_type eq "FASTA") {
-        return "";
-    }
-
-    if ($sample_type eq "SE") {
-        log_message("WARNING: Shovill does not support single-end read samples for sample $sample_name","yellow");
-
-        if ($R_cfg->{spades}{enabled}) {
-            log_message("NOTICE: Falling back to Spades for single-end sample $sample_name","yellow");
-            $R_samples->[$samplenr]{results}{$runstep_name}{delegated_to} = "spades";
-            return $runstep{"spades"}{preprocessing}->($samplenr);
-        }
-        else {
-            log_message("WARNING: No suitable fallback assembler enabled for single-end sample $sample_name","yellow");
+        if (-f $resultfile) {
+            log_message("NOTICE: Runstep: $runstep{$name}{long_name} Sample: $sample_name already exists. Skipping");
+            $runstep{$name}{result_parsing}->($samplenr);
             return "";
         }
-    }
 
-    my $command    = $runstep{$runstep_name}{cmd_template}{$sample_type};
-    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+        my $command = fill_placeholders($runstep{$name}{cmd_template}{PE}, $samplenr, $name);
+        ensure_dir(fill_placeholders($runstep{$name}{output_dir}, $samplenr));
+        return $command;
+    };
 
-    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+    $runstep{$name}{result_parsing} = sub {
+        my ($samplenr) = @_;
+        my $resultfile = fill_placeholders($runstep{$name}{resultfile}, $samplenr, $name);
+        return 0 unless -s $resultfile;   # failed run: leave results empty (not "assembled")
 
-    if (-f $resultfile) {
-        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
-        postprocess_shovill($samplenr);
-        return "";
-    }
+        my $assemblystats = analyze_assembly_stats($resultfile);
+        $R_samples->[$samplenr]{results}{$name} = $assemblystats;
 
-    $command = fill_placeholders($command, $samplenr, $runstep_name);
-
-    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
-
-    return $command;
+        log_message("NOTICE: Total length: "   . ($assemblystats->{total_length}              // "n/a"), "green");
+        log_message("NOTICE: Contigs: "        . ($assemblystats->{nr_contigs}                // "n/a"), "green");
+        log_message("NOTICE: Contigs (500+): " . ($assemblystats->{nr_contigs_largerthan_500} // "n/a"), "green");
+        log_message("NOTICE: N50: "            . ($assemblystats->{n50}                       // "n/a"), "green");
+        log_message("NOTICE: gc_content: "     . ($assemblystats->{gc_content}                // "n/a"), "green");
+        my $cov = $assemblystats->{total_coverage} // 0;
+        log_message("NOTICE: Total coverage: $cov", "green") if $cov > 0;
+        return 1;
+    };
 }
 
-# POST---------------------------------
-
-$runstep{$runstep_name}{result_parsing} = \&postprocess_shovill;
-
-sub postprocess_shovill {
-    my ($samplenr) = @_;
-
-    my $runstep_name = "shovill";
-    my $sample_name  = $R_samples->[$samplenr]{name};
-    my $sample_type  = $R_samples->[$samplenr]{type};
-
-    if (
-        $sample_type eq "SE" &&
-        exists $R_samples->[$samplenr]{results}{$runstep_name}{delegated_to} &&
-        $R_samples->[$samplenr]{results}{$runstep_name}{delegated_to} eq "spades"
-    ) {
-        return $runstep{"spades"}{result_parsing}->($samplenr);
-    }
-
-    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr, $runstep_name);
-
-    my $assemblystats = analyze_assembly_stats($resultfile);
-    $R_samples->[$samplenr]{results}{$runstep_name} = $assemblystats;
-
-    my $len        = $assemblystats->{total_length}               // "n/a";
-    my $contigs    = $assemblystats->{nr_contigs}                // "n/a";
-    my $contigs500 = $assemblystats->{nr_contigs_largerthan_500} // "n/a";
-    my $n50        = $assemblystats->{n50}                       // "n/a";
-    my $gc         = $assemblystats->{gc_content}                // "n/a";
-    my $cov        = $assemblystats->{total_coverage}            // 0;
-
-    log_message("NOTICE: Total length: $len", "green");
-    log_message("NOTICE: Contigs: $contigs", "green");
-    log_message("NOTICE: Contigs (500+): $contigs500", "green");
-    log_message("NOTICE: N50: $n50", "green");
-    log_message("NOTICE: gc_content: $gc", "green");
-    if ($cov > 0) {
-        log_message("NOTICE: Total coverage: $cov", "green");
-    }
-
-    return 1;
-}
-
-
-
+define_shovill_runstep('shovill_spades', 'spades');
+define_shovill_runstep('shovill_skesa',  'skesa');
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -7874,8 +8121,11 @@ sub postprocess_shovill {
 $runstep_name = "skesa";
 
 $runstep{$runstep_name} = {
+      # Assemblies of larger genomes / long reads can take well over the
+      # general timeout; this is only a safety net against a hung run.
+      timeout    => "120m",
       # Resources for parallel scheduler (§ parallel_mode=on)
-      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 8 },
+      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 4 },  # typical bacterial isolate at ~100X; raise with [<tool>] parallel_ram_gb for large genomes/high depth
 
       message    => "Running Skesa...",
       long_name  => "Skesa",
@@ -8031,7 +8281,7 @@ sub postprocess_skesa {
     log_message("NOTICE: Contigs (500+): $contigs500", "green");
     log_message("NOTICE: N50: $n50", "green");    
     log_message("NOTICE: gc_content: $gc", "green");
-    if($assemblystats->{total_coverage}>0){  log_message("NOTICE: Total coverage: $cov", "green"); }
+    if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
     
     return 1; # success
 }
@@ -8047,6 +8297,9 @@ sub postprocess_skesa {
 $runstep_name = "unicycler";
 
 $runstep{$runstep_name} = {
+      # Assemblies of larger genomes / long reads can take well over the
+      # general timeout; this is only a safety net against a hung run.
+      timeout    => "120m",
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 8 },
 
@@ -8192,7 +8445,7 @@ sub postprocess_unicycler {
     log_message("NOTICE: Contigs (500+): $contigs500", "green");
     log_message("NOTICE: N50: $n50", "green");    
     log_message("NOTICE: gc_content: $gc", "green");
-    if($assemblystats->{total_coverage}>0){  log_message("NOTICE: Total coverage: $cov", "green"); }
+    if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
     
     return 1; # success
 }
@@ -8206,11 +8459,12 @@ sub postprocess_unicycler {
 $runstep_name = "select_main_assembly";
 
 $runstep{$runstep_name} = {
-      # requires any_assembler_done so the parallel scheduler doesn't
-      # dispatch select_main_assembly before any assembler has completed.
-      # In sequential mode the list ordering guaranteed this; in parallel
-      # mode an explicit data-key gate is needed.
-      requires   => ['any_assembler_done'],
+      # any_assembler_done: there is something to select from.
+      # all_assemblers_settled: every applicable assembler has finished (or
+      # failed) -- without it, the parallel scheduler would select as soon
+      # as the FIRST assembler finished, before slower ones had a chance.
+      # In sequential mode the list ordering already guarantees both.
+      requires   => ['any_assembler_done', 'all_assemblers_settled'],
       resources  => { threads => 1, ram_gb => 1 },
 
       message    => "Selecting main assembly...",
@@ -8270,10 +8524,17 @@ sub preprocess_select_main_assembly {
         $main_assembler = $criteria;
         $reason = "$criteria is selected as main assembler";
     }
-    elsif($criteria eq "fewest_contigs"){  $main_assembler = select_assembly_winner($samplenr, $gatekeeper_strategy{lowest_value_of}->("nr_contigs")); $reason = "assembly with fewest contigs"; }
-    elsif($criteria eq "fewest_contigs500"){  $main_assembler = select_assembly_winner($samplenr, $gatekeeper_strategy{lowest_value_of}->("nr_contigs_largerthan_500")); $reason = "assembly with fewest contigs larger than 500";  }
-    elsif($criteria eq "best_N50"){  $main_assembler = select_assembly_winner($samplenr, $gatekeeper_strategy{highest_value_of}->("n50")); $reason = "assembly with highest N50 value"; }
-    else{ $main_assembler = select_assembly_winner($samplenr, $gatekeeper_strategy{lowest_value_of}->("nr_contigs")); $reason = "Criteria is missing- using assembly with fewest contigs"; }
+    else {
+        my ($comparator, $what);
+        if    ($criteria eq "fewest_contigs")    { $comparator = $gatekeeper_strategy{lowest_value_of}->("nr_contigs");                $what = "assembly with fewest contigs"; }
+        elsif ($criteria eq "fewest_contigs500") { $comparator = $gatekeeper_strategy{lowest_value_of}->("nr_contigs_largerthan_500"); $what = "assembly with fewest contigs larger than 500"; }
+        elsif ($criteria eq "best_N50")          { $comparator = $gatekeeper_strategy{highest_value_of}->("n50");                      $what = "assembly with highest N50 value"; }
+        else                                     { $comparator = $gatekeeper_strategy{lowest_value_of}->("nr_contigs");                $what = "Criteria is missing- using assembly with fewest contigs"; }
+
+        my $gate_note;
+        ($main_assembler, $gate_note) = select_assembly_winner($samplenr, $comparator);
+        $reason = $what . ( $gate_note ne "" ? " ($gate_note)" : "" );
+    }
 
     
     if (!defined $main_assembler || $main_assembler eq "") {
@@ -8359,7 +8620,7 @@ sub postprocess_select_main_assembly {
     log_message("NOTICE: Contigs (500+): $contigs500", "green");
     log_message("NOTICE: N50: $n50", "green");    
     log_message("NOTICE: gc_content: $gc", "green");
-    if($assemblystats->{total_coverage}>0){  log_message("NOTICE: Total coverage: $cov", "green"); }
+    if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
     
     $R_samples->[$samplenr]{main_results}{assembly}{size} = $len;
     $R_samples->[$samplenr]{main_results}{assembly}{contigs} = $contigs;
@@ -8389,7 +8650,16 @@ sub postprocess_select_main_assembly {
 }
 
 
- sub select_assembly_winner {
+# Picks the main assembly among the assemblers that produced a result.
+# Returns ($winner, $note); $note is "" or a short text for the report's
+# selection reason.
+#
+# QC gate: before ranking, candidates whose total length lies inside the
+# species' fail_assembly_size range (e.g. "<1350000 >2600000") are set
+# aside -- a broken assembly can otherwise "win" on contig count or N50.
+# If that would leave nothing, the gate is not applied (and the note says
+# so); the normal QC evaluation will then flag the selected assembly.
+sub select_assembly_winner {
     my ($samplenr, $comparator) = @_;
 
     my %candidates;
@@ -8399,7 +8669,26 @@ sub postprocess_select_main_assembly {
         $candidates{$name} = $c;
     }
 
-    return gatekeeper_select_winner( \%candidates, $comparator, \@ASSEMBLER_TIEBREAK ) // "";
+    my $species   = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "";
+    my $fail_size = get_config_value_for_species($species, "fail_assembly_size");
+    my $threshold = parse_threshold_string($fail_size);
+
+    my $note = "";
+    if ($threshold && %candidates) {
+        my @excluded = grep { threshold_matches($candidates{$_}{total_length}, $threshold) } sort keys %candidates;
+        if (@excluded == keys %candidates) {
+            $note = "all assemblies outside fail_assembly_size $threshold->{raw} -- size check not applied";
+        }
+        elsif (@excluded) {
+            $note = "excluded by size check (fail_assembly_size $threshold->{raw}): "
+                  . join(", ", map { "$_ [" . $candidates{$_}{total_length} . " bp]" } @excluded);
+            delete @candidates{@excluded};
+        }
+        log_message("NOTICE: Sample $R_samples->[$samplenr]{name}: main assembly selection: $note", "yellow") if $note ne "";
+    }
+
+    my $winner = gatekeeper_select_winner( \%candidates, $comparator, \@ASSEMBLER_TIEBREAK ) // "";
+    return wantarray ? ( $winner, $note ) : $winner;
 }
 
     
@@ -8678,7 +8967,6 @@ sub parse_quast {
 $runstep_name = "remap";
 
 $runstep{$runstep_name} = {
-      requires   => ['main_assembly_present', 'trimmed_downsampled_fastq'],
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 4 },
 
@@ -10001,7 +10289,6 @@ sub parse_bakta {
 $runstep_name = "mlst";
 
 $runstep{$runstep_name} = {
-      requires   => ['main_assembly_present'],
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => 1, ram_gb => 1 },
 
@@ -10177,22 +10464,10 @@ sub postprocess_mlst {
         path  => path_relative_to_outdir(fill_placeholders("__DIR-TYPING__/mlst/__BASE__/__BASE__.mlst.results",$samplenr, $runstep_name)),
     ); 
 
-    my $spadespath = fill_placeholders("__DIR-TYPING__/mlst/__BASE__/__BASE__.spades.mlst.results",$samplenr, $runstep_name);
-    if(-f $spadespath)
-    { 
-       register_raw_output($samplenr, $runstep_name, title => "MLST results (spades)", type => "txt", path => path_relative_to_outdir($spadespath));
-    }
-
-    my $shovillspath = fill_placeholders("__DIR-TYPING__/mlst/__BASE__/__BASE__.shovill.mlst.results",$samplenr, $runstep_name);
-    if(-f $shovillspath)
-    { 
-       register_raw_output($samplenr, $runstep_name, title => "MLST results (shovill)", type => "txt", path => path_relative_to_outdir($shovillspath));
-    }
-
-    my $skesaspath = fill_placeholders("__DIR-TYPING__/mlst/__BASE__/__BASE__.skesa.mlst.results",$samplenr, $runstep_name);
-    if(-f $skesaspath)
-    { 
-       register_raw_output($samplenr, $runstep_name, title => "MLST results (skesa)", type => "txt", path => path_relative_to_outdir($skesaspath));
+    for my $ambl ( group_members('assembler', \@ASSEMBLER_TIEBREAK) ) {
+        my $path = fill_placeholders("__DIR-TYPING__/mlst/__BASE__/__BASE__.$ambl.mlst.results", $samplenr, $runstep_name);
+        next unless -f $path;
+        register_raw_output($samplenr, $runstep_name, title => "MLST results ($ambl)", type => "txt", path => path_relative_to_outdir($path));
     }
     
     # Update main_results only if empty or matching; otherwise warn
@@ -10380,10 +10655,12 @@ sub preprocess_update_fastmlst_db {
 
    my $missing_files = 0;
     if( !(-f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.results",$samplenr)) )    { $missing_files = 1;}
-    if($R_cfg->{unicycler}->{enabled} && $sample_type ne "FASTA" && ! (-f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.unicycler.results",$samplenr)) )   { $missing_files = 1;}
-    if($R_cfg->{skesa}->{enabled}     && $sample_type ne "FASTA" && ! (-f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.skesa.results",$samplenr)) )   { $missing_files = 1;}
-    if($R_cfg->{shovill}->{enabled}   && $sample_type ne "FASTA" && ! (-f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.shovill.results",$samplenr)) )   { $missing_files = 1;}
-    if($R_cfg->{spades}->{enabled}    && $sample_type ne "FASTA" && ! (-f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.spades.results",$samplenr)) )   { $missing_files = 1;}
+    if ($sample_type ne "FASTA") {
+        for my $ambl (group_members('assembler')) {
+            next unless -f fill_placeholders("__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.$ambl.fasta", $samplenr);
+            $missing_files = 1 unless -f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.$ambl.results", $samplenr);
+        }
+    }
 
    if( $missing_files==0 ){
      return "";  # all resultfiles already present for this sample
@@ -10505,7 +10782,6 @@ sub postprocess_update_fastmlst_db {
 $runstep_name = "fastmlst";
 
 $runstep{$runstep_name} = {
-      requires   => ['main_assembly_present'],
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => 1, ram_gb => 1 },
 
@@ -10686,22 +10962,10 @@ sub postprocess_fastmlst {
         path  => path_relative_to_outdir(fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.results",$samplenr, $runstep_name)),
     ); 
 
-    my $spadespath = fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.spades.results",$samplenr, $runstep_name);
-    if(-f $spadespath)
-    { 
-       register_raw_output($samplenr, $runstep_name, title => "MLST results (spades)", type => "txt", path => path_relative_to_outdir($spadespath));
-    }
-
-    my $shovillspath = fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.shovill.results",$samplenr, $runstep_name);
-    if(-f $shovillspath)
-    { 
-       register_raw_output($samplenr, $runstep_name, title => "MLST results (shovill)", type => "txt", path => path_relative_to_outdir($shovillspath));
-    }
-
-    my $skesaspath = fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.skesa.results",$samplenr, $runstep_name);
-    if(-f $skesaspath)
-    { 
-       register_raw_output($samplenr, $runstep_name, title => "MLST results (skesa)", type => "txt", path => path_relative_to_outdir($skesaspath));
+    for my $ambl ( group_members('assembler', \@ASSEMBLER_TIEBREAK) ) {
+        my $path = fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.$ambl.results", $samplenr, $runstep_name);
+        next unless -f $path;
+        register_raw_output($samplenr, $runstep_name, title => "MLST results ($ambl)", type => "txt", path => path_relative_to_outdir($path));
     }
     
     # Update main_results only if empty; otherwise warn on conflict
@@ -10792,7 +11056,7 @@ $runstep{$runstep_name} = {
       # in the group actually produced a usable result. requires is empty,
       # relying on list position (runs after mlst/fastmlst), the same way
       # select_main_assembly relies on running after all four assemblers.
-      requires   => ['any_mlst_done'],,
+      requires   => ['any_mlst_done', 'all_mlst_settled'],
       produces   => [ 'main_mlst_present' ],
       applies_if => sub { return 1; },
 };
@@ -10985,7 +11249,6 @@ sub parse_fastmlst {
 $runstep_name = "amrfinderplus";
 
 $runstep{$runstep_name} = {
-      requires   => ['main_assembly_present'],
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 2 },
 
@@ -11093,7 +11356,10 @@ sub postprocess_amrfinderplus {
    for(my $i=0;$i<$hitcount; $i++){
      my $amrhits_symbol = $result_ref->{amr_hits}[$i]->{element_symbol} // "n/a";
      my $amrhits_name = $result_ref->{amr_hits}[$i]->{element_name} // "n/a";
-     log_message("NOTICE: Sample $sample_name: AMR-hit:  $amrhits_symbol ($amrhits_name)", "green");
+     # With --plus, AMRFinderPlus also reports VIRULENCE and STRESS genes
+     # (column "Type"); label them as such instead of calling all "AMR-hit".
+     my $amrhits_type = uc( $result_ref->{amr_hits}[$i]->{type} // $result_ref->{amr_hits}[$i]->{element_type} // "AMR" );
+     log_message("NOTICE: Sample $sample_name: $amrhits_type-hit: $amrhits_symbol ($amrhits_name)", "green");
   }
   
       # Links used by the HTML reports.
@@ -11545,6 +11811,8 @@ sub postprocess_resfinder_fasta {
      my $phenotype = $result_ref->{resfinder_hits}[$i]->{phenotype} // "n/a";
      my $identity = $result_ref->{resfinder_hits}[$i]->{identity} // "n/a";
      my $coverage = $result_ref->{resfinder_hits}[$i]->{coverage} // "n/a";
+     $coverage = sprintf("%.1f", $coverage) if $coverage =~ /^\d+\.\d{2,}$/;
+     $identity = sprintf("%.2f", $identity) if $identity =~ /^\d+\.\d{3,}$/;
    log_message("NOTICE: Sample $sample_name: AMR-hit: $resgene ($phenotype) [Identity: $identity % Coverage: $coverage %]", "green");
    }
   
@@ -11586,7 +11854,7 @@ $runstep{$runstep_name} = {
 
       # Always applies; relies on list position (runs after all three AMR
       # tools), the same way select_main_assembly/select_main_mlst do.
-      requires   => ['any_amr_done'],
+      requires   => ['any_amr_done', 'all_amr_settled'],
       produces   => [ 'amr_results_checked' ],
       applies_if => sub { return 1; },
 };
@@ -11610,6 +11878,1327 @@ sub preprocess_select_main_amr_results {
 }
 
 $runstep{$runstep_name}{result_parsing} = sub { return 1; };
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## STUB RUNSTEPS (v1 typing/characterisation tools, built out one at a time)
+##
+## (All v1 tools are built out now; these helpers are kept for the next new
+## tool, e.g. STECFinder or ConFindr in v2.) A stub runstep has its full
+## scheduling contract -- requires,
+## produces, applies_if, species, group, resources -- but no tool behind
+## them yet. Their preprocessing returns an internal SUB (write_stub_result)
+## that just writes a small JSON marker in the step's output directory;
+## result_parsing reads it back. That exercises the whole machinery
+## (dispatch, fork, reap, data keys, group gates, select_main_serotype,
+## both schedulers) without any external program, so they can be switched
+## on in a test run before the tools are installed.
+##
+## Building one out = replace its cmd_template / test / preprocessing /
+## result_parsing with the real thing (see e.g. amrfinderplus), add env/yml/
+## version (and db_path) to its config section, and drop the "stub" wording.
+## The contract part normally stays as it is.
+##
+## All are off by default (enabled => 0) until built out.
+
+# Common preprocessing for a stub: reuse an existing marker (rerun), else
+# hand an internal SUB to the scheduler.
+sub stub_preprocessing {
+    my ($samplenr, $runstep_name) = @_;
+    my $sample_name = $R_samples->[$samplenr]{name};
+    my $resultfile  = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr, $runstep_name);
+
+    log_message("INFO: Preparing to run step $runstep_name (stub) on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        $runstep{$runstep_name}{result_parsing}->($samplenr);
+        return "";
+    }
+
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr, $runstep_name));
+    return "SUB\twrite_stub_result\t$samplenr\t$runstep_name";
+}
+
+# Internal SUB (runs in the forked child -- writes files only).
+sub write_stub_result {
+    my ($samplenr, $runstep_name) = @_;
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr, $runstep_name);
+    write_json_file({
+        stub    => 1,
+        runstep => $runstep_name,
+        sample  => $R_samples->[$samplenr]{name},
+        species => $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "n/a",
+        note    => "placeholder result -- tool not implemented yet",
+    }, $resultfile);
+    return 0;
+}
+
+# Common result_parsing for a stub: marks the step as having produced a
+# (placeholder) result, so data keys and group gates behave as they will
+# for the real tool. $extra lets a step add fields the real tool will
+# produce (e.g. serotype => "n/a") so select steps can be exercised.
+sub stub_result_parsing {
+    my ($samplenr, $runstep_name, %extra) = @_;
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr, $runstep_name);
+    return 0 unless -f $resultfile;
+    $R_samples->[$samplenr]{results}{$runstep_name} = { status => "stub", %extra };
+    log_message("NOTICE: Sample $R_samples->[$samplenr]{name}: $runstep_name: stub result (tool not implemented yet)", "yellow");
+    return 1;
+}
+
+sub stub_test {
+    my ($runstep_name) = @_;
+    log_message("NOTICE: $runstep_name: stub -- no tool to test yet");
+    return 2;
+}
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## Shared helpers for typing tools (ECTyper, LisSero, VirulenceFinder, PlasmidFinder)
+
+# First data row of a tab-separated file with a header line, as a hashref
+# keyed by lower-cased column name. Returns undef if missing or no data row.
+sub read_tsv_first_row {
+    my ($file) = @_;
+    return undef unless -s $file;
+    open(my $fh, '<', $file) or return undef;
+    my $header = <$fh>;
+    my $line;
+    while (defined($line = <$fh>)) { last if $line =~ /\S/; }
+    close $fh;
+    return undef unless defined $header && defined $line;
+    s/\r?\n\z// for $header, $line;
+    my @h = split /\t/, $header;
+    my @v = split /\t/, $line, -1;
+    my %row;
+    @row{ map { lc } @h } = map { $_ // "" } @v[0 .. $#h];
+    return \%row;
+}
+
+# Hits from a CGE tool's JSON result (VirulenceFinder, PlasmidFinder).
+# Works on both result formats in use:
+#   - legacy (<= 2.x, or --legacy): {tool}{results}{<group>}{<db>}{<hit_id>} =
+#       { virulence_gene|plasmid, identity, coverage, accession, contig_name,
+#         positions_in_contig, protein_function|note }
+#   - BeOne (3.x default): {seq_regions}{<id>} = { name, identity, coverage,
+#       ref_acc, query_id, query_start_pos, query_end_pos, ref_database[] }
+# by walking the structure and collecting every hash that has a gene name
+# plus identity and coverage. Returns a list of flat hashrefs, de-duplicated.
+sub parse_cge_hits {
+    my ($jsonfile) = @_;
+    return () unless -s $jsonfile;
+    my $data = read_json_file($jsonfile) or return ();
+
+    my (@hits, %seen);
+    my $walk;
+    $walk = sub {
+        my ($node, $path) = @_;   # $path: keys leading to $node
+        if (ref $node eq 'HASH') {
+            # First plain string among the name fields. (In BeOne results
+            # "gene" is a JSON boolean, so it must not win over "name".)
+            my ($gene) = grep { defined && !ref && $_ ne "" }
+                         @{$node}{qw(virulence_gene plasmid name gene)};
+            if ( defined $gene && defined $node->{identity}
+                 && ( defined $node->{coverage} || defined $node->{template_coverage} ) ) {
+                my $refdb = $node->{ref_database};
+                $refdb = $refdb->[0] if ref $refdb eq 'ARRAY';
+                $refdb = $1 if defined $refdb && $refdb =~ /:([^:]+)$/;
+                my $pos = $node->{positions_in_contig}
+                       // ( defined $node->{query_start_pos} ? "$node->{query_start_pos}..$node->{query_end_pos}" : "" );
+                my %h = (
+                    gene      => $gene,
+                    identity  => $node->{identity},
+                    coverage  => $node->{coverage} // $node->{template_coverage},
+                    accession => $node->{accession} // $node->{ref_acc} // "",
+                    contig    => $node->{contig_name} // $node->{query_id} // "",
+                    position  => $pos,
+                    function  => $node->{protein_function} // $node->{function} // $node->{note} // "",
+                    # legacy layout: ...{<db>}{<hit_id>} -> db is 2 levels up
+                    database  => $refdb // ( @$path >= 2 ? $path->[-2] : "" ),
+                );
+                for (qw(identity coverage)) {
+                    $h{$_} = sprintf("%.2f", $h{$_}) if $h{$_} =~ /^\d+\.\d{3,}$/;
+                }
+                my $key = join("|", @h{qw(gene contig position)});
+                push @hits, \%h unless $seen{$key}++;
+                return;
+            }
+            $walk->( $node->{$_}, [ @$path, $_ ] ) for sort keys %$node;
+        }
+        elsif (ref $node eq 'ARRAY') {
+            $walk->( $_, $path ) for @$node;
+        }
+    };
+    $walk->($data, []);
+    undef $walk;
+
+    # BeOne: gene functions live in the top-level "phenotypes" section.
+    if ( ref $data eq 'HASH' && ref $data->{phenotypes} eq 'HASH' ) {
+        for my $h (@hits) {
+            next if $h->{function} ne "";
+            my $ph = $data->{phenotypes}{ $h->{gene} } or next;
+            my $f  = ref $ph eq 'HASH' ? ( $ph->{function} // "" ) : "";
+            $h->{function} = $f unless $f =~ /^No function found/i;
+        }
+    }
+    return sort { lc($a->{gene}) cmp lc($b->{gene}) } @hits;
+}
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep sistr
+##
+## SISTR (sistr_cmd) on the main assembly: serovar from antigen genes,
+## cross-checked with a cgMLST-330 prediction. With --qc (default
+## arguments) it also reports qc_status PASS/WARNING/FAIL.
+##
+## results.sistr.serotype is set only when qc_status is not FAIL, so that
+## select_main_serotype falls back to SeqSero2 when SISTR fails -- the
+## same order as the SVA Salmonella pipeline. The raw serovar is always
+## kept in results.sistr.serovar.
+
+$runstep_name = "sistr";
+
+$runstep{$runstep_name} = {
+      # Resources for parallel scheduler (§ parallel_mode=on)
+      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 2 },
+
+      message    => "Running SISTR...",
+      long_name  => "SISTR (Salmonella serotyping)",
+      output_dir => "__DIR-TYPING__/sistr",
+      resultfile => "__DIR-TYPING__/sistr/__BASE__.sistr.json",
+      resultfiles_status => "NA",
+
+      group      => 'serotyping',
+      species    => [ 'Salmonella' ],
+      requires   => [ 'main_assembly_present', 'kraken2_settled' ],
+      produces   => [ 'sistr_done' ],
+      applies_if => sub { return $R_cfg->{sistr}{enabled} ? 1 : 0; },
+};
+
+# TEMPLATES---------------------------------
+
+$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    conda run -n $R_cfg->{sistr}->{env} --no-capture-output sistr
+       -i '__DIR-ASSEMBLIES__/__BASE__.fasta' '__BASE__'
+       -f json
+       -o '__OUTDIR__/__BASE__.sistr.json'
+       -t __THREADS__
+       -T '__OUTDIR__/__BASE__.tmp'
+       $R_cfg->{sistr}->{arguments}
+       __HIDE-OUTPUT__
+    __NEWCOMMAND__
+    rm -rf '__OUTDIR__/__BASE__.tmp'
+CMD
+
+# TEST---------------------------------
+$runstep{$runstep_name}{test} = \&test_sistr;
+
+sub test_sistr {
+    return check_conda_tool("sistr");
+}
+
+# PRE---------------------------------
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_sistr;
+
+sub preprocess_sistr {
+
+    my ($samplenr) = @_;
+
+    my $runstep_name = "sistr";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+
+    my $command    = $runstep{$runstep_name}{cmd_template};
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        postprocess_sistr($samplenr);
+        return "";
+    }
+
+    return "" unless require_input_files($samplenr, $runstep_name, "optional", "__DIR-ASSEMBLIES__/__BASE__.fasta");
+
+    $command = fill_placeholders($command, $samplenr, $runstep_name);
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+
+    return $command;
+}
+
+# POST---------------------------------
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_sistr;
+
+sub postprocess_sistr {
+    my ($samplenr) = @_;
+
+    my $runstep_name = "sistr";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    my $r = parse_sistr($resultfile, $samplenr);
+    unless ($r) {
+        log_message("WARNING: Sample $sample_name: SISTR produced no usable result [$resultfile]", "red");
+        return 0;   # results.sistr left unset -> sistr_done stays false; select_main_serotype falls back
+    }
+
+    my $qc = uc($r->{qc_status} // "n/a");
+    $r->{status} = "done";
+
+    # Serotype candidate from the configured field (see [sistr] serovar_field).
+    my $field = $R_cfg->{sistr}{serovar_field} // "serovar";
+    $field = "serovar" unless exists $r->{$field};
+    my $candidate = $r->{$field};
+
+    # Reasons not to use SISTR's answer -> select_main_serotype falls back
+    # to SeqSero2. Recorded in results.sistr.not_used_reason.
+    my %use_if = map { uc($_) => 1 } grep { /\S/ } split /[,\s]+/, ( $R_cfg->{sistr}{use_if_qc} // "PASS,WARNING" );
+    my @not_used;
+    push @not_used, "QC status $qc" unless $use_if{$qc};
+    push @not_used, "no serovar called" if $candidate eq "n/a" || $candidate =~ /^[\s\-:]*$/;
+    # Monophasic Typhimurium: cgMLST places it in Typhimurium, but without
+    # the second-phase flagellin (h2 "-") the serotype is really
+    # I 4,[5],12:i:- -- SeqSero2 resolves that better (rule from the SVA
+    # Salmonella pipeline).
+    if ( ( $r->{serovar_cgmlst} =~ /^Typhimurium$/i || $candidate =~ /^Typhimurium$/i ) && $r->{h2} eq "-" ) {
+        push @not_used, "Typhimurium without h2 antigen (possible monophasic variant)";
+    }
+    $r->{serotype}        = @not_used ? "n/a" : $candidate;
+    $r->{serotype_field}  = $field;
+    $r->{not_used_reason} = join("; ", @not_used);
+    $R_samples->[$samplenr]{results}{$runstep_name} = $r;
+
+    if (@not_used) {
+        log_message("NOTICE: Sample $sample_name: SISTR serotype not used (" . $r->{not_used_reason} . ")", "yellow");
+    }
+    if ( $r->{cgmlst_subspecies} ne "n/a" && lc($r->{cgmlst_subspecies}) ne "enterica" ) {
+        my $msg = "SISTR: subspecies is $r->{cgmlst_subspecies}, not enterica";
+        log_message("WARNING: Sample $sample_name: $msg", "red");
+        set_sample_warning($samplenr, "warning", $msg);
+    }
+
+    my $color = $qc eq "PASS" ? "green" : "yellow";
+    log_message("NOTICE: Sample $sample_name: SISTR serovar: $r->{serovar} "
+              . "(antigen: $r->{serovar_antigen}, cgMLST: $r->{serovar_cgmlst}) "
+              . "serogroup $r->{serogroup}, $r->{o_antigen}:$r->{h1}:$r->{h2} [QC $qc]", $color);
+
+    if ($qc eq "FAIL" || $qc eq "WARNING") {
+        my $msg = "SISTR QC $qc" . ( $r->{qc_messages} ne "" ? ": $r->{qc_messages}" : "" );
+        log_message("WARNING: Sample $sample_name: $msg", "red");
+        set_sample_warning($samplenr, "warning", $msg);
+    }
+
+    register_raw_output($samplenr, $runstep_name,
+        title => "SISTR results (JSON)",
+        type  => "txt",
+        path  => path_relative_to_outdir($resultfile),
+    );
+
+    return 1;
+}
+
+# PARSER---------------------------------
+
+# sistr -f json writes a JSON array with one object per genome. Returns a
+# flat hashref of the fields we use (missing -> "n/a"), or undef.
+sub parse_sistr {
+    my ($resultfile, $samplenr) = @_;
+
+    return undef unless -s $resultfile;
+    my $data = read_json_file($resultfile);
+    my $row  = ( ref $data eq 'ARRAY' ) ? $data->[0]
+             : ( ref $data eq 'HASH'  ) ? $data
+             : undef;
+    return undef unless ref $row eq 'HASH';
+
+    my %r;
+    for my $f (qw(serovar serovar_antigen serovar_cgmlst serogroup antigenic_formula
+                  o_antigen h1 h2 cgmlst_ST cgmlst_subspecies cgmlst_found_loci
+                  cgmlst_matching_alleles cgmlst_distance cgmlst_genome_match qc_status)) {
+        my $v = $row->{$f};
+        $r{$f} = ( defined $v && $v ne "" ) ? $v : "n/a";
+    }
+    $r{qc_messages} = $row->{qc_messages} // "";
+    $r{qc_messages} =~ s/\s*\|\s*/; /g;
+    $r{serovar_antigen} =~ s/\|/, /g;   # e.g. "Typhimurium|Lagos" -> several candidates
+    return \%r;
+}
+
+######
+## example sistr -f json output (one genome)
+# [{ "genome": "LT2", "serovar": "Typhimurium", "serovar_antigen": "Typhimurium",
+#    "serovar_cgmlst": "Typhimurium", "serogroup": "B", "o_antigen": "1,4,[5],12",
+#    "h1": "i", "h2": "1,2", "cgmlst_ST": 660408169, "cgmlst_subspecies": "enterica",
+#    "cgmlst_matching_alleles": 327, "cgmlst_distance": 0.009, "cgmlst_genome_match": "LT2",
+#    "qc_status": "PASS", "qc_messages": "" }]
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep seqsero2
+##
+## SeqSero2 on the main assembly (-t 4 = assembly input, -m k = k-mer
+## mode), as in the SVA Salmonella pipeline. Its working directory is
+## removed afterwards; the result table and log are kept as
+## typing/seqsero2/<sample>.seqsero2.{tsv,log}.
+##
+## results.seqsero2.serotype is the "Predicted serotype" unless SeqSero2
+## could not call one (N/A, empty). The antigenic formula is kept
+## separately. Monophasic Typhimurium is reported with its standard name
+## I 4,[5],12:i:- (searchable and internationally comparable).
+
+$runstep_name = "seqsero2";
+
+$runstep{$runstep_name} = {
+      # Resources for parallel scheduler (§ parallel_mode=on)
+      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 2 },
+
+      message    => "Running SeqSero2...",
+      long_name  => "SeqSero2 (Salmonella serotyping)",
+      output_dir => "__DIR-TYPING__/seqsero2",
+      resultfile => "__DIR-TYPING__/seqsero2/__BASE__.seqsero2.tsv",
+      resultfiles_status => "NA",
+
+      group      => 'serotyping',
+      species    => [ 'Salmonella' ],
+      requires   => [ 'main_assembly_present', 'kraken2_settled' ],
+      produces   => [ 'seqsero2_done' ],
+      applies_if => sub { return $R_cfg->{seqsero2}{enabled} ? 1 : 0; },
+};
+
+# TEMPLATES---------------------------------
+
+$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    rm -rf '__OUTDIR__/__BASE__'
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{seqsero2}->{env} --no-capture-output SeqSero2_package.py
+       -m k -t 4
+       -p __THREADS__
+       -i '__DIR-ASSEMBLIES__/__BASE__.fasta'
+       -n '__BASE__'
+       -d '__OUTDIR__/__BASE__'
+       $R_cfg->{seqsero2}->{arguments}
+       __HIDE-OUTPUT__
+    __NEWCOMMAND__
+    cp '__OUTDIR__/__BASE__/SeqSero_log.txt' '__OUTDIR__/__BASE__.seqsero2.log' 2>/dev/null
+    __NEWCOMMAND__
+    cp '__OUTDIR__/__BASE__/SeqSero_result.tsv' '__OUTDIR__/__BASE__.seqsero2.tsv'
+    __NEWCOMMAND__
+    rm -rf '__OUTDIR__/__BASE__'
+CMD
+
+# TEST---------------------------------
+$runstep{$runstep_name}{test} = \&test_seqsero2;
+
+sub test_seqsero2 {
+    return check_conda_tool("seqsero2");
+}
+
+# PRE---------------------------------
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_seqsero2;
+
+sub preprocess_seqsero2 {
+
+    my ($samplenr) = @_;
+
+    my $runstep_name = "seqsero2";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+
+    my $command    = $runstep{$runstep_name}{cmd_template};
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        postprocess_seqsero2($samplenr);
+        return "";
+    }
+
+    return "" unless require_input_files($samplenr, $runstep_name, "optional", "__DIR-ASSEMBLIES__/__BASE__.fasta");
+
+    $command = fill_placeholders($command, $samplenr, $runstep_name);
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+
+    return $command;
+}
+
+# POST---------------------------------
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_seqsero2;
+
+sub postprocess_seqsero2 {
+    my ($samplenr) = @_;
+
+    my $runstep_name = "seqsero2";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    my $r = parse_seqsero2($resultfile);
+    unless ($r) {
+        log_message("WARNING: Sample $sample_name: SeqSero2 produced no usable result [$resultfile]", "red");
+        return 0;   # results.seqsero2 left unset -> seqsero2_done stays false
+    }
+
+    $r->{status}   = "done";
+    $r->{serotype} = ( $r->{predicted_serotype} =~ /^\s*(n\/a|na|-)?\s*$/i || $r->{predicted_serotype} =~ /^N\/A/i )
+                   ? "n/a" : $r->{predicted_serotype};
+    $r->{monophasic_typhimurium} = ( $r->{serotype} =~ /^I 4,\[5\],12:i:-$/ ) ? "yes" : "no";
+
+    # Notes: informative ones (config accepted_notes) do not warn.
+    my %accepted = map { my $n = lc $_; $n =~ s/^\s+|\s+$//g; $n =~ s/\.$//; ($n => 1) }
+                   split /\|/, ( $R_cfg->{seqsero2}{accepted_notes} // "" );
+    (my $note_norm = lc $r->{note}) =~ s/^\s+|\s+$//g;
+    $note_norm =~ s/\.$//;
+    $r->{note_status} = ( $note_norm eq "" || $accepted{$note_norm} ) ? "PASS" : "WARNING";
+
+    $R_samples->[$samplenr]{results}{$runstep_name} = $r;
+
+    my $color = $r->{note_status} eq "PASS" ? "green" : "yellow";
+    log_message("NOTICE: Sample $sample_name: SeqSero2 serotype: $r->{serotype} "
+              . "(antigenic profile $r->{antigenic_profile})"
+              . ( $r->{note} ne "" ? " -- $r->{note}" : "" ), $color);
+    if ($r->{note_status} ne "PASS") {
+        my $msg = "SeqSero2 note: $r->{note}";
+        log_message("WARNING: Sample $sample_name: $msg", "red");
+        set_sample_warning($samplenr, "warning", $msg);
+    }
+
+    register_raw_output($samplenr, $runstep_name,
+        title => "SeqSero2 results",
+        type  => "tsv",
+        path  => path_relative_to_outdir($resultfile),
+    );
+    my $logfile = fill_placeholders("__DIR-TYPING__/seqsero2/__BASE__.seqsero2.log", $samplenr);
+    if (-f $logfile) {
+        register_raw_output($samplenr, $runstep_name, title => "SeqSero2 log", type => "txt",
+                            path => path_relative_to_outdir($logfile));
+    }
+
+    return 1;
+}
+
+# PARSER---------------------------------
+
+# SeqSero_result.tsv: one header line + one result line. Columns are found
+# by header name (falls back to the SeqSero2 1.x positions used by the SVA
+# pipeline: 7 antigenic profile, 8 serotype, 9 note). Returns undef if the
+# file is missing/empty.
+sub parse_seqsero2 {
+    my ($resultfile) = @_;
+    return undef unless -s $resultfile;
+
+    open(my $fh, '<', $resultfile) or return undef;
+    my $header = <$fh>;
+    my $line   = <$fh>;
+    close $fh;
+    return undef unless defined $header && defined $line;
+    chomp($header, $line);
+    $header =~ s/\r//g; $line =~ s/\r//g;
+
+    my @h = split /\t/, $header;
+    my @v = split /\t/, $line, -1;
+    my %col;
+    for my $i (0 .. $#h) { $col{ lc $h[$i] } = $i; }
+
+    my $get = sub {
+        my ($name, $fallback) = @_;
+        my $i = exists $col{ lc $name } ? $col{ lc $name } : $fallback;
+        my $x = ( defined $i && defined $v[$i] ) ? $v[$i] : "";
+        $x =~ s/^\s+|\s+$//g;
+        return $x;
+    };
+
+    my %r = (
+        o_antigen          => $get->("O antigen prediction", 3),
+        h1_antigen         => $get->("H1 antigen prediction(fliC)", 4),
+        h2_antigen         => $get->("H2 antigen prediction(fljB)", 5),
+        identification     => $get->("Predicted identification", 6),
+        antigenic_profile  => $get->("Predicted antigenic profile", 7),
+        predicted_serotype => $get->("Predicted serotype", 8),
+        note               => $get->("Note", 9),
+    );
+    $r{$_} = "n/a" for grep { $r{$_} eq "" && $_ ne "note" } keys %r;
+    return \%r;
+}
+
+######
+## example SeqSero_result.tsv (columns, tab separated)
+# Sample name  Output directory  Input files  O antigen prediction  H1 antigen prediction(fliC)
+# H2 antigen prediction(fljB)  Predicted identification  Predicted antigenic profile
+# Predicted serotype  Note
+# 15A  ...  15A.fasta  4  i  1,2  Salmonella enterica subspecies enterica (subspecies I)
+# 4:i:1,2  Typhimurium  ...
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep ectyper
+##
+## ECTyper (phac-nml) on the main assembly: E. coli O:H serotype, and with
+## --pathotype (default arguments) also pathotype (STEC, EPEC, ...) and Shiga
+## toxin subtypes. Output table: typing/ectyper/<sample>.ectyper.tsv.
+##
+## Shigella: Kraken2 often cannot separate Shigella from E. coli, so the step
+## also runs for Shigella samples. ECTyper's O/H antigens are defined for
+## E. coli; when the sample's taxonomy says Shigella the serotype is kept in
+## results.ectyper but not used as the main serotype (not_used_reason).
+## With --verify (optional, see [ectyper]) ECTyper does its own species check
+## and reports non-E. coli genomes as "WARNING (WRONG SPECIES)".
+
+$runstep_name = "ectyper";
+
+$runstep{$runstep_name} = {
+      # Resources for parallel scheduler (§ parallel_mode=on)
+      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 2 },
+
+      message    => "Running ECTyper...",
+      long_name  => "ECTyper (E. coli serotyping)",
+      output_dir => "__DIR-TYPING__/ectyper",
+      resultfile => "__DIR-TYPING__/ectyper/__BASE__.ectyper.tsv",
+      resultfiles_status => "NA",
+
+      group      => 'serotyping',
+      species    => [ 'Escherichia coli', 'Shigella' ],
+      requires   => [ 'main_assembly_present', 'kraken2_settled' ],
+      produces   => [ 'ectyper_done' ],
+      applies_if => sub { return $R_cfg->{ectyper}{enabled} ? 1 : 0; },
+};
+
+# TEMPLATES---------------------------------
+
+$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    rm -rf '__OUTDIR__/__BASE__'
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{ectyper}->{env} --no-capture-output ectyper
+       -i '__DIR-ASSEMBLIES__/__BASE__.fasta'
+       -o '__OUTDIR__/__BASE__'
+       -c __THREADS__
+       $R_cfg->{ectyper}->{arguments}
+       __HIDE-OUTPUT__
+    __NEWCOMMAND__
+    cp '__OUTDIR__/__BASE__/ectyper.log' '__OUTDIR__/__BASE__.ectyper.log' 2>/dev/null
+    __NEWCOMMAND__
+    cp '__OUTDIR__/__BASE__/output.tsv' '__OUTDIR__/__BASE__.ectyper.tsv'
+    __NEWCOMMAND__
+    rm -rf '__OUTDIR__/__BASE__'
+CMD
+
+# TEST---------------------------------
+$runstep{$runstep_name}{test} = \&test_ectyper;
+
+sub test_ectyper {
+    return check_conda_tool("ectyper");
+}
+
+# PRE---------------------------------
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_ectyper;
+
+sub preprocess_ectyper {
+
+    my ($samplenr) = @_;
+
+    my $runstep_name = "ectyper";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+
+    my $command    = $runstep{$runstep_name}{cmd_template};
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        postprocess_ectyper($samplenr);
+        return "";
+    }
+
+    return "" unless require_input_files($samplenr, $runstep_name, "optional", "__DIR-ASSEMBLIES__/__BASE__.fasta");
+
+    $command = fill_placeholders($command, $samplenr, $runstep_name);
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+
+    return $command;
+}
+
+# POST---------------------------------
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_ectyper;
+
+sub postprocess_ectyper {
+    my ($samplenr) = @_;
+
+    my $runstep_name = "ectyper";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    my $r = parse_ectyper($resultfile);
+    unless ($r) {
+        log_message("WARNING: Sample $sample_name: ECTyper produced no usable result [$resultfile]", "red");
+        return 0;
+    }
+    $r->{status} = "done";
+
+    # Is the serotype usable as the main serotype?
+    my @not_used;
+    my $qc = $r->{qc};
+    push @not_used, "QC $qc" if $qc =~ /FAIL|WRONG SPECIES/i;
+    push @not_used, "no O or H antigen typed" if $r->{serotype_raw} =~ /^[\s\-:]*$/ || $r->{serotype_raw} eq "n/a";
+    my $genus = lc( $R_samples->[$samplenr]{main_results}{taxonomy}{genus} // "" );
+    my $tax_species = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "";
+    if ( $genus eq "shigella" || $tax_species =~ /^Shigella\b/i ) {
+        push @not_used, "sample identified as Shigella -- ECTyper O:H types are defined for E. coli";
+    }
+    $r->{serotype}        = @not_used ? "n/a" : $r->{serotype_raw};
+    $r->{not_used_reason} = join("; ", @not_used);
+    $R_samples->[$samplenr]{results}{$runstep_name} = $r;
+
+    my $color = $qc =~ /^PASS/i ? "green" : "yellow";
+    log_message("NOTICE: Sample $sample_name: ECTyper serotype: $r->{serotype_raw} [QC $qc]"
+              . ( $r->{pathotype} ne "n/a" ? ", pathotype: $r->{pathotype}" : "" )
+              . ( $r->{stx_subtypes} ne "n/a" && $r->{stx_subtypes} ne "-" ? ", stx: $r->{stx_subtypes}" : "" ), $color);
+    log_message("NOTICE: Sample $sample_name: ECTyper serotype not used (" . $r->{not_used_reason} . ")", "yellow") if @not_used;
+
+    if ( $qc !~ /^PASS/i && $qc ne "n/a" && $qc ne "-" ) {
+        my $msg = "ECTyper QC: $qc" . ( $r->{warnings} ne "" && $r->{warnings} ne "-" ? " ($r->{warnings})" : "" );
+        log_message("WARNING: Sample $sample_name: $msg", "red");
+        set_sample_warning($samplenr, "warning", $msg);
+    }
+
+    register_raw_output($samplenr, $runstep_name,
+        title => "ECTyper results",
+        type  => "tsv",
+        path  => path_relative_to_outdir($resultfile),
+    );
+
+    return 1;
+}
+
+# PARSER---------------------------------
+
+# output.tsv: header + one row per genome. Columns found by name, so extra
+# columns (--pathotype, --verify) are optional. Returns undef if no row.
+sub parse_ectyper {
+    my ($resultfile) = @_;
+    my $row = read_tsv_first_row($resultfile) or return undef;
+
+    my $get = sub {
+        for my $name (@_) {
+            my $v = $row->{ lc $name };
+            if (defined $v) { $v =~ s/^\s+|\s+$//g; return $v eq "" ? "n/a" : $v; }
+        }
+        return "n/a";
+    };
+
+    return {
+        species        => $get->("Species"),
+        o_type         => $get->("O-type"),
+        h_type         => $get->("H-type"),
+        serotype_raw   => $get->("Serotype"),
+        qc             => $get->("QC"),
+        evidence       => $get->("Evidence"),
+        database       => $get->("DatabaseVer", "Database"),
+        warnings       => $get->("Warnings"),
+        pathotype      => $get->("Pathotype"),
+        pathotype_genes => $get->("PathotypeGenes", "PathotypeGeneNames"),
+        stx_subtypes   => $get->("StxSubtypes"),
+        species_mash_top => $get->("SpeciesMashTopID"),
+    };
+}
+
+######
+## example output.tsv (selected columns)
+# Name    Species           O-type  H-type  Serotype  QC                 Evidence               Pathotype  StxSubtypes
+# 15-520  Escherichia coli  O157    H7      O157:H7   PASS (REPORTABLE)  Based on 3 allele(s)   EHEC-STEC  stx1a;stx2c
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep lissero
+##
+## LisSero (MDU-PHL) on the main assembly: molecular serogroup of Listeria
+## monocytogenes from the presence of prs, lmo0737, lmo1118, ORF2110 and
+## ORF2819 (the PCR serogrouping scheme, done in silico). LisSero writes its
+## table to stdout; it is saved as typing/lissero/<sample>.lissero.tsv.
+## "Nontypable" (only prs found, often 4a/4c) is kept as the reported value
+## but is not used as the main serotype.
+
+$runstep_name = "lissero";
+
+$runstep{$runstep_name} = {
+      # Resources for parallel scheduler (§ parallel_mode=on)
+      resources  => { threads => 1, ram_gb => 1 },
+
+      message    => "Running LisSero...",
+      long_name  => "LisSero (Listeria serogrouping)",
+      output_dir => "__DIR-TYPING__/lissero",
+      resultfile => "__DIR-TYPING__/lissero/__BASE__.lissero.tsv",
+      resultfiles_status => "NA",
+
+      group      => 'serotyping',
+      species    => [ 'Listeria monocytogenes' ],
+      requires   => [ 'main_assembly_present', 'kraken2_settled' ],
+      produces   => [ 'lissero_done' ],
+      applies_if => sub { return $R_cfg->{lissero}{enabled} ? 1 : 0; },
+};
+
+# TEMPLATES---------------------------------
+
+# Written to a temporary name and renamed only on success, so a failed run
+# does not leave a result file behind that would be "already done" next time.
+$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    conda run -n $R_cfg->{lissero}->{env} --no-capture-output lissero
+       $R_cfg->{lissero}->{arguments}
+       '__DIR-ASSEMBLIES__/__BASE__.fasta'
+       > '__OUTDIR__/__BASE__.lissero.tsv.part'
+       __HIDE-STDERR__
+    && mv '__OUTDIR__/__BASE__.lissero.tsv.part' '__OUTDIR__/__BASE__.lissero.tsv'
+CMD
+
+# TEST---------------------------------
+$runstep{$runstep_name}{test} = \&test_lissero;
+
+sub test_lissero {
+    return check_conda_tool("lissero");
+}
+
+# PRE---------------------------------
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_lissero;
+
+sub preprocess_lissero {
+
+    my ($samplenr) = @_;
+
+    my $runstep_name = "lissero";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+
+    my $command    = $runstep{$runstep_name}{cmd_template};
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        postprocess_lissero($samplenr);
+        return "";
+    }
+
+    return "" unless require_input_files($samplenr, $runstep_name, "optional", "__DIR-ASSEMBLIES__/__BASE__.fasta");
+
+    $command = fill_placeholders($command, $samplenr, $runstep_name);
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+
+    return $command;
+}
+
+# POST---------------------------------
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_lissero;
+
+sub postprocess_lissero {
+    my ($samplenr) = @_;
+
+    my $runstep_name = "lissero";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    my $r = parse_lissero($resultfile);
+    unless ($r) {
+        log_message("WARNING: Sample $sample_name: LisSero produced no usable result [$resultfile]", "red");
+        return 0;
+    }
+    $r->{status} = "done";
+
+    my @not_used;
+    push @not_used, "nontypable" if $r->{serogroup} =~ /^non-?typ/i;
+    push @not_used, "no serogroup called" if $r->{serogroup} eq "n/a";
+    $r->{serotype}        = @not_used ? "n/a" : $r->{serogroup};
+    $r->{not_used_reason} = join("; ", @not_used);
+    $R_samples->[$samplenr]{results}{$runstep_name} = $r;
+
+    my $color = @not_used ? "yellow" : "green";
+    log_message("NOTICE: Sample $sample_name: LisSero serogroup: $r->{serogroup} "
+              . "(prs $r->{prs}, lmo0737 $r->{lmo0737}, lmo1118 $r->{lmo1118}, ORF2110 $r->{orf2110}, ORF2819 $r->{orf2819})"
+              . ( $r->{comment} ne "" ? " -- $r->{comment}" : "" ), $color);
+    if ( $r->{comment} ne "" ) {
+        set_sample_warning($samplenr, "warning", "LisSero: $r->{comment}");
+    }
+
+    register_raw_output($samplenr, $runstep_name,
+        title => "LisSero results",
+        type  => "tsv",
+        path  => path_relative_to_outdir($resultfile),
+    );
+
+    return 1;
+}
+
+# PARSER---------------------------------
+
+sub parse_lissero {
+    my ($resultfile) = @_;
+    my $row = read_tsv_first_row($resultfile) or return undef;
+    my $get = sub { my $v = $row->{ lc $_[0] } // ""; $v =~ s/^\s+|\s+$//g; return $v; };
+    my $sg = $get->("SEROTYPE");
+    return {
+        serogroup => ( $sg ne "" ? $sg : "n/a" ),
+        prs       => $get->("PRS")     || "n/a",
+        lmo0737   => $get->("LMO0737") || "n/a",
+        lmo1118   => $get->("LMO1118") || "n/a",
+        orf2110   => $get->("ORF2110") || "n/a",
+        orf2819   => $get->("ORF2819") || "n/a",
+        comment   => $get->("COMMENT"),
+    };
+}
+
+######
+## example LisSero output
+# ID                  SEROTYPE    PRS   LMO0737  LMO1118  ORF2110  ORF2819  COMMENT
+# /path/to/15L.fasta  4b, 4d, 4e  FULL  NONE     NONE     FULL     FULL
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep select_main_serotype
+##
+## Selects the official serotype among the 'serotyping' group (sistr,
+## seqsero2, ectyper, lissero), same shape as select_main_mlst: first
+## member in priority order with a usable value wins, and any other member
+## that disagrees is reported (e.g. SISTR vs SeqSero2 for Salmonella).
+## Usually only the tools for the sample's own species ran, so for E. coli
+## and Listeria there is just one candidate.
+##
+## Applies when at least one serotyping tool applies to the sample (config
+## on AND species matches). Waits for all of them via all_serotyping_settled
+## and does not require any to have succeeded -- if none produced a usable
+## serotype it records "n/a" with a reason instead of blocking the sample.
+##
+## Writes main_results.typing.serotype.{value,method} (already shown in the
+## short report).
+
+# Fallback priority within the group. Which of SISTR / SeqSero2 should be
+# the official Salmonella answer is decided when those are built out; until
+# then SISTR first.
+my @SEROTYPE_TIEBREAK = qw(sistr seqsero2 ectyper lissero);
+
+$runstep_name = "select_main_serotype";
+
+$runstep{$runstep_name} = {
+      resources  => { threads => 1, ram_gb => 0 },
+
+      message    => "Selecting main serotype...",
+      long_name  => "Selecting main serotype",
+      output_dir => "__DIR-TYPING__",
+      resultfile => "__DIR-TYPING__/__BASE__.main_serotype_result.json",
+      resultfiles_status => "NA",
+
+      requires   => [ 'all_serotyping_settled' ],
+      produces   => [ 'main_serotype_present' ],
+      applies_if => sub {
+          my ($i) = @_;
+          for my $m ( group_members('serotyping') ) {
+              my $d = $runstep{$m};
+              my $on = eval { exists $d->{applies_if} ? $d->{applies_if}->($i) : 1 };
+              return 1 if $on && runstep_species_applies($d, $i);
+          }
+          return 0;
+      },
+};
+
+$runstep{$runstep_name}{test} = sub { return 2; };  # no external tool
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_select_main_serotype;
+
+sub preprocess_select_main_serotype {
+    my ($samplenr) = @_;
+
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $runstep_name = "select_main_serotype";
+
+    my %candidates;
+    for my $name ( group_members('serotyping') ) {
+        my $c = $R_samples->[$samplenr]{results}{$name};
+        next unless $c && ref($c) eq 'HASH' && %$c;
+        $candidates{$name} = $c;
+    }
+
+    my @priority = group_members('serotyping', \@SEROTYPE_TIEBREAK);
+    my @reasons;
+
+    my ($method, $serotype) = priority_select_field( \%candidates, \@priority, 'serotype' );
+    if ( defined $method ) {
+        push @reasons, "Serotype taken from '$method'"
+                     . ( keys %candidates > 1 ? " (priority order: " . join(", ", grep { exists $candidates{$_} } @priority) . ")" : "" );
+    }
+    else {
+        my @ran = sort keys %candidates;
+        push @reasons, @ran
+            ? "No usable serotype from " . join(", ", @ran)
+            : "No serotyping tool produced a result";
+        log_message("WARNING: No serotype available for sample $sample_name", "red");
+    }
+    push @reasons, warn_on_field_mismatch( \%candidates, \@priority, 'serotype', $method, $serotype, "Sample $sample_name: serotype" );
+
+    $R_samples->[$samplenr]{main_results}{typing}{serotype}{value}  = $serotype // "n/a";
+    $R_samples->[$samplenr]{main_results}{typing}{serotype}{method} = $method   // "n/a";
+
+    # Full decision for write_main_serotype_result (forked child, reads only).
+    $R_samples->[$samplenr]{results}{$runstep_name} = {
+        status   => "done",
+        serotype => $serotype // "n/a",
+        method   => $method   // "n/a",
+        reasons  => \@reasons,
+    };
+
+    ensure_dir(getdir("out,results,typing"));
+
+    return "SUB\twrite_main_serotype_result\t$samplenr";
+}
+
+$runstep{$runstep_name}{result_parsing} = sub {
+    my ($samplenr) = @_;
+    my $json_path = fill_placeholders($runstep{select_main_serotype}{resultfile}, $samplenr, "select_main_serotype");
+    unless (-f $json_path) {
+        log_message("WARNING: select_main_serotype result file not found for sample $R_samples->[$samplenr]{name}", "red");
+        return 0;
+    }
+    my $d = $R_samples->[$samplenr]{results}{select_main_serotype} // {};
+    log_message("NOTICE: Sample $R_samples->[$samplenr]{name}: serotype: " . ($d->{serotype} // "n/a") . " (" . ($d->{method} // "n/a") . ")", "green");
+    return 1;
+};
+
+# Internal SUB -- runs in the forked child, writes files only.
+sub write_main_serotype_result {
+    my ($samplenr) = @_;
+
+    my $decision = $R_samples->[$samplenr]{results}{select_main_serotype};
+    return 1 unless $decision && ref($decision) eq 'HASH';
+
+    my $sample_name = $R_samples->[$samplenr]{name};
+    my $json_path = fill_placeholders("__DIR-TYPING__/__BASE__.main_serotype_result.json", $samplenr, "select_main_serotype");
+    my $txt_path  = fill_placeholders("__DIR-TYPING__/__BASE__.main_serotype_result.txt",  $samplenr, "select_main_serotype");
+
+    write_json_file($decision, $json_path);
+
+    open(my $fh, '>', $txt_path) or do {
+        log_message("WARNING: Could not write [$txt_path]: $!", "red");
+        return 1;
+    };
+    print $fh "Main serotype -- sample $sample_name\n";
+    print $fh "Serotype: $decision->{serotype} (via $decision->{method})\n";
+    print $fh "\nReasons:\n";
+    print $fh "  - $_\n" for @{ $decision->{reasons} // [] };
+    close($fh);
+
+    return 0;
+}
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep virulencefinder
+##
+## VirulenceFinder (CGE) on the main assembly (BLAST mode, -ifa). E. coli /
+## Shigella in v1, searching the databases in [virulencefinder] databases
+## (default virulence_ecoli + stx). Database: CGE virulencefinder_db, a git
+## clone under __DB__/virulencefinder (install_db), covered by db_freeze.
+##
+## results.virulencefinder: all hits (gene, identity, coverage, contig, ...),
+## a de-duplicated gene list, and a STEC summary: stx genes/subtypes and eae.
+
+$runstep_name = "virulencefinder";
+
+$runstep{$runstep_name} = {
+      # Resources for parallel scheduler (§ parallel_mode=on)
+      resources  => { threads => 1, ram_gb => 1 },
+
+      message    => "Running VirulenceFinder...",
+      long_name  => "VirulenceFinder",
+      output_dir => "__DIR-TYPING__/virulencefinder/__BASE__",
+      resultfile => "__DIR-TYPING__/virulencefinder/__BASE__/__BASE__.virulencefinder.json",
+      resultfiles_status => "NA",
+
+      species    => [ 'Escherichia coli', 'Shigella' ],
+      requires   => [ 'main_assembly_present', 'kraken2_settled' ],
+      produces   => [ 'virulencefinder_done' ],
+      applies_if => sub { return $R_cfg->{virulencefinder}{enabled} ? 1 : 0; },
+};
+
+# TEMPLATES---------------------------------
+
+$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    mkdir -p '__OUTDIR__/tmp'
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{virulencefinder}->{env} --no-capture-output python -m virulencefinder
+       -ifa '__DIR-ASSEMBLIES__/__BASE__.fasta'
+       -o '__OUTDIR__'
+       -tmp '__OUTDIR__/tmp'
+       -p '__VIRULENCEFINDERDB__/virulencefinder_db'
+       __VIRULENCEFINDER-DATABASES__
+       -j '__OUTDIR__/__BASE__.virulencefinder.json'
+       -x -q
+       $R_cfg->{virulencefinder}->{arguments}
+       __HIDE-OUTPUT__
+    __NEWCOMMAND__
+    rm -rf '__OUTDIR__/tmp'
+CMD
+
+# TEST---------------------------------
+$runstep{$runstep_name}{test} = \&test_virulencefinder;
+
+sub test_virulencefinder {
+    return check_conda_tool("virulencefinder");
+}
+
+# PRE---------------------------------
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_virulencefinder;
+
+sub preprocess_virulencefinder {
+
+    my ($samplenr) = @_;
+
+    my $runstep_name = "virulencefinder";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+
+    my $command    = $runstep{$runstep_name}{cmd_template};
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        postprocess_virulencefinder($samplenr);
+        return "";
+    }
+
+    return "" unless require_input_files($samplenr, $runstep_name, "optional", "__DIR-ASSEMBLIES__/__BASE__.fasta");
+
+    my $dbs = $R_cfg->{virulencefinder}{databases} // "";
+    $dbs =~ s/\s+//g;
+    _fill_placeholders__safe_replace(\$command, "__VIRULENCEFINDER-DATABASES__", $dbs ne "" ? "-d '$dbs'" : "");
+
+    $command = fill_placeholders($command, $samplenr, $runstep_name);
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+
+    return $command;
+}
+
+# POST---------------------------------
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_virulencefinder;
+
+sub postprocess_virulencefinder {
+    my ($samplenr) = @_;
+
+    my $runstep_name = "virulencefinder";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    unless (-s $resultfile) {
+        log_message("WARNING: Sample $sample_name: VirulenceFinder produced no result [$resultfile]", "red");
+        return 0;
+    }
+    my @hits = parse_cge_hits($resultfile);
+
+    # Gene names from the database can carry allele/strain suffixes
+    # (stx2a-O157-EDL933, eae-b01a-beta_1a); the summary uses the short form.
+    my %genes;
+    for my $h (@hits) {
+        my $g = $h->{gene};
+        $g = $1 if $g =~ /^(stx\d[a-z]?|eae)(?:-|$)/;
+        $genes{$g} = 1;
+    }
+    my @gene_list = sort { lc $a cmp lc $b } keys %genes;
+
+    # stx: subtypes (stx2a) if known; a bare "stx2" only when no stx2
+    # subtype was found (the 'stx' database reports the type only).
+    # Case matters: lower-case letter = subtype (stx2a), upper-case =
+    # toxin subunit in older databases (stx2A/stx2B) -> type stx2.
+    my %stx;
+    for my $h (@hits) {
+        $stx{$1} = 1 if $h->{gene} =~ /^(stx\d[a-z]?)(?![a-z])/;
+    }
+    for my $s (keys %stx) {
+        delete $stx{$s} if $s =~ /^stx\d$/ && grep { /^\Q$s\E[a-z]$/ } keys %stx;
+    }
+    my @stx = sort keys %stx;
+
+    my ($eae_hit) = grep { $_->{gene} =~ /^eae/i } @hits;
+    my $eae = "no";
+    if ($eae_hit) {
+        $eae = "yes";
+        $eae .= " ($1)" if $eae_hit->{gene} =~ /^eae-[^-]*-([a-z]+)/i;   # eae-b01a-beta_1a -> beta
+    }
+
+    $R_samples->[$samplenr]{results}{$runstep_name} = {
+        status    => "done",
+        hit_count => scalar(@hits),
+        hits      => \@hits,
+        genes     => @gene_list ? join(", ", @gene_list) : "none",
+        stx       => @stx ? join(", ", @stx) : "none",
+        eae       => $eae,
+    };
+
+    log_message("NOTICE: Sample $sample_name: VirulenceFinder: " . scalar(@gene_list) . " gene(s)"
+              . ( @gene_list ? ": " . join(", ", @gene_list) : "" ), "green");
+    log_message("NOTICE: Sample $sample_name: stx: " . ( @stx ? join(", ", @stx) : "none" ) . ", eae: $eae",
+                @stx ? "yellow" : "green");
+
+    register_raw_output($samplenr, $runstep_name,
+        title => "VirulenceFinder results (JSON)",
+        type  => "txt",
+        path  => path_relative_to_outdir($resultfile),
+    );
+
+    return 1;
+}
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## runstep plasmidfinder
+##
+## PlasmidFinder 2.1.6 (CGE, bioconda) on the main assembly, BLAST mode:
+## plasmid replicon types. Not
+## species-specific -- runs for every sample when enabled. Database: CGE
+## plasmidfinder_db, a git clone under __DB__/plasmidfinder (install_db),
+## covered by db_freeze. Most replicons in the database are from
+## Enterobacterales and Gram-positives; for other genera (e.g.
+## Campylobacter) an empty result is expected and does not mean "no
+## plasmids".
+
+$runstep_name = "plasmidfinder";
+
+$runstep{$runstep_name} = {
+      # Resources for parallel scheduler (§ parallel_mode=on)
+      resources  => { threads => 1, ram_gb => 1 },
+
+      message    => "Running PlasmidFinder...",
+      long_name  => "PlasmidFinder",
+      output_dir => "__DIR-TYPING__/plasmidfinder/__BASE__",
+      resultfile => "__DIR-TYPING__/plasmidfinder/__BASE__/__BASE__.plasmidfinder.json",
+      resultfiles_status => "NA",
+
+      requires   => [ 'main_assembly_present' ],
+      produces   => [ 'plasmidfinder_done' ],
+      applies_if => sub { return $R_cfg->{plasmidfinder}{enabled} ? 1 : 0; },
+};
+
+# TEMPLATES---------------------------------
+
+$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    mkdir -p '__OUTDIR__/tmp'
+    __NEWCOMMAND__
+    conda run -n $R_cfg->{plasmidfinder}->{env} --no-capture-output plasmidfinder.py
+       -i '__DIR-ASSEMBLIES__/__BASE__.fasta'
+       -o '__OUTDIR__'
+       -tmp '__OUTDIR__/tmp'
+       -mp blastn
+       -p '__PLASMIDFINDERDB__/plasmidfinder_db'
+       -x -q
+       $R_cfg->{plasmidfinder}->{arguments}
+       __HIDE-OUTPUT__
+    __NEWCOMMAND__
+    mv '__OUTDIR__/data.json' '__OUTDIR__/__BASE__.plasmidfinder.json'
+    __NEWCOMMAND__
+    rm -rf '__OUTDIR__/tmp'
+CMD
+
+# TEST---------------------------------
+$runstep{$runstep_name}{test} = \&test_plasmidfinder;
+
+sub test_plasmidfinder {
+    return check_conda_tool("plasmidfinder");
+}
+
+# PRE---------------------------------
+
+$runstep{$runstep_name}{preprocessing} = \&preprocess_plasmidfinder;
+
+sub preprocess_plasmidfinder {
+
+    my ($samplenr) = @_;
+
+    my $runstep_name = "plasmidfinder";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+
+    my $command    = $runstep{$runstep_name}{cmd_template};
+    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
+
+    if (-f $resultfile) {
+        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
+        postprocess_plasmidfinder($samplenr);
+        return "";
+    }
+
+    return "" unless require_input_files($samplenr, $runstep_name, "optional", "__DIR-ASSEMBLIES__/__BASE__.fasta");
+
+    $command = fill_placeholders($command, $samplenr, $runstep_name);
+    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+
+    return $command;
+}
+
+# POST---------------------------------
+
+$runstep{$runstep_name}{result_parsing} = \&postprocess_plasmidfinder;
+
+sub postprocess_plasmidfinder {
+    my ($samplenr) = @_;
+
+    my $runstep_name = "plasmidfinder";
+    my $sample_name  = $R_samples->[$samplenr]{name};
+    my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr);
+
+    unless (-s $resultfile) {
+        log_message("WARNING: Sample $sample_name: PlasmidFinder produced no result [$resultfile]", "red");
+        return 0;
+    }
+    my @hits = parse_cge_hits($resultfile);
+    my %rep = map { $_->{gene} => 1 } @hits;
+    my @replicons = sort { lc $a cmp lc $b } keys %rep;
+
+    $R_samples->[$samplenr]{results}{$runstep_name} = {
+        status    => "done",
+        hit_count => scalar(@hits),
+        hits      => \@hits,
+        replicons => @replicons ? join(", ", @replicons) : "none",
+    };
+
+    log_message("NOTICE: Sample $sample_name: PlasmidFinder replicons: " . ( @replicons ? join(", ", @replicons) : "none" ), "green");
+
+    register_raw_output($samplenr, $runstep_name,
+        title => "PlasmidFinder results (JSON)",
+        type  => "txt",
+        path  => path_relative_to_outdir($resultfile),
+    );
+
+    return 1;
+}
 
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -12088,7 +13677,6 @@ sub postprocess_checkm {
 $runstep_name = "checkm_per_sample";
 
 $runstep{$runstep_name} = {
-      requires   => ['main_assembly_present'],
 
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 16 },
@@ -13456,7 +15044,6 @@ sub read_tsv_rows_by_first_column {
 $runstep_name = "chewbbaca_per_sample";
 
 $runstep{$runstep_name} = {
-      requires   => ['main_assembly_present', 'species_determined'],
 
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 4 },
@@ -13467,7 +15054,7 @@ $runstep{$runstep_name} = {
       resultfiles_status => "NA",
 
       group      => 'chewbbaca_mode',
-      requires   => [ 'main_assembly_present' ],
+      requires   => [ 'main_assembly_present', 'species_determined' ],
       produces   => [ 'chewbbaca_per_sample_done' ],
       applies_if => sub {
           return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_species_batch') eq 'per_sample' ) ? 1 : 0;
@@ -14611,6 +16198,52 @@ log_message("NOTICE: Resolving resource limits (threads/RAM)");
 resolve_parallel_resource_limits();
 
 ###################################################################################################
+## Runstep run order -- the SINGLE place where runsteps are listed.
+##
+## Every scheduler entry point (test phase, sequential loop, parallel
+## scheduler, batch phase) and the GRAPH dump read from these three lists.
+## Adding a new runstep = define its block in the runstep library + add its
+## name here, once. (Previously the same per-sample list was duplicated in
+## four places and had to be kept in sync by hand.)
+##
+## @PER_SAMPLE_RUNSTEPS -- per-sample runsteps. In sequential mode they run
+##   in exactly this order; in parallel mode the order only matters as a
+##   tiebreak, the real ordering comes from requires/produces. Place a new
+##   step AFTER the steps it depends on so both modes agree.
+## @BATCH_RUNSTEPS_PRE  -- cross-sample steps run after the per-sample phase.
+## @BATCH_RUNSTEPS_POST -- cross-sample steps run last (aggregation/reporting).
+our @PER_SAMPLE_RUNSTEPS = qw(
+    md5_rawdata sample_prescan fastqc_rawdata
+    fastp_rawdata check_for_no_trimming find_species_kraken2 downsampling_bbmap
+    check_for_no_downsampling fastq_stats_trimmed fastp_trimmed_data
+    fastqc_trimmed_data check_for_fasta mash_screen Kraken2
+    spades skesa shovill_spades shovill_skesa unicycler select_main_assembly
+    quast remap mlst fastmlst select_main_mlst
+    amrfinderplus resfinder_fastq resfinder_fasta select_main_amr_results
+    sistr seqsero2 ectyper lissero select_main_serotype
+    virulencefinder plasmidfinder
+    bakta checkm_per_sample chewbbaca_per_sample
+);
+our @BATCH_RUNSTEPS_PRE  = qw( sort_assemblies checkm chewbbaca chewbbaca_regenerate_per_batch );
+our @BATCH_RUNSTEPS_POST = qw( multiqc );
+
+# Sanity check: every listed name must have a runstep definition. A typo
+# here would otherwise make a runstep silently never run.
+{
+    my @unknown = grep { !exists $runstep{$_} }
+                  (@PER_SAMPLE_RUNSTEPS, @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST);
+    if (@unknown) {
+        graceful_die("Run order lists name runstep(s) with no definition in the runstep library: " . join(", ", @unknown));
+    }
+
+    # The reverse is informational only: a defined runstep that is in no
+    # list never runs (deliberate for deprecated steps, a bug otherwise).
+    my %listed = map { $_ => 1 } (@PER_SAMPLE_RUNSTEPS, @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST);
+    my @unlisted = sort grep { !$listed{$_} } keys %runstep;
+    log_message("INFO: Runsteps defined but not in any run order list (will not run): " . join(", ", @unlisted)) if @unlisted;
+}
+
+###################################################################################################
 ## Startup graph validation (§9.1) -- structural checks over the runstep
 ## dependency declarations, run once here, after samples are known
 ## (needed for the per-sample applicable-producer check) but before any
@@ -14618,6 +16251,7 @@ resolve_parallel_resource_limits();
 ## found, rather than letting a misconfigured/newly-added runstep deadlock
 ## silently partway through a long run.
 log_message("NOTICE: Validating pipeline configuration");
+normalize_species_runsteps();   # species => [...] adds implicit requires species_determined
 validate_runstep_graph();
 
 # Dump the complete runstep dependency graph to the log immediately after
@@ -14627,17 +16261,7 @@ validate_runstep_graph();
 # overwrite bugs (duplicate keys) even if validate_no_duplicate_hash_keys
 # misses a case, and is the ground truth for any parallel scheduling issue.
 {
-    my @runstep_names_for_dump = qw(
-        md5_rawdata sample_prescan fastqc_rawdata
-        fastp_rawdata check_for_no_trimming find_species_kraken2 downsampling_bbmap
-        check_for_no_downsampling fastq_stats_trimmed fastp_trimmed_data
-        fastqc_trimmed_data check_for_fasta mash_screen Kraken2
-        spades shovill skesa unicycler select_main_assembly
-        quast remap mlst fastmlst select_main_mlst
-        amrfinderplus resfinder_fastq resfinder_fasta select_main_amr_results
-        bakta checkm_per_sample chewbbaca_per_sample
-        sort_assemblies checkm chewbbaca chewbbaca_regenerate_per_batch multiqc
-    );
+    my @runstep_names_for_dump = (@PER_SAMPLE_RUNSTEPS, @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST);
     log_message("INFO: GRAPH: Runstep dependency graph (requires/produces) at startup:");
     for my $name (@runstep_names_for_dump) {
         my $def = $runstep{$name};
@@ -14646,7 +16270,8 @@ validate_runstep_graph();
         my $prod = join(", ", @{ $def->{produces}  // [] }) || "(none)";
         my $grp  = $def->{group} // "";
         my $grp_str = $grp ? " group=$grp" : "";
-        log_message("INFO: GRAPH:   $name: requires=[$req] produces=[$prod]$grp_str");
+        my $sp_str  = $def->{species} ? " species=[" . join(", ", @{ $def->{species} }) . "]" : "";
+        log_message("INFO: GRAPH:   $name: requires=[$req] produces=[$prod]$grp_str$sp_str");
     }
     log_message("INFO: GRAPH: End of runstep dependency graph");
 }
@@ -14724,7 +16349,7 @@ if($R_cfg_general->{test_software} != 0) {
        
       # md5_rawdata: tested here via the new contract, same relative
       # position (first) it always had in @runorder_loop1.
-      test_data_driven_runsteps( ['md5_rawdata', 'sample_prescan', 'fastqc_rawdata', 'fastp_rawdata', 'check_for_no_trimming', 'find_species_kraken2', 'downsampling_bbmap', 'check_for_no_downsampling', 'fastq_stats_trimmed', 'fastp_trimmed_data', 'fastqc_trimmed_data', 'check_for_fasta', 'mash_screen', 'Kraken2', 'spades', 'shovill', 'skesa', 'unicycler', 'select_main_assembly', 'quast', 'remap', 'mlst', 'fastmlst', 'select_main_mlst', 'amrfinderplus', 'resfinder_fastq', 'resfinder_fasta', 'select_main_amr_results', 'bakta', 'checkm_per_sample', 'chewbbaca_per_sample'], $i );
+      test_data_driven_runsteps( \@PER_SAMPLE_RUNSTEPS, $i );
 
 
        foreach my $runstepname (@runorder_loop1) {
@@ -14750,7 +16375,7 @@ if($R_cfg_general->{test_software} != 0) {
 
 if($R_cfg_general->{test_software} != 0) { 
 
-     test_data_driven_batch_runsteps( ['sort_assemblies', 'checkm', 'chewbbaca', 'chewbbaca_regenerate_per_batch'] );
+     test_data_driven_batch_runsteps( \@BATCH_RUNSTEPS_PRE );
 
      foreach my $runstepname (@runorder_post1) {
 
@@ -14764,7 +16389,7 @@ if($R_cfg_general->{test_software} != 0) {
       
      }  # END RUNSTEP LOOP
 
-     test_data_driven_batch_runsteps( ['multiqc'] );
+     test_data_driven_batch_runsteps( \@BATCH_RUNSTEPS_POST );
 
 }
 
@@ -14772,17 +16397,8 @@ if($R_cfg_general->{test_software} != 0) {
 ##-------------------------- RUN commands ------------------------------------------------------------
 ##----------------------------------------------------------------------------------------------------
 
-# The runstep list -- shared between sequential and parallel modes.
-my @_per_sample_runsteps = qw(
-    md5_rawdata sample_prescan fastqc_rawdata
-    fastp_rawdata check_for_no_trimming find_species_kraken2 downsampling_bbmap
-    check_for_no_downsampling fastq_stats_trimmed fastp_trimmed_data
-    fastqc_trimmed_data check_for_fasta mash_screen Kraken2
-    spades shovill skesa unicycler select_main_assembly
-    quast remap mlst fastmlst select_main_mlst
-    amrfinderplus resfinder_fastq resfinder_fasta select_main_amr_results
-    bakta checkm_per_sample chewbbaca_per_sample
-);
+# The runstep list is defined once, in @PER_SAMPLE_RUNSTEPS (see "Runstep run order").
+my @_per_sample_runsteps = @PER_SAMPLE_RUNSTEPS;
 
 if ( lc($R_cfg->{general}{parallel_mode} // 'off') eq 'on' ) {
 
@@ -14810,7 +16426,7 @@ if ( lc($R_cfg->{general}{parallel_mode} // 'off') eq 'on' ) {
     # md5_rawdata: first runstep migrated to the new requires/produces/
     # applies_if contract (§5/§15) -- runs here, in the same relative
     # position it always has (first, before the hardcoded loop below).
-    run_data_driven_runsteps( ['md5_rawdata', 'sample_prescan', 'fastqc_rawdata', 'fastp_rawdata', 'check_for_no_trimming', 'find_species_kraken2', 'downsampling_bbmap', 'check_for_no_downsampling', 'fastq_stats_trimmed', 'fastp_trimmed_data', 'fastqc_trimmed_data', 'check_for_fasta', 'mash_screen', 'Kraken2', 'spades', 'shovill', 'skesa', 'unicycler', 'select_main_assembly', 'quast', 'remap', 'mlst', 'fastmlst', 'select_main_mlst', 'amrfinderplus', 'resfinder_fastq', 'resfinder_fasta', 'select_main_amr_results', 'bakta', 'checkm_per_sample', 'chewbbaca_per_sample'], $i );
+    run_data_driven_runsteps( \@PER_SAMPLE_RUNSTEPS, $i );
 
 foreach my $runstepname (@runorder_loop1) {
 
@@ -14823,6 +16439,7 @@ foreach my $runstepname (@runorder_loop1) {
         message    => $runstep{$runstepname}{message},
         command    => $command,
         resultfile => "",
+        timeout_s  => get_runstep_timeout($runstepname),
       );
     
       $runstep{$runstepname}{result_parsing}->($i);
@@ -14838,7 +16455,7 @@ write_json_file($R_samples->[$i], fill_placeholders("__DIR-LOG__/__BASE__-result
  #########################
  ## non-sample-looped commands
  
-run_data_driven_batch_runsteps( ['sort_assemblies', 'checkm', 'chewbbaca', 'chewbbaca_regenerate_per_batch'] );
+run_data_driven_batch_runsteps( \@BATCH_RUNSTEPS_PRE );
 
 foreach my $runstepname (@runorder_post1) {
 
@@ -14853,13 +16470,14 @@ foreach my $runstepname (@runorder_post1) {
         message    => $runstep{$runstepname}{message},
         command    => $command,
         resultfile => "",
+        timeout_s  => get_runstep_timeout($runstepname),
       );
     
       $runstep{$runstepname}{result_parsing}->();
    }  
 }  # END RUNSTEP LOOP
 
-run_data_driven_batch_runsteps( ['multiqc'] );
+run_data_driven_batch_runsteps( \@BATCH_RUNSTEPS_POST );
 
 
 
@@ -14897,6 +16515,9 @@ save_hash_as_json($rundata_file, \%rundata);
   
 
 summarize_results();
+
+# Detected species whose species-specific tools are disabled in the config.
+report_species_tools_not_run( \@PER_SAMPLE_RUNSTEPS );
 
 # Exit code decision -- must run BEFORE close_logfile() so the two
 # log_message calls below actually reach the logfile.
@@ -16888,22 +18509,31 @@ sub writedefaultconfigfile {
 #
 # Returns 1 on success, 0 on failure.
 #
+# Databases known to db_freeze, one entry per tool:
+#   [ section_name, rel_path_under_db, marker_file, config_key, note ]
+# These mirror the db_path / db_test entries in the program definitions.
+# Only databases that live in a separate directory (not conda-internal) are
+# listed. Used both to write a new db_freeze.config and to append entries
+# that an older db_freeze.config is missing (--freeze-databases).
+sub default_db_freeze_entries {
+    return (
+        [ "kraken2",    "kraken2",          "taxo.k2d",                      "kraken2.db_path",    "Kraken2 standard database"         ],
+        [ "mashscreen", "mash",             "refseq.genomes.k21s1000.msh",   "mashscreen.db_path", "Mash RefSeq sketch"                ],
+        [ "checkm",     "checkm",           "hmms/checkm.hmm",               "checkm.db_path",     "CheckM database (optional)"        ],
+        [ "bakta",      "bakta/db-light",   "bakta.db",                      "bakta.db_path",      "Bakta light database (optional)"   ],
+        [ "resfinder",  "resfinder",        "resfinder_db/all.fsa",          "resfinder.db_path",  "ResFinder database (optional)"     ],
+        [ "virulencefinder", "virulencefinder", "virulencefinder_db/virulence_ecoli.fsa", "virulencefinder.db_path", "VirulenceFinder database (optional)" ],
+        [ "plasmidfinder",   "plasmidfinder",   "plasmidfinder_db/enterobacteriales.fsa", "plasmidfinder.db_path",   "PlasmidFinder database (optional)"   ],
+    );
+}
+
 sub write_default_databases_config {
     my ($path) = @_;
 
     # Resolve the actual db directory (replaces __DB__ in path templates)
     my $db_dir = getdir("db");
 
-    # Each entry: [ section_name, rel_path_under_db, marker_file, config_key, note ]
-    # These mirror the db_path / db_test entries in the program definitions above.
-    # Only databases that live in a separate directory (not conda-internal) are listed.
-    my @db_entries = (
-        [ "kraken2",    "kraken2",          "taxo.k2d",                      "kraken2.db_path",    "Kraken2 standard database"         ],
-        [ "mashscreen", "mash",             "refseq.genomes.k21s1000.msh",   "mashscreen.db_path", "Mash RefSeq sketch"                ],
-        [ "checkm",     "checkm",           "hmms/checkm.hmm",               "checkm.db_path",     "CheckM database (optional)"        ],
-        [ "bakta",      "bakta/db-light",   "bakta.db",                      "bakta.db_path",      "Bakta light database (optional)"   ],
-        [ "resfinder",  "resfinder",        "resfinder_db/all.fsa",          "resfinder.db_path",  "ResFinder database (optional)"     ],
-    );
+    my @db_entries = default_db_freeze_entries();
 
     open my $fh, '>', $path
         or do { log_message("WARNING: Cannot write default db_freeze.config to [$path]: $!"); return 0; };
@@ -17479,6 +19109,8 @@ sub fill_placeholders {
     if( $cmd =~ /__KRAKENDB__/ )    { _fill_placeholders__safe_replace(\$cmd, "__KRAKENDB__",    $R_cfg->{kraken2}{db_path}    // getdir("db") . "/kraken2" ); }
     if( $cmd =~ /__BRACKENDB__/ )   { _fill_placeholders__safe_replace(\$cmd, "__BRACKENDB__",   $R_cfg->{bracken}{db_path}    // getdir("db") . "/kraken2" ); }
     if( $cmd =~ /__RESFINDERDB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__RESFINDERDB__", $R_cfg->{resfinder}{db_path}  // getdir("db") . "/resfinder" ); }
+    if( $cmd =~ /__VIRULENCEFINDERDB__/ ) { _fill_placeholders__safe_replace(\$cmd, "__VIRULENCEFINDERDB__", $R_cfg->{virulencefinder}{db_path} // getdir("db") . "/virulencefinder" ); }
+    if( $cmd =~ /__PLASMIDFINDERDB__/ )   { _fill_placeholders__safe_replace(\$cmd, "__PLASMIDFINDERDB__",   $R_cfg->{plasmidfinder}{db_path}   // getdir("db") . "/plasmidfinder" ); }
     if( $cmd =~ /__BAKTADB__/ )     { _fill_placeholders__safe_replace(\$cmd, "__BAKTADB__",     $R_cfg->{bakta}{db_path}      // getdir("db") . "/bakta/db-light" ); }
     # Resolve __DB__ last so it catches any tokens introduced by the tool-specific
     # expansions above (e.g. $R_cfg->{kraken2}{db_path} == "__DB__/kraken2").
@@ -17988,13 +19620,20 @@ sub report_value {
 
 # Any parameter with this exact name is treated as boolean regardless of
 # which section it's in (every "enabled" field already follows this).
-my %KNOWN_BOOLEAN_PARAM = (
+# Filled in a BEGIN block: the config file is loaded (and these looked up)
+# near the top of the script, long before execution reaches this point --
+# a plain 'my %h = (...)' here would still be empty then, so "enabled=no"
+# was never normalized and stayed a true string.
+my %KNOWN_BOOLEAN_PARAM;
+my %KNOWN_BOOLEAN_FIELD;
+BEGIN {
+%KNOWN_BOOLEAN_PARAM = (
     enabled => 1,
 );
 
 # A handful of specific section.param fields that are also genuinely binary,
 # but don't follow the "enabled" naming convention.
-my %KNOWN_BOOLEAN_FIELD = (
+%KNOWN_BOOLEAN_FIELD = (
     "general.recursive"  => 1,
     "general.verbose"    => 1,
     "general.fastq"       => 1,
@@ -18005,6 +19644,7 @@ my %KNOWN_BOOLEAN_FIELD = (
     "resfinder.fasta"     => 1,
     "resfinder.fastq"     => 1,
 );
+}   # end BEGIN
 
 sub is_known_boolean_field {
     my ($section, $param) = @_;
@@ -23017,7 +24657,7 @@ open(HANDLE_QCSUMMARY,">" . getdir("out,results,qc") . "/qc_summary.tab") || gra
 
 sub get_detailed_report_def {
 
-    return {
+    my $def = {
 
 
     md5_rawdata => {
@@ -23690,26 +25330,6 @@ Kraken2 => {
         ],
 
     },
-    shovill => {
-        title => "Assembly with shovill (wrapping spades)",
-        category => "assembly",
-
-        fields => [
-            { label => "Contigs", path => [ "nr_contigs"] },
-            { label => "Contigs (500+)", path => [ "nr_contigs_largerthan_500" ] },
-            { label => "total_length", path => [ "total_length" ] },
-            { label => "total_length (500+)", path => [ "total_length_largerthan_500"] },
-            { label => "Largest contig", path => [ "largest_contig" ] },
-            { label => "GC content", path => [ "gc_content" ] },
-            { label => "N50", path => [ "n50" ] },
-            { label => "N90", path => [ "n90" ] },
-            { label => "L50", path => [ "l50" ] },
-            { label => "L90", path => [ "l90" ] },            
-            { label => "N:s per 100kb", path => [ "nr_n_per_100kb" ] },
-            { label => "Total k-mer coverage (strand coverage)", path => [ "total_coverage"] },          
-        ],
-
-    },
     skesa => {
         title => "Assembly with skesa",
         category => "assembly",
@@ -23770,74 +25390,8 @@ Kraken2 => {
             { label => "Main assembly: Length (50000+)", path => [ "main","total_length_50000_bp" ] },
 
 
-            { label => "Spades: Contigs (500+)", path => [ "spades","contigs" ], hide_if_missing => 1},
-            { label => "Spades: Contigs (all)", path => [ "spades","contigs_0_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Contigs (1000+)", path => [ "spades","contigs_1000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Contigs (5000+)", path => [ "spades","contigs_5000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Contigs (10000+)", path => [ "spades","contigs_10000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Contigs (25000+)", path => [ "spades","contigs_25000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Contigs (50000+)", path => [ "spades","contigs_50000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: N:s per 100kb)", path   => [ "spades","n_s_per_100_kbp" ], hide_if_missing => 1 },
-            { label => "Spades: GC", path => [ "spades","gc" ], hide_if_missing => 1 },
-            { label => "Spades: Largest contig", path => [ "spades","largest_contig" ], hide_if_missing => 1 },
-            { label => "Spades: N50", path => [ "spades","n50" ], hide_if_missing => 1 },
-            { label => "Spades: N90", path => [ "spades","n90" ], hide_if_missing => 1 },
-            { label => "Spades: AuN", path => [ "spades","aun" ], hide_if_missing => 1 },
-            { label => "Spades: L50", path => [ "spades","l50" ], hide_if_missing => 1 },
-            { label => "Spades: L90", path => [ "spades","l90" ], hide_if_missing => 1 },
-            { label => "Spades: Length (500+)", path => [ "spades","total_length" ], hide_if_missing => 1 },
-            { label => "Spades: Length (all)", path => [ "spades","total_length_0_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Length (1000+)", path => [ "spades","total_length_1000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Length (5000+)", path => [ "spades","total_length_5000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Length (10000+)", path => [ "spades","total_length_10000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Length (25000+)", path => [ "spades","total_length_25000_bp" ], hide_if_missing => 1 },
-            { label => "Spades: Length (50000+)", path => [ "spades","total_length_50000_bp" ], hide_if_missing => 1 },
 
-            { label => "Shovill: Contigs (500+)", path => [ "shovill","contigs" ], hide_if_missing => 1},
-            { label => "Shovill: Contigs (all)", path => [ "shovill","contigs_0_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Contigs (1000+)", path => [ "shovill","contigs_1000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Contigs (5000+)", path => [ "shovill","contigs_5000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Contigs (10000+)", path => [ "shovill","contigs_10000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Contigs (25000+)", path => [ "shovill","contigs_25000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Contigs (50000+)", path => [ "shovill","contigs_50000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: N:s per 100kb)", path   => [ "shovill","n_s_per_100_kbp" ], hide_if_missing => 1 },
-            { label => "Shovill: GC", path => [ "shovill","gc" ], hide_if_missing => 1 },
-            { label => "Shovill: Largest contig", path => [ "shovill","largest_contig" ], hide_if_missing => 1 },
-            { label => "Shovill: N50", path => [ "shovill","n50" ], hide_if_missing => 1 },
-            { label => "Shovill: N90", path => [ "shovill","n90" ], hide_if_missing => 1 },
-            { label => "Shovill: AuN", path => [ "shovill","aun" ], hide_if_missing => 1 },
-            { label => "Shovill: L50", path => [ "shovill","l50" ], hide_if_missing => 1 },
-            { label => "Shovill: L90", path => [ "shovill","l90" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (500+)", path => [ "shovill","total_length" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (all)", path => [ "shovill","total_length_0_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (1000+)", path => [ "shovill","total_length_1000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (5000+)", path => [ "shovill","total_length_5000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (10000+)", path => [ "shovill","total_length_10000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (25000+)", path => [ "shovill","total_length_25000_bp" ], hide_if_missing => 1 },
-            { label => "Shovill: Length (50000+)", path => [ "shovill","total_length_50000_bp" ], hide_if_missing => 1 },
   
-            { label => "Skesa: Contigs (500+)", path => [ "skesa","contigs" ], hide_if_missing => 1},
-            { label => "Skesa: Contigs (all)", path => [ "skesa","contigs_0_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Contigs (1000+)", path => [ "skesa","contigs_1000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Contigs (5000+)", path => [ "skesa","contigs_5000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Contigs (10000+)", path => [ "skesa","contigs_10000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Contigs (25000+)", path => [ "skesa","contigs_25000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Contigs (50000+)", path => [ "skesa","contigs_50000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: N:s per 100kb)", path   => [ "skesa","n_s_per_100_kbp" ], hide_if_missing => 1 },
-            { label => "Skesa: GC", path => [ "skesa","gc" ], hide_if_missing => 1 },
-            { label => "Skesa: Largest contig", path => [ "skesa","largest_contig" ], hide_if_missing => 1 },
-            { label => "Skesa: N50", path => [ "skesa","n50" ], hide_if_missing => 1 },
-            { label => "Skesa: N90", path => [ "skesa","n90" ], hide_if_missing => 1 },
-            { label => "Skesa: AuN", path => [ "skesa","aun" ], hide_if_missing => 1 },
-            { label => "Skesa: L50", path => [ "skesa","l50" ], hide_if_missing => 1 },
-            { label => "Skesa: L90", path => [ "skesa","l90" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (500+)", path => [ "skesa","total_length" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (all)", path => [ "skesa","total_length_0_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (1000+)", path => [ "skesa","total_length_1000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (5000+)", path => [ "skesa","total_length_5000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (10000+)", path => [ "skesa","total_length_10000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (25000+)", path => [ "skesa","total_length_25000_bp" ], hide_if_missing => 1 },
-            { label => "Skesa: Length (50000+)", path => [ "skesa","total_length_50000_bp" ], hide_if_missing => 1 },
                         
                     
         ],
@@ -23850,36 +25404,6 @@ Kraken2 => {
             {
                 label => "Main assembly: Icarus report",
                 path  => [ "main_icarus_report" ],
-                type => "html",
-            },
-            {
-                label => "Spades: Quast report",
-                path  => [ "spades_quast_report" ],
-                type => "html",
-            },
-            {
-                label => "Spades: Icarus report",
-                path  => [ "spades_icarus_report" ],
-                type => "html",
-            },
-            {
-                label => "Shovill: Quast report",
-                path  => [ "shovill_quast_report" ],
-                type => "html",
-            },
-            {
-                label => "Shovill: Icarus report",
-                path  => [ "shovill_icarus_report" ],
-                type => "html",
-            },
-            {
-                label => "Skesa: Quast report",
-                path  => [ "skesa_quast_report" ],
-                type => "html",
-            },
-            {
-                label => "Skesa: Icarus report",
-                path  => [ "skesa_icarus_report" ],
                 type => "html",
             },
  
@@ -23977,24 +25501,6 @@ Kraken2 => {
                 type => "txt",
                 hide_if_missing => 1,
             },
-            {
-                label => "mlst output (spades)",
-                path  => [ "spades_txt_report" ],
-                type => "txt",
-                hide_if_missing => 1,
-            },
-            {
-                label => "mlst output (shovill)",
-                path  => [ "shovill_txt_report" ],
-                type => "txt",
-                hide_if_missing => 1,
-            },
-            {
-                label => "mlst output (skesa)",
-                path  => [ "skesa_txt_report" ],
-                type => "txt",
-                hide_if_missing => 1,
-            },
         ],
     },
 
@@ -24015,24 +25521,105 @@ Kraken2 => {
                 type => "txt",
                 hide_if_missing => 1,
             },
-            {
-                label => "fastmlst output (spades)",
-                path  => [ "spades_txt_report" ],
-                type => "txt",
-                hide_if_missing => 1,
-            },
-            {
-                label => "fastmlst output (shovill)",
-                path  => [ "shovill_txt_report" ],
-                type => "txt",
-                hide_if_missing => 1,
-            },
-            {
-                label => "fastmlst output (skesa)",
-                path  => [ "skesa_txt_report" ],
-                type => "txt",
-                hide_if_missing => 1,
-            },
+        ],
+    },
+
+    # v1 typing tools
+    sistr => {
+        title => "Salmonella serotyping by SISTR",
+        category => "typing",
+        fields => [
+            { label => "Serotype used",           path => [ "serotype" ] },
+            { label => "Not used because",        path => [ "not_used_reason" ], hide_if_missing => 1 },
+            { label => "Serovar",                 path => [ "serovar" ] },
+            { label => "Antigenic formula",       path => [ "antigenic_formula" ] },
+            { label => "Serovar (antigen genes)", path => [ "serovar_antigen" ] },
+            { label => "Serovar (cgMLST)",        path => [ "serovar_cgmlst" ] },
+            { label => "Serogroup",               path => [ "serogroup" ] },
+            { label => "O antigen",               path => [ "o_antigen" ] },
+            { label => "H1",                      path => [ "h1" ] },
+            { label => "H2",                      path => [ "h2" ] },
+            { label => "cgMLST subspecies",       path => [ "cgmlst_subspecies" ] },
+            { label => "cgMLST ST",               path => [ "cgmlst_ST" ] },
+            { label => "cgMLST loci found (of 330)",       path => [ "cgmlst_found_loci" ] },
+            { label => "cgMLST matching alleles (of 330)", path => [ "cgmlst_matching_alleles" ] },
+            { label => "cgMLST closest genome",   path => [ "cgmlst_genome_match" ] },
+            { label => "QC status",               path => [ "qc_status" ] },
+            { label => "QC messages",             path => [ "qc_messages" ], hide_if_missing => 1 },
+        ],
+    },
+    seqsero2 => {
+        title => "Salmonella serotyping by SeqSero2",
+        category => "typing",
+        fields => [
+            { label => "Serotype",                path => [ "serotype" ] },
+            { label => "Antigenic profile",       path => [ "antigenic_profile" ] },
+            { label => "O antigen",               path => [ "o_antigen" ] },
+            { label => "H1 (fliC)",               path => [ "h1_antigen" ] },
+            { label => "H2 (fljB)",               path => [ "h2_antigen" ] },
+            { label => "Identification",          path => [ "identification" ] },
+            { label => "Monophasic Typhimurium",  path => [ "monophasic_typhimurium" ] },
+            { label => "Note",                    path => [ "note" ], hide_if_missing => 1 },
+            { label => "Note status",             path => [ "note_status" ] },
+        ],
+    },
+    ectyper => {
+        title => "E. coli serotyping by ECTyper",
+        category => "typing",
+        fields => [
+            { label => "Serotype used",    path => [ "serotype" ] },
+            { label => "Not used because", path => [ "not_used_reason" ], hide_if_missing => 1 },
+            { label => "Serotype",         path => [ "serotype_raw" ] },
+            { label => "O type",           path => [ "o_type" ] },
+            { label => "H type",           path => [ "h_type" ] },
+            { label => "QC",               path => [ "qc" ] },
+            { label => "Evidence",         path => [ "evidence" ] },
+            { label => "Pathotype",        path => [ "pathotype" ], hide_if_missing => 1 },
+            { label => "Pathotype genes",  path => [ "pathotype_genes" ], hide_if_missing => 1 },
+            { label => "Stx subtypes",     path => [ "stx_subtypes" ], hide_if_missing => 1 },
+            { label => "Species (ECTyper)", path => [ "species" ] },
+            { label => "Warnings",         path => [ "warnings" ], hide_if_missing => 1 },
+            { label => "Database",         path => [ "database" ] },
+        ],
+    },
+    lissero => {
+        title => "Listeria serogrouping by LisSero",
+        category => "typing",
+        fields => [
+            { label => "Serogroup",        path => [ "serogroup" ] },
+            { label => "Not used because", path => [ "not_used_reason" ], hide_if_missing => 1 },
+            { label => "prs",              path => [ "prs" ] },
+            { label => "lmo0737",          path => [ "lmo0737" ] },
+            { label => "lmo1118",          path => [ "lmo1118" ] },
+            { label => "ORF2110",          path => [ "orf2110" ] },
+            { label => "ORF2819",          path => [ "orf2819" ] },
+            { label => "Comment",          path => [ "comment" ], hide_if_missing => 1 },
+        ],
+    },
+    select_main_serotype => {
+        title => "Select main serotype",
+        category => "typing",
+        fields => [
+            { label => "Serotype", path => [ "serotype" ] },
+            { label => "Method", path => [ "method" ] },
+        ],
+    },
+    virulencefinder => {
+        title => "Virulence genes by VirulenceFinder",
+        category => "typing",
+        fields => [
+            { label => "stx genes",       path => [ "stx" ] },
+            { label => "eae",             path => [ "eae" ] },
+            { label => "Virulence genes", path => [ "genes" ] },
+            { label => "Number of hits",  path => [ "hit_count" ] },
+        ],
+    },
+    plasmidfinder => {
+        title => "Plasmid replicons by PlasmidFinder",
+        category => "typing",
+        fields => [
+            { label => "Replicons",      path => [ "replicons" ] },
+            { label => "Number of hits", path => [ "hit_count" ] },
         ],
     },
 
@@ -24102,12 +25689,86 @@ Kraken2 => {
     },
 
 
-};  # end return
+};  # end def
+
+    _add_assembler_report_defs($def);
+    return $def;
 
 }  # end sub
 
 
 
+
+# Display name for an assembler runstep: spades -> "Spades",
+# shovill_skesa -> "Shovill (skesa)".
+sub assembler_label {
+    my ($name) = @_;
+    return "Shovill ($1)" if $name =~ /^shovill_(\w+)$/;
+    return ucfirst $name;
+}
+
+# Report definitions that depend on which assemblers exist are generated
+# from the 'assembler' group instead of being written out per assembler:
+#   - one "Assembly with <assembler>" section per assembler that has none
+#   - quast: per-assembler statistics fields and Quast/Icarus links
+#   - mlst / fastmlst: per-assembler raw output links
+sub _add_assembler_report_defs {
+    my ($def) = @_;
+    my @asm = grep { $_ ne 'check_for_fasta' } group_members('assembler', \@ASSEMBLER_TIEBREAK);
+
+    for my $a (@asm) {
+        next if exists $def->{$a};
+        next unless exists $def->{spades};
+        $def->{$a} = {
+            %{ $def->{spades} },
+            title => "Assembly with " . assembler_label($a),
+        };
+    }
+
+    my @quast_stats = (
+        [ "Contigs (500+)",   "contigs" ],
+        [ "Contigs (all)",    "contigs_0_bp" ],
+        [ "Contigs (1000+)",  "contigs_1000_bp" ],
+        [ "Contigs (5000+)",  "contigs_5000_bp" ],
+        [ "Contigs (10000+)", "contigs_10000_bp" ],
+        [ "Contigs (25000+)", "contigs_25000_bp" ],
+        [ "Contigs (50000+)", "contigs_50000_bp" ],
+        [ "N:s per 100kb",    "n_s_per_100_kbp" ],
+        [ "GC",               "gc" ],
+        [ "Largest contig",   "largest_contig" ],
+        [ "N50",              "n50" ],
+        [ "N90",              "n90" ],
+        [ "AuN",              "aun" ],
+        [ "L50",              "l50" ],
+        [ "L90",              "l90" ],
+        [ "Length (500+)",    "total_length" ],
+        [ "Length (all)",     "total_length_0_bp" ],
+        [ "Length (1000+)",   "total_length_1000_bp" ],
+        [ "Length (5000+)",   "total_length_5000_bp" ],
+        [ "Length (10000+)",  "total_length_10000_bp" ],
+        [ "Length (25000+)",  "total_length_25000_bp" ],
+        [ "Length (50000+)",  "total_length_50000_bp" ],
+    );
+
+    if ( my $q = $def->{quast} ) {
+        for my $a (@asm) {
+            my $lbl = assembler_label($a);
+            push @{ $q->{fields} },
+                map { { label => "$lbl: $_->[0]", path => [ $a, $_->[1] ], hide_if_missing => 1 } } @quast_stats;
+            push @{ $q->{links} },
+                { label => "$lbl: Quast report",  path => [ "${a}_quast_report" ],  type => "html", hide_if_missing => 1 },
+                { label => "$lbl: Icarus report", path => [ "${a}_icarus_report" ], type => "html", hide_if_missing => 1 };
+        }
+    }
+
+    for my $tool (qw(mlst fastmlst)) {
+        my $d = $def->{$tool} or next;
+        for my $a (@asm) {
+            push @{ $d->{links} },
+                { label => "$tool output ($a)", path => [ "${a}_txt_report" ], type => "txt", hide_if_missing => 1 };
+        }
+    }
+}
 
 sub get_detailed_report_runstep_order {
 
@@ -24121,13 +25782,22 @@ sub get_detailed_report_runstep_order {
             downsampling_bbmap
             mash_screen
             spades
-            shovill
             skesa
+            shovill_spades
+            shovill_skesa
+            unicycler
             select_main_assembly
             quast
             remap
             mlst
             fastmlst
+            sistr
+            seqsero2
+            ectyper
+            lissero
+            select_main_serotype
+            virulencefinder
+            plasmidfinder
             amrfinderplus
             resfinder_fasta
             chewbbaca
@@ -26621,6 +28291,24 @@ sub execute_and_log {
 }
 #####################################################################################################
 
+# Wall-time limit (seconds) for one runstep. In order:
+#   1. config  [<tool>] timeout = 60m   (section from get_runstep_config_section;
+#      also tool.timeout=60m on the command line)
+#   2. runstep contract  timeout => "60m"   (long-running tools, e.g. assemblers)
+#   3. general.timeout (default 30m)
+# "0", "none" or "off" means no limit. The limit is a safety net against hung
+# tools, not a performance target -- set it well above normal run times.
+sub get_runstep_timeout {
+    my ($name) = @_;
+    my $section = get_runstep_config_section($name // "");
+    for my $v ( ( defined $section ? $R_cfg->{$section}{timeout} : undef ),
+                $runstep{$name // ""}{timeout},
+                $R_cfg->{general}{timeout} ) {
+        return parse_duration_to_seconds($v) if defined $v && $v ne "";
+    }
+    return 0;
+}
+
 sub parse_duration_to_seconds {
     my ($s) = @_;
     return 0 if !defined $s;
@@ -27061,28 +28749,13 @@ sub resolve_and_verify_databases {
         # The live database path is read from $R_cfg via config_key.
         # db_freeze.config intentionally does NOT store paths -- they live in
         # eurlc-wgs.config (with __DB__ placeholders) for portability.
-        my $root = "";
-        if ($config_key ne "") {
-            my @kp = split /\./, $config_key;
-            if (@kp == 2) {
-                $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]} // "");
-            } elsif (@kp == 3) {
-                $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]}{$kp[2]} // "");
-            }
-        }
-        # Backward-compat: if path is still present in an old db_freeze.config
-        # and $root could not be resolved via config_key, fall back to it.
-        if ($root eq "" && defined $db->{path} && $db->{path} ne "") {
-            $root = fill_placeholders($db->{path});
-        }
+        my $root = get_live_db_root($db);
 
         # Skip databases whose program is currently disabled in the pipeline config.
         # Derive the program name from config_key (e.g. "bakta.db_path" -> "bakta"),
         # falling back to the section name itself.
         {
-            my $prog = ($config_key =~ /^chewbbaca_schemas\./) ? "chewbbaca"
-                     : ($config_key =~ /^(\w+)\./) ? $1
-                     : $name;
+            my $prog = get_program_for_db($name, $db);
             my $prog_enabled = $R_cfg->{$prog}{enabled} // 1;
             if (!$prog_enabled || $prog_enabled eq "0") {
                 push @lines, sprintf("%-28s  %-12s  %s\n",
@@ -27100,12 +28773,7 @@ sub resolve_and_verify_databases {
         elsif ($ref_md5 ne "") {
             # ── Versioned mode: look in frozen_dbs/<name>/<md5>/ ──────────
             # frozen_dbs_root: explicit config > db-dir/frozen_dbs > dirname(root)/frozen_dbs
-            my $frozen_root   = $R_cfg->{general}{frozen_dbs_root} // "";
-            if ($frozen_root eq "") {
-                my $db_base = getdir("db");
-                $frozen_root = $db_base ne "" ? "$db_base/frozen_dbs"
-                                              : File::Basename::dirname($root) . "/frozen_dbs";
-            }
+            my $frozen_root   = get_frozen_dbs_root(File::Basename::dirname($root));
             my $versioned_dir    = "$frozen_root/$name/$ref_md5";
             my $versioned_marker = "$versioned_dir/$marker";
 
@@ -27218,12 +28886,7 @@ sub resolve_and_verify_databases {
         # Enrich status label with FROZEN/LIVE indicator for terminal output
         my $display_status = $status;
         if ($status eq "OK") {
-            my $frozen_root_check = $R_cfg->{general}{frozen_dbs_root} // "";
-            if ($frozen_root_check eq "") {
-                my $db_base = getdir("db");
-                $frozen_root_check = $db_base ne "" ? "$db_base/frozen_dbs"
-                                                    : File::Basename::dirname($root) . "/frozen_dbs";
-            }
+            my $frozen_root_check = get_frozen_dbs_root(File::Basename::dirname($root));
             if (index($resolved, $frozen_root_check) == 0) {
                 $display_status = "OK [FROZEN]";
             } else {
@@ -27573,45 +29236,36 @@ sub _cmd_setup {
     log_message("NOTICE: ── Databases ────────────────────────────────────");
 
     if ($db_config ne "" && -f $db_config) {
-        # db_freeze.config present -- show resolution status
+        # db_freeze.config present -- show what a run would use. Same rules
+        # as resolve_and_verify_databases(): live path from config_key,
+        # frozen copy in <frozen_dbs_root>/<name>/<marker_md5>/.
         my $dbs = load_databases_config($db_config);
         for my $name (sort keys %$dbs) {
-            my $db     = $dbs->{$name};
-            my $root   = $db->{path} // "";
-            my $marker = $db->{marker_file} // "";
-            my $ref_md5 = $db->{marker_md5} // "";
-            my $note   = $db->{note} // "";
+            my $db      = $dbs->{$name};
+            my $ref_md5 = lc($db->{marker_md5} // "");
+            my $prog    = get_program_for_db($name, $db);
 
-            my $default_dir = "$root/default";
-            my $versioned_dir = $ref_md5 ne "" ? "$root/$ref_md5" : "";
+            my $prog_enabled = $R_cfg->{$prog}{enabled} // 1;
+            if (!$prog_enabled || $prog_enabled eq "0") {
+                log_message(sprintf("NOTICE:   -  %-28s (program '%s' disabled)", $name, $prog));
+                next;
+            }
 
-            if ($versioned_dir ne "" && -d $versioned_dir) {
-                log_message(sprintf("NOTICE:   ✓  %-28s (versioned)", $name), "green");
-            } elsif (-d $default_dir) {
-                log_message(sprintf("NOTICE:   ○  %-28s (unversioned default/)", $name), "yellow");
+            my $live   = get_live_db_root($db);
+            my $frozen = $ref_md5 ne ""
+                ? get_frozen_dbs_root(File::Basename::dirname($live || ".")) . "/$name/$ref_md5"
+                : "";
+
+            if ($frozen ne "" && -d $frozen) {
+                log_message(sprintf("NOTICE:   ✓  %-28s (frozen %s)", $name, substr($ref_md5, 0, 8)), "green");
+            } elsif ($live ne "" && -d $live) {
+                my $why = $ref_md5 ne "" ? "frozen copy missing -- live database will be used"
+                                         : "live, not frozen";
+                log_message(sprintf("NOTICE:   ○  %-28s (%s)", $name, $why), "yellow");
             } else {
-                log_message(sprintf("NOTICE:   ✗  %-28s (not found in %s)", $name, $root), "red");
-
-                # Try install_db command if the tool config has one
-                my $tool_for_db = _find_tool_for_db($name, $db);
-                if (defined $tool_for_db) {
-                    my $install_cmd = $R_cfg->{$tool_for_db}{install_db} // "";
-                    if ($install_cmd ne "") {
-                        log_message("NOTICE:   Install command available.");
-                        my $go = $ASSUME_YES || prompt_yes_no("  Download/install $name?", 1);
-                        if ($go) {
-                            ensure_dir("$root/default");
-                            my $cmd = $install_cmd;
-                            $cmd =~ s/__DB__/$root\/default/g;
-                            log_message("NOTICE:   Running: $cmd");
-                            system($cmd) == 0
-                                ? log_message("NOTICE:   ✓  $name installed to $root/default/", "green")
-                                : log_message("WARNING:  ✗  $name installation failed", "red");
-                        }
-                    } else {
-                        log_message("NOTICE:   No automated install command -- install manually to $root/default/");
-                    }
-                }
+                log_message(sprintf("NOTICE:   ✗  %-28s (not found: %s)", $name, $live || "no db_path for " . ($db->{config_key} // '?')), "red");
+                my $tool = _find_tool_for_db($name, $db);
+                _setup_offer_db_install($tool, $name, $live) if defined $tool;
             }
         }
     } else {
@@ -27635,27 +29289,7 @@ sub _cmd_setup {
                 log_message(sprintf("NOTICE:   ✓  %-28s (%s)", $tool, $display_path), "green");
             } else {
                 log_message(sprintf("NOTICE:   ✗  %-28s (%s)", $tool, $display_path), "red");
-                if ($install_cmd ne "") {
-                    my $go = $ASSUME_YES || prompt_yes_no("  Download/install $tool database?", 1);
-                    if ($go) {
-                        my $db_root = peekdir("db");
-                        ensure_dir($db_path) if $db_path ne "";
-                        my $cmd = $install_cmd;
-                        $cmd =~ s/__DB__/$db_root/g;
-                        # Expand __ENV__ and __CONDABASE__ using the tool's config
-                        my $env_name   = $R_cfg->{$tool}{env}  // "";
-                        my $conda_base = get_conda_base();
-                        $cmd =~ s/__ENV__/$env_name/g;
-                        $cmd =~ s/__CONDABASE__/$conda_base/g;
-                        log_message("NOTICE:   Running: $cmd");
-                        system($cmd) == 0
-                            ? log_message("NOTICE:   ✓  $tool database installed", "green")
-                            : log_message("WARNING:  ✗  $tool database installation failed", "red");
-                    }
-                } else {
-                    my $hint = $db_path ne "" ? $db_path : "(see documentation)";
-                    log_message("NOTICE:   No automated install command -- install manually to $hint");
-                }
+                _setup_offer_db_install($tool, $tool, $db_path);
             }
         }
     }
@@ -27696,6 +29330,83 @@ sub _cmd_setup {
 
 # Find which tool config section corresponds to a db_freeze.config entry.
 # Matches by db_path overlap or config_key section name.
+# Root directory for frozen database copies (frozen_dbs/<name>/<md5>/).
+# Single definition used by the startup resolver, --freeze-databases and
+# --setup, so the three can never disagree.
+#   1. general.frozen_dbs_root in eurlc-wgs.config (relative -> db dir)
+#   2. <db dir>/frozen_dbs                          (standard layout)
+#   3. <$fallback_parent>/frozen_dbs                (last resort, no db dir)
+sub get_frozen_dbs_root {
+    my ($fallback_parent) = @_;
+    my $db_base = peekdir("db") // "";
+    my $cfg     = $R_cfg->{general}{frozen_dbs_root} // "";
+    if ($cfg ne "") {
+        $cfg = fill_placeholder_string($cfg, {});
+        $cfg = "$db_base/$cfg" if $cfg !~ m{^/} && $db_base ne "";
+        return $cfg;
+    }
+    return "$db_base/frozen_dbs" if $db_base ne "";
+    return ( $fallback_parent // "." ) . "/frozen_dbs";
+}
+
+# Live database path for one db_freeze.config entry, looked up in the
+# pipeline config via its config_key (db_freeze.config stores no paths).
+# Falls back to a legacy 'path' field if present.
+sub get_live_db_root {
+    my ($db) = @_;
+    my $config_key = $db->{config_key} // "";
+    my $root = "";
+    if ($config_key ne "") {
+        my @kp = split /\./, $config_key;
+        if (@kp == 2) {
+            $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]} // "");
+        } elsif (@kp == 3) {
+            $root = fill_placeholders($R_cfg->{$kp[0]}{$kp[1]}{$kp[2]} // "");
+        }
+    }
+    if ($root eq "" && defined $db->{path} && $db->{path} ne "") {
+        $root = fill_placeholders($db->{path});
+    }
+    return $root;
+}
+
+# Program a db_freeze.config entry belongs to (for the enabled check).
+sub get_program_for_db {
+    my ($name, $db) = @_;
+    my $config_key = $db->{config_key} // "";
+    return ($config_key =~ /^chewbbaca_schemas\./) ? "chewbbaca"
+         : ($config_key =~ /^(\w+)\./)            ? $1
+         : $name;
+}
+
+# --setup helper: offer to run a tool's install_db command.
+# $target is shown to the user as the expected location.
+sub _setup_offer_db_install {
+    my ($tool, $label, $target) = @_;
+    my $install_cmd = $R_cfg->{$tool}{install_db} // "";
+    if ($install_cmd eq "") {
+        my $hint = ($target // "") ne "" ? $target : "(see documentation)";
+        log_message("NOTICE:   No automated install command -- install manually to $hint");
+        return;
+    }
+    my $go = $ASSUME_YES || prompt_yes_no("  Download/install $label database?", 1);
+    return unless $go;
+
+    my $db_root = peekdir("db");
+    my $db_path = fill_placeholder_string($R_cfg->{$tool}{db_path} // "", $R_cfg->{$tool});
+    ensure_dir($db_path) if $db_path ne "";
+    my $cmd = $install_cmd;
+    $cmd =~ s/__DB__/$db_root/g;
+    my $env_name   = $R_cfg->{$tool}{env}  // "";
+    my $conda_base = get_conda_base();
+    $cmd =~ s/__ENV__/$env_name/g;
+    $cmd =~ s/__CONDABASE__/$conda_base/g;
+    log_message("NOTICE:   Running: $cmd");
+    system($cmd) == 0
+        ? log_message("NOTICE:   ✓  $label database installed", "green")
+        : log_message("WARNING:  ✗  $label database installation failed", "red");
+}
+
 sub _find_tool_for_db {
     my ($db_name, $db) = @_;
     my $config_key = $db->{config_key} // "";
@@ -27735,8 +29446,9 @@ sub fill_placeholder_string {
 #       kraken2/
 #         a3f9b2c1.../      ← frozen copy, named after MD5 of marker_file
 #
-# frozen_dbs/ location defaults to <parent of first db path>/frozen_dbs, or can
-# be set explicitly with general.frozen_dbs_root in eurlc-wgs.config.
+# frozen_dbs/ location defaults to <db dir>/frozen_dbs, or can be set
+# explicitly with general.frozen_dbs_root in eurlc-wgs.config (see
+# get_frozen_dbs_root).
 #
 # When a database is re-frozen (live version has changed), the old marker_md5
 # line in db_freeze.config is commented out with a datestamp, and the new
@@ -27856,6 +29568,34 @@ sub _cmd_freeze_databases {
         return;
     }
 
+    # Append entries for enabled tools whose database is not yet listed
+    # (db_freeze.config written before the tool was added to the pipeline).
+    {
+        my @missing = grep {
+            my ($section) = @$_;
+            my $en = $R_cfg->{$section}{enabled} // 1;
+            $en && $en ne "0" && !exists $dbs->{$section};
+        } default_db_freeze_entries();
+        if (@missing) {
+            log_message("NOTICE: Appending missing database entries to $db_path: " . join(", ", map { $_->[0] } @missing));
+            if (open my $fh_append, '>>', $db_path) {
+                for my $e (@missing) {
+                    my ($section, $rel, $marker, $config_key, $note) = @$e;
+                    print $fh_append "[$section]\n";
+                    print $fh_append "marker_file  = $marker\n";
+                    print $fh_append "marker_md5   =\n";
+                    print $fh_append "config_key   = $config_key\n";
+                    print $fh_append "note         = $note\n";
+                    print $fh_append "\n";
+                }
+                close $fh_append;
+                $dbs = load_databases_config($db_path);
+            } else {
+                log_message("WARNING: Cannot update db_freeze.config [$db_path]: $!", "yellow");
+            }
+        }
+    }
+
     # Check if any enabled chewbbaca schemas are missing from the loaded config.
     # This happens when db_freeze.config was created before chewbbaca support was
     # added -- the file exists so write_default_databases_config was never called,
@@ -27909,15 +29649,7 @@ sub _cmd_freeze_databases {
     # Priority: 1. explicit general.frozen_dbs_root in config
     #           2. <db dir>/frozen_dbs  (the standard layout)
     #           3. dirname of db_freeze.config file / frozen_dbs  (last resort)
-    my $frozen_root = $R_cfg->{general}{frozen_dbs_root} // "";
-    if ($frozen_root eq "") {
-        my $db_base = getdir("db");
-        if ($db_base ne "") {
-            $frozen_root = "$db_base/frozen_dbs";
-        } else {
-            $frozen_root = File::Basename::dirname($db_path) . "/frozen_dbs";
-        }
-    }
+    my $frozen_root = get_frozen_dbs_root(File::Basename::dirname($db_path));
     log_message("NOTICE: Frozen databases will be stored under: $frozen_root");
 
     # Inspect each database:
@@ -29990,6 +31722,126 @@ sub ensure_dir_not_exists {
 ###################################################################################################
 
 ###################################################################################################
+## Species-restricted runsteps -- the optional "species" contract field.
+##
+##   species => [ 'Salmonella' ],                     # genus
+##   species => [ 'Escherichia coli', 'Shigella' ],   # species and/or genus
+##
+## Meaning: the runstep only runs for samples whose detected taxonomy
+## matches one of the entries. applies_if stays a pure CONFIG question
+## ("is the tool enabled?"); the species question is answered at runtime,
+## once species is known. Concretely:
+##
+##   - normalize_species_runsteps() (startup) adds 'species_determined' to
+##     the step's requires, so both schedulers wait for species
+##     determination and the graph validation/cycle checks see the edge.
+##   - runstep_species_applies() is checked next to applies_if in both
+##     schedulers. Before species is known it answers "yes" (the implicit
+##     requires holds the step back); after, it answers whether the
+##     detected species matches.
+##   - The test phase ignores the field entirely: a tool enabled in the
+##     config is tested whatever the samples turn out to contain.
+##   - report_species_tools_not_run() (end of run) lists detected species
+##     whose species-specific tools are disabled in the config.
+##
+## Matching (case-insensitive, '_' treated as space):
+##   'Salmonella'         matches species "Salmonella enterica" (genus prefix)
+##                        or taxonomy genus "Salmonella"
+##   'Escherichia coli'   matches species "Escherichia coli" exactly
+##                        (and longer names starting with it)
+
+# Startup: validate the field and add the implicit requires. Called once,
+# before validate_runstep_graph(), so the graph checks see the result.
+sub normalize_species_runsteps {
+    my @problems;
+    for my $name ( sort keys %runstep ) {
+        my $def = $runstep{$name};
+        next unless exists $def->{species};
+
+        my $sp = $def->{species};
+        if ( ref $sp ne 'ARRAY' || !@$sp || grep { !defined $_ || $_ !~ /\S/ } @$sp ) {
+            push @problems, "Runstep [$name]: 'species' must be a non-empty list of species/genus names, e.g. species => [ 'Salmonella' ]";
+            next;
+        }
+
+        $def->{requires} //= [];
+        unless ( grep { $_ eq 'species_determined' } @{ $def->{requires} } ) {
+            push @{ $def->{requires} }, 'species_determined';
+            $def->{_implicit_requires}{species_determined} = 1;
+        }
+    }
+    if (@problems) {
+        log_message("ERROR:   - $_", "red") for @problems;
+        graceful_die("Invalid 'species' field in runstep definition(s) -- see above");
+    }
+}
+
+# Does sample $i's detected taxonomy match any entry in $wanted (arrayref)?
+sub sample_matches_species {
+    my ($i, $wanted) = @_;
+    my $tax     = $R_samples->[$i]{main_results}{taxonomy} // {};
+    my $species = lc( $tax->{species} // '' );
+    my $genus   = lc( $tax->{genus}   // '' );
+    for ($species, $genus) { s/_/ /g; s/^\s+|\s+$//g; }
+
+    for my $w (@$wanted) {
+        (my $p = lc $w) =~ s/_/ /g;
+        $p =~ s/^\s+|\s+$//g;
+        next if $p eq '';
+        return 1 if $species eq $p || index($species, "$p ") == 0;
+        return 1 if $p !~ / / && $genus eq $p;     # genus-only entry
+    }
+    return 0;
+}
+
+# Runtime gate used by both schedulers, alongside applies_if.
+#   no species field         -> 1
+#   species not yet known    -> 1 if species can still be determined for
+#                               this sample (the implicit requires makes the
+#                               step wait); 0 if no producer of
+#                               species_determined applies (e.g. kraken2
+#                               disabled) -- it would otherwise wait forever
+#   species known            -> does it match?
+sub runstep_species_applies {
+    my ($def, $i) = @_;
+    my $wanted = $def->{species} or return 1;
+
+    unless ( eval { $data_key{species_determined}{check}->($i) } ) {
+        for my $p ( keys %runstep ) {
+            my $d = $runstep{$p};
+            next unless grep { $_ eq 'species_determined' } @{ $d->{produces} // [] };
+            return 1 if eval { exists $d->{applies_if} ? $d->{applies_if}->($i) : 1 };
+        }
+        return 0;
+    }
+    return sample_matches_species($i, $wanted);
+}
+
+# End of run: tell the user when samples contained a species for which
+# species-specific tools exist but are disabled in the config. Purely
+# informational -- the run itself is not affected.
+sub report_species_tools_not_run {
+    my ($runstep_names) = @_;
+    my %disabled;   # runstep -> [ sample names ]
+    for my $name (@$runstep_names) {
+        my $def = $runstep{$name};
+        next unless $def && $def->{species};
+        for my $i ( 0 .. $#$R_samples ) {
+            next unless eval { $data_key{species_determined}{check}->($i) };
+            next unless sample_matches_species($i, $def->{species});
+            my $applies = eval { exists $def->{applies_if} ? $def->{applies_if}->($i) : 1 };
+            next if $applies;
+            push @{ $disabled{$name} }, $R_samples->[$i]{name} // "sample $i";
+        }
+    }
+    for my $name ( sort keys %disabled ) {
+        my @s = @{ $disabled{$name} };
+        log_message("NOTICE: " . scalar(@s) . " sample(s) matched [" . join(", ", @{ $runstep{$name}{species} })
+                  . "] but runstep [$name] is disabled in the configuration, so it did not run: " . join(", ", @s), "yellow");
+    }
+}
+
+###################################################################################################
 ## Startup graph validation (§9.1) -- structural checks over the runstep
 ## dependency declarations, run once, after samples are known (needed for
 ## the per-sample applicable-producer check) but before any real testing
@@ -30153,43 +32005,65 @@ sub validate_runstep_graph {
 sub validate_no_duplicate_hash_keys {
     my @problems;
 
-    # Read our own source to check for duplicate keys within runstep hashes.
-    # We look at the block between '$runstep{$runstep_name} = {' and the
-    # matching closing '};' for each runstep, and flag any key that appears
-    # more than once.
+    # Read our own source and walk it line by line. When a line opens a
+    # runstep hash literal ('$runstep{$runstep_name} = {'), track brace
+    # depth until the literal closes. Any 'key =>' that starts a line at
+    # depth 1 is a top-level key of that hash; seeing the same key twice
+    # in one literal is the silent-overwrite bug.
+    #
+    # The previous regex-based version could not handle nested braces
+    # (e.g. 'applies_if => sub { ... $R_cfg->{x}{y} ... }') and in
+    # practice matched nothing, so duplicates went undetected. Brace
+    # counting is balanced for everything that appears inside runstep
+    # hashes (subs, hash lookups, anonymous hashes), so it is robust here.
     my $src_path = $0;  # the pipeline script itself
-    my $src;
-    {
-        local $/;
-        open my $fh, '<', $src_path or return ();
-        $src = <$fh>;
-    }
+    open my $fh, '<', $src_path or return ();
+    my @lines = <$fh>;
+    close $fh;
 
-    # Extract per-runstep hash literal blocks
-    while ( $src =~ /\$runstep\{\$runstep_name\}\s*=\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\};/g ) {
-        my $block = $1;
-        my %seen;
-        while ( $block =~ /^\s+(\w+)\s*=>/mg ) {
-            my $key = $1;
-            # Only care about runstep contract fields -- skip sub-hash keys
-            next unless grep { $_ eq $key } qw(
-                requires produces applies_if group resources message
-                long_name output_dir resultfile resultfiles_status
-                result_parsing preprocessing test cmd_template
-            );
-            $seen{$key}++;
+    my $current_name = "unknown";
+    my $in_block     = 0;
+    my $depth        = 0;
+    my %seen;
+
+    for my $lineno (0 .. $#lines) {
+        my $line = $lines[$lineno];
+
+        if (!$in_block && $line =~ /^\s*\$runstep_name\s*=\s*"([^"]+)"\s*;/) {
+            $current_name = $1;
+            next;
         }
-        for my $key (sort keys %seen) {
-            next unless $seen{$key} > 1;
-            # Identify which runstep this block belongs to
-            my $pos = pos($src) - length($&);
-            my $before = substr($src, 0, $pos);
-            my ($rs_name) = ($before =~ /\$runstep_name\s*=\s*"([^"]+)"\s*;[^;]*$/s);
-            $rs_name //= "unknown";
-            push @problems,
-                "Runstep [$rs_name] has duplicate key [$key] in its hash literal -- "
-              . "Perl silently discards all but the last; only the final value is effective. "
-              . "This is how the Kraken2 trimmed_downsampled_fastq requires was lost silently.";
+
+        if (!$in_block) {
+            next unless $line =~ /^\s*\$runstep\{\$runstep_name\}\s*=\s*\{\s*(?:#.*)?$/;
+            $in_block = 1;
+            $depth    = 1;
+            %seen     = ();
+            next;
+        }
+
+        # Strip comments before counting braces / keys
+        (my $code = $line) =~ s/#.*$//;
+
+        if ($depth == 1 && $code =~ /^\s*(\w+)\s*=>/) {
+            my $key = $1;
+            push @{ $seen{$key} }, $lineno + 1;
+        }
+
+        my $opens  = () = $code =~ /\{/g;
+        my $closes = () = $code =~ /\}/g;
+        $depth += $opens - $closes;
+
+        if ($depth <= 0) {
+            for my $key (sort keys %seen) {
+                next unless @{ $seen{$key} } > 1;
+                push @problems,
+                    "Runstep [$current_name] has duplicate key [$key] in its hash literal "
+                  . "(lines " . join(", ", @{ $seen{$key} }) . ") -- Perl silently discards "
+                  . "all but the last value; only the final one is effective.";
+            }
+            $in_block = 0;
+            $depth    = 0;
         }
     }
 
@@ -30228,14 +32102,36 @@ sub test_data_driven_runsteps {
         # are not yet satisfied, those preprocessing calls would log spurious
         # warnings ("nothing available", "input file missing") about data that
         # simply hasn't been produced yet in this run. Silently skip instead.
+        # The implicit species_determined requirement added for species-
+        # restricted runsteps is ignored here: those tools are tested
+        # whenever they are enabled, whatever the samples contain.
         if ( $in_parallel && @{ $def->{requires} // [] } ) {
             my $ready = 1;
             for my $key ( @{ $def->{requires} } ) {
+                next if $def->{_implicit_requires}{$key};
                 unless ( exists $data_key{$key} && eval { $data_key{$key}{check}->($i) } ) {
                     $ready = 0; last;
                 }
             }
-            next unless $ready;
+            unless ($ready) {
+                # The step's own test cannot run yet, but its conda
+                # environment can and must be checked now -- otherwise a
+                # missing environment (e.g. a newly enabled tool) is never
+                # offered for installation and the step only fails much
+                # later, in the middle of the run. check_conda_tool does
+                # the install prompt and remembers what it already tested.
+                my $section = get_runstep_config_section($name);
+                if ( defined $section && ( $R_cfg->{$section}{env} // "" ) ne "" ) {
+                    my $rc = eval { check_conda_tool($section) };
+                    if ($@) {
+                        (my $err = $@) =~ s/\n/ /g;
+                        log_message("ERROR: [PIPELINE BUG] environment check crashed for [$name] ($section): $err", "red");
+                    }
+                    elsif ( defined $rc && $rc == 1 ) { log_message("NOTICE: $name: OK (environment)"); }
+                    elsif ( defined $rc && $rc == 0 ) { log_message("NOTICE: Missing requirements for [$name]", "red"); }
+                }
+                next;
+            }
         }
 
         my $test_results = eval { $def->{test}->($i) };
@@ -30287,6 +32183,16 @@ sub run_data_driven_runsteps {
             next unless $applies;
         }
 
+        # species field: in this sequential single pass, find_species_kraken2
+        # comes earlier in the list, so species is normally known here.
+        # If it is not, the implicit species_determined requires below
+        # skips the step.
+        next unless runstep_species_applies($def, $i);
+
+        # Sequential mode is a single pass: once a step's turn has come it
+        # will not be revisited, whether it runs below or is skipped.
+        $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
+
         # requires / data_key checks
         my $requires_ok = 1;
         for my $key ( @{ $def->{requires} // [] } ) {
@@ -30318,6 +32224,7 @@ sub run_data_driven_runsteps {
                 message    => $def->{message},
                 command    => $command,
                 resultfile => "",
+                timeout_s  => get_runstep_timeout($name),
             );
 
             # result_parsing
@@ -30448,6 +32355,7 @@ sub run_data_driven_batch_runsteps {
                 message    => $def->{message},
                 command    => $command,
                 resultfile => "",
+                timeout_s  => get_runstep_timeout($name),
             );
 
             eval { $def->{result_parsing}->() };
@@ -30478,7 +32386,12 @@ sub run_data_driven_batch_runsteps {
 ##   Example: write_file("$control_dir/.tmp_$name", '{"command":"pause"}');
 ##            rename("$control_dir/.tmp_$name", "$control_dir/$name");
 
-my %_valid_control_command = map { $_ => 1 } qw(pause resume terminate);
+# Filled in a BEGIN block: this line sits far below the main program, which
+# has already run (and exited) before execution would reach a plain
+# 'my %h = (...)' here -- the hash would be empty whenever it is used, and
+# every command was rejected as unknown.
+my %_valid_control_command;
+BEGIN { %_valid_control_command = map { $_ => 1 } qw(pause resume terminate); }
 
 sub process_control_commands {
     return unless -d $S_control_dir;
@@ -30489,12 +32402,23 @@ sub process_control_commands {
 
     for my $file (@files) {
         my $path = "$S_control_dir/$file";
-        my $raw  = do { local $/; open(my $fh,'<',$path) or next; <$fh> };
+        my $raw  = do { local $/; open(my $fh,'<',$path) or next; <$fh> } // '';
         my $cmd  = eval { JSON::MaybeXS->new->decode($raw) };
+        my $json_err = $@;
         my $name = ($cmd && ref $cmd eq 'HASH') ? ($cmd->{command} // '') : '';
 
+        # Also accept the bare word, for typing by hand:  echo pause > control/p
+        if ($name eq '' && $raw =~ /^\s*(pause|resume|terminate)\s*$/i) {
+            $name = lc $1;
+        }
+
         unless ($_valid_control_command{$name}) {
-            log_message("WARNING: Control channel: ignoring malformed/unknown command file [$file]", "red");
+            (my $shown = substr($raw, 0, 80)) =~ s/[^\x20-\x7e]/?/g;   # non-ASCII (e.g. curly quotes) shown as ?
+            my $why = $name ne ''   ? "unknown command [$name]"
+                    : $json_err     ? "not valid JSON"
+                    :                 "no \"command\" field";
+            log_message("WARNING: Control channel: ignoring command file [$file] -- $why. Content: [$shown]. "
+                      . "Expected {\"command\":\"pause|resume|terminate\"} or just the word", "red");
             unlink $path;
             next;
         }
@@ -30502,6 +32426,7 @@ sub process_control_commands {
         if ($name eq 'pause') {
             unless ($S_paused) {
                 $S_paused = 1;
+                $S_paused_since = time();
                 log_message("NOTICE: Control channel: PAUSED -- will not dispatch new work until resumed", "yellow");
                 emit_event(type => 'paused');
             }
@@ -30509,6 +32434,7 @@ sub process_control_commands {
         elsif ($name eq 'resume') {
             if ($S_paused) {
                 $S_paused = 0;
+                $S_paused_since = undef;
                 log_message("NOTICE: Control channel: RESUMED -- resuming normal dispatch", "green");
                 emit_event(type => 'resumed');
             }
@@ -30562,6 +32488,7 @@ sub run_step {
     my $message     = $args{message}     // "";
     my $command     = $args{command}     // "";
     my $resultfile  = $args{resultfile}  // "";
+    my $timeout_s   = $args{timeout_s};      # undef -> general.timeout
 
     # progress report
     my $formated_msg = log_progress($samplenr, $message);
@@ -30577,7 +32504,7 @@ sub run_step {
 
       emit_event(type => 'runstep_started', sample => $samplenr, runstep => $name);
 
-      my $result = execute_and_log($command, 1, $formated_msg );
+      my $result = execute_and_log($command, 1, $formated_msg, $timeout_s );
 
       emit_event(
           type      => 'runstep_finished',
@@ -30664,7 +32591,10 @@ sub _par_render_status_board {
     my $max_r    = $S_max_ram_gb  ? int($S_max_ram_gb  * $headroom) : '?';
 
     print "$sep\n";
-    printf " eurlc-wgs  |  parallel  |  elapsed: %-10s\n", $elapsed;
+    printf " eurlc-wgs  |  parallel  |  elapsed: %-10s%s\n", $elapsed,
+        $args{paused}
+            ? "  |  \x1b[33mPAUSED " . format_elapsed(time() - ($args{paused_since} // time())) . "\x1b[0m"
+            : "";
     printf " Progress:  %s %3d%%  (%d/%d steps)\n", $bar, $pct, $done, $total;
     my $warn_str = $S_par_warning_count > 0
         ? "  \x1b[33m\x{26a0} $S_par_warning_count warning(s)\x1b[0m"
@@ -30693,10 +32623,13 @@ sub _par_render_status_board {
     print "$sep\n";
     $new_board_lines++;
 
-    # Done-lines were printed inside the board zone (above the live part).
-    # Next tick's cursor-up must account for them, otherwise the old board
-    # is only partially erased. Add their count to the returned line total.
-    return $new_board_lines + scalar(@$done_lines);
+    # Return only the height of the live board. Done-lines were printed
+    # above it and must stay in the scrollback; counting them here made the
+    # next tick's cursor-up overshoot and erase them again.
+    # NOTE: this count is only correct if NOTHING else writes to the
+    # terminal between two renders -- run_parallel_runsteps guarantees that
+    # by capturing log_message/warn output and redirecting child output.
+    return $new_board_lines;
 }
 
 # The parallel per-sample scheduler. Drives the full per-sample phase;
@@ -30726,6 +32659,21 @@ sub run_parallel_runsteps {
 
     # Track which samples still have pending work
     my %samples_pending = map { $_ => 1 } 0 .. $#$R_samples;
+
+    # While the live board is on screen, every line written to the terminal
+    # that the renderer does not know about shifts the board down, so the
+    # next cursor-up lands too low and the top of the old board is left
+    # behind as a stale "elapsed:" line. Route all parent-side screen output
+    # through the board for the whole loop (not just result_parsing):
+    #   log_message -> ERROR shown above the board, WARNING counted, rest log-only
+    #   Perl warn() -> shown above the board
+    # Child processes get their stdout/stderr redirected at fork (below).
+    my $board_tty = -t STDOUT;
+    my $saved_warn_handler = $SIG{__WARN__};
+    local $S_par_log_capture = $board_tty ? \@done_lines : undef;
+    local $SIG{__WARN__} = $board_tty
+        ? sub { (my $w = shift) =~ s/\s+\z//; push @done_lines, "WARNING (perl): $w"; }
+        : $saved_warn_handler;
 
     while ( %samples_pending || %S_par_active ) {
 
@@ -30758,6 +32706,7 @@ sub run_parallel_runsteps {
             }
 
             $S_par_done{"$i,$name"} = 1;
+            $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
             $done_count++;
 
             my $elapsed = format_elapsed(time() - $job->{start_time});
@@ -30784,12 +32733,14 @@ sub run_parallel_runsteps {
                 my $def_n = $runstep{$n};
                 next unless defined $def_n;
                 my $applies = eval { exists $def_n->{applies_if} ? $def_n->{applies_if}->($i) : 1 };
+                $applies = 0 if $applies && !runstep_species_applies($def_n, $i);
                 if ($applies) {
                     $sample_complete = 0;
                     last;
                 }
                 # Not applicable at runtime -- mark done so we don't revisit
                 $S_par_done{"$i,$n"} = 1;
+                $total_work-- if $applicability->{applicable}{"$i,$n"} && $total_work > $done_count;
             }
             if ($sample_complete) {
                 delete $samples_pending{$i};
@@ -30800,7 +32751,9 @@ sub run_parallel_runsteps {
         # ── 2. Dispatch new work ───────────────────────────────────────
         my $dispatched_this_tick = 0;
 
-        SAMPLE: for my $i ( sort { $a <=> $b } keys %samples_pending ) {
+        # While paused (control channel), running jobs finish normally but
+        # nothing new is started.
+        SAMPLE: for my $i ( $S_paused ? () : sort { $a <=> $b } keys %samples_pending ) {
 
             next if $R_samples->[$i]{fatal_error};
 
@@ -30825,8 +32778,16 @@ sub run_parallel_runsteps {
                     log_message("ERROR: [PIPELINE BUG] applies_if crashed in [$name] sample [${\($R_samples->[$i]{name}//'')}]: $err -- skipping", "red");
                     next RUNSTEP;
                 }
+                # species field: runtime match against the detected taxonomy
+                # (answers 1 while species is still unknown -- the implicit
+                # species_determined requires below holds the step back).
+                $applies = 0 if $applies && !runstep_species_applies($def, $i);
                 unless ($applies) {
                     $S_par_done{"$i,$name"} = 1;
+                    # Counted as applicable at startup but turned out not to
+                    # apply (e.g. wrong species) -- shrink the denominator so
+                    # the progress bar can reach 100%.
+                    $total_work-- if $applicability->{applicable}{"$i,$name"} && $total_work > $done_count;
                     next RUNSTEP;
                 }
 
@@ -30863,6 +32824,7 @@ sub run_parallel_runsteps {
                     (my $err = $@) =~ s/\n/ /g;
                     log_message("ERROR: [PIPELINE BUG] preprocessing crashed in [$name]: $err -- skipping", "red");
                     $S_par_done{"$i,$name"} = 1;
+                    $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
                     next RUNSTEP;
                 }
 
@@ -30870,6 +32832,7 @@ sub run_parallel_runsteps {
                 # (e.g. "already done" path calls result_parsing itself).
                 if (!defined $command || $command eq "") {
                     $S_par_done{"$i,$name"} = 1;
+                    $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
                     $done_count++;
                     next RUNSTEP;
                 }
@@ -30882,11 +32845,29 @@ sub run_parallel_runsteps {
                 if (!defined $pid) {
                     log_message("ERROR: Fork failed for [$name]: $!", "red");
                     $S_par_done{"$i,$name"} = 1;
+                    $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
                     next RUNSTEP;
                 }
 
                 if ($pid == 0) {
                     POSIX::setpgid(0, 0);
+                    # Keep the child off the terminal while the board is
+                    # live: its log_message calls go to the log file only,
+                    # and any raw stdout/stderr (internal subs, tools that
+                    # print despite their own redirects) goes to the bash
+                    # log. Lines the board does not count would leave
+                    # stale board fragments behind.
+                    if ($board_tty) {
+                        $S_par_log_capture = [];
+                        my $sink = $log_fh_bash // $log_fh;
+                        if ($sink) {
+                            open(STDOUT, '>&', $sink);
+                            open(STDERR, '>&', $sink);
+                        } else {
+                            open(STDOUT, '>', '/dev/null');
+                            open(STDERR, '>', '/dev/null');
+                        }
+                    }
                     # SUB\t... commands are internal Perl subs -- exec bash
                     # can't handle them. Call _run_internal_sub directly,
                     # exactly as execute_and_log does in sequential mode.
@@ -30920,6 +32901,12 @@ sub run_parallel_runsteps {
         # ── 3. Control channel ─────────────────────────────────────────
         process_control_commands();
         if ($S_terminate) {
+            # Clear the board and stop capturing so the notice is visible.
+            print "\r\e[${board_lines}A\e[J" if $board_tty && $board_lines > 0;
+            print "$_\n" for @done_lines;
+            @done_lines = ();
+            $board_lines = 0;
+            $S_par_log_capture = undef;
             log_message("NOTICE: Parallel scheduler: terminate command received -- no new work dispatched", "red");
             # Wait for active jobs to finish
             for my $pid (keys %S_par_active) {
@@ -30941,10 +32928,18 @@ sub run_parallel_runsteps {
             cur_threads   => $S_par_threads,
             cur_ram       => $S_par_ram_gb,
             done_lines    => \@done_lines,
+            paused        => $S_paused,
+            paused_since  => $S_paused_since,
         );
         @done_lines = ();   # consumed by renderer
 
         if (%S_par_active) {
+            select(undef, undef, undef, 0.5);
+        }
+        elsif (%samples_pending && $S_paused) {
+            # Paused with nothing running: just wait for resume/terminate.
+            # Must not count towards the deadlock detector below.
+            $idle_ticks_without_dispatch = 0;
             select(undef, undef, undef, 0.5);
         }
         elsif (%samples_pending) {
@@ -30967,7 +32962,7 @@ sub run_parallel_runsteps {
                         my $def = $runstep{$name};
                         next unless defined $def;
                         my $applies = eval { exists $def->{applies_if} ? $def->{applies_if}->($i) : 1 };
-                        next unless $applies;
+                        next unless $applies && runstep_species_applies($def, $i);
                         # Check which requires are unsatisfied
                         for my $key (@{ $def->{requires} // [] }) {
                             unless (exists $data_key{$key} && eval { $data_key{$key}{check}->($i) }) {
@@ -30993,8 +32988,12 @@ sub run_parallel_runsteps {
         }
     }
 
-    # Final board clear
+    # Final board clear, then hand the terminal back to normal logging
     print "\r\e[${board_lines}A\e[J" if -t STDOUT && $board_lines > 0;
+    print "$_\n" for @done_lines;
+    @done_lines = ();
+    $S_par_log_capture = undef;
+    $SIG{__WARN__} = $saved_warn_handler;
 
     my $total_elapsed = format_elapsed(time() - $start_time);
     log_message("NOTICE: Parallel phase complete: $done_count steps across " . scalar(@$R_samples) . " samples ($total_elapsed)", "green");
@@ -32140,22 +34139,48 @@ sub detect_available_threads {
 # Returns the effective resource claim for a runstep as a plain hash:
 #   { threads => N, ram_gb => N }
 # Priority (hybrid C -- code sets defaults, config overrides):
-#   1. config-file  [spades] parallel_threads / parallel_ram_gb
+#   1. config  [<tool>] parallel_threads / parallel_ram_gb  (section from
+#      get_runstep_config_section; also settable as tool.parallel_threads=N)
 #   2. runstep declaration  resources => { threads, ram_gb }
 #   3. general defaults parallel_default_threads / parallel_default_ram_gb
 #
 # When the threads value in the declaration is a Perl expression string
 # (e.g. "$R_cfg->{general}{threads}") it is resolved at call time, not
 # stored pre-resolved, so a config change is always reflected correctly.
+# Config section holding a runstep's per-tool settings, for the parallel
+# resource overrides. In order:
+#   1. explicit contract field  config_section => 'kraken2'
+#   2. a section named like the runstep (case-insensitive): [spades]
+#   3. the longest leading part of the name, split on '_', that is a
+#      section: resfinder_fastq -> [resfinder], fastp_rawdata -> [fastp]
+# Returns undef if none matches (the step then uses its declaration or the
+# general defaults).
+sub get_runstep_config_section {
+    my ($name) = @_;
+    my $def = $runstep{$name} // {};
+    if ( defined $def->{config_section} ) {
+        return exists $R_cfg->{ $def->{config_section} } ? $def->{config_section} : undef;
+    }
+    my %lc_sections = map { lc($_) => $_ } grep { ref $R_cfg->{$_} eq 'HASH' && $_ ne 'general' } keys %$R_cfg;
+    my @parts = split /_/, lc $name;
+    while (@parts) {
+        my $cand = join '_', @parts;
+        return $lc_sections{$cand} if exists $lc_sections{$cand};
+        pop @parts;
+    }
+    return undef;
+}
+
 sub get_runstep_resources {
     my ($name) = @_;
 
     my $def = $runstep{$name} // {};
     my $code = $def->{resources} // {};
 
-    # Config overrides (section [tool] for the tool matching the runstep,
-    # or [general] for the global default)
-    my $tool_cfg = $R_cfg->{$name} // {};
+    # Config overrides: parallel_threads / parallel_ram_gb in the config
+    # section for this runstep's tool -- see get_runstep_config_section.
+    my $section  = get_runstep_config_section($name);
+    my $tool_cfg = defined $section ? ( $R_cfg->{$section} // {} ) : {};
 
     my $threads = $tool_cfg->{parallel_threads}
                // $code->{threads}
@@ -32701,8 +34726,11 @@ sub assess_mash_hits {
         my ($hitscore, $species, $identity, $shared, $outof, $multiplicity, $pval, $refid, $hit_info) 
             = @cols[0..8];  # ignore any extra columns
 
-        # Skip ignored species
-        next if $species =~ /^(Phage|Virus|Plasmid|Viral)/i;
+        # Skip ignored species. process_mashhits_file marks them as
+        # "## Viral ## (...)", "## Phage ## (...)" etc., so match the "##"
+        # marker (the old /^(Phage|Virus|Plasmid|Viral)/ never matched,
+        # and phages ended up in the species list and failed the status).
+        next if $species =~ /^##/;
 
         # Compute classification score: Hitscore column already identity*shared/outof?
         my $classification_score = $hitscore;  

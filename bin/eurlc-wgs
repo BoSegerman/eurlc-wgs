@@ -36,6 +36,7 @@ use File::Spec;
 use File::Basename qw(dirname basename fileparse);
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(move copy);
+use Fcntl qw(:flock);   # LOCK_EX/LOCK_SH for the chewBBACA schema lock
 use Time::HiRes qw(sleep time);   # NOTE: overrides core time() with high-resolution version
 use POSIX qw(strftime setpgid :sys_wait_h);
 use Cwd qw(getcwd abs_path);
@@ -103,6 +104,9 @@ our $MAIN_PID       = $$;                # forked children must not write the EN
 our @S_RUN_ISSUES   = ();                # every ERROR/WARNING logged, for the end-of-run summary
 our $S_ISSUES_PAUSED = 0;                # 1 while re-printing already collected messages
 our @S_TOOLS_NOT_RUN = ();               # filled by report_species_tools_not_run()
+our $S_STATIC_APPLIES = 0;               # 1 while applies_if is asked structurally (graph check,
+                                         # progress denominator): answer from config only, never
+                                         # compute from data (e.g. no jellyfish run)
 
 my $USE_COLOR = (-t STDOUT) ? 1 : 0;
 
@@ -1238,7 +1242,7 @@ $rundata{config}{defaults} = {
         # has well over 40GB of free RAM, and the slightly more precise
         # full-tree placement is wanted.
         checkm_reduced_tree => 1,
-        chewbbaca_mode => "per_species_batch",  # or "per_sample" -- see chewbbaca/chewbbaca_per_sample
+        chewbbaca_mode => "per_sample",  # or "per_species_batch" -- see chewbbaca_per_sample / chewbbaca
         chewbbaca_write_md5 => 0,  # CRC32+SHA256 is the standard pair; MD5 is extra, off by default
         assume_yes => 0, 
         test_software => 1,  
@@ -4559,10 +4563,22 @@ sub test_db_kraken2{
 # downsampling), so this is callable from anywhere, idempotently.
 # compute_targetbases() is purely downsampling-specific, so it gets its own,
 # narrower helper that still ensures genomesize is available first.
+#
+# The values depend on the species (per-species maxdepth/genomesize in the
+# config), and the first call often comes before the species is known
+# (fastp_rawdata's coverage numbers). So the cache remembers which species
+# it was computed for and is recomputed when that changes -- otherwise
+# downsampling would use the generic values. The expensive k-mer estimate
+# (jellyfish) does not depend on the species and is computed only once
+# (kmer_genomesize).
 sub ensure_genomesize_computed {
     my ($samplenr) = @_;
-    return if defined $R_samples->[$samplenr]{estimated_genomesize};
+    my $s  = $R_samples->[$samplenr];
+    my $sp = $s->{main_results}{taxonomy}{species} // "";
+    return if defined $s->{estimated_genomesize} && ( $s->{_genomesize_species} // "" ) eq $sp;
     estimate_genomesize($samplenr);
+    $s->{_genomesize_species} = $sp;
+    delete $s->{targetbases};   # derived from the values just recomputed
 }
 
 sub ensure_targetbases_computed {
@@ -4666,9 +4682,12 @@ sub estimate_genomesize {
         }    
         my $base = fill_placeholders("__BASE__", $samplenr);
 
-        check_conda_tool("jellyfish");
-
-        $genomesize = determine_genomesize_jellyfish($R1, $R2, $base);
+        # k-mer estimate: once per sample (0 = tried and failed)
+        unless ( exists $R_samples->[$samplenr]{kmer_genomesize} ) {
+            check_conda_tool("jellyfish");
+            $R_samples->[$samplenr]{kmer_genomesize} = determine_genomesize_jellyfish($R1, $R2, $base) // 0;
+        }
+        $genomesize = $R_samples->[$samplenr]{kmer_genomesize} || undef;
 
         if (!defined $genomesize) {
             log_message("WARNING: Failed to determine genomesize, falling back to hard coded default value (5 Mb)", "yellow");
@@ -4918,7 +4937,15 @@ sub run_jellyfish {
 
 
    
+    # Reuse the histogram from an earlier run (resume): the k-mer count is
+    # by far the slowest part and the input reads have not changed.
+    if ( -s $hist_file ) {
+        log_message("INFO: Reusing jellyfish histogram [$hist_file]");
+        return $hist_file;
+    }
+
     ensure_dir($jellyfish_path);
+    log_message("NOTICE: $basename: estimating genome size from k-mer counts (jellyfish)...");
     
     my $count_cmd = "conda run -n $R_cfg->{jellyfish}->{env} --no-capture-output bash -c \"$input_cmd | jellyfish count /dev/fd/0 -t $R_cfg->{general}->{threads} -s 100M -o $jf_file -m 21\"";
 
@@ -5615,6 +5642,7 @@ $runstep{$runstep_name} = {
           my ($i) = @_;
           return 0 if $R_samples->[$i]{type} eq 'FASTA';
           return 0 unless $R_cfg->{bbmap}{enabled};
+          return 1 if $S_STATIC_APPLIES;   # data-dependent part decided at run time
           ensure_targetbases_computed($i);
           my $tb = $R_samples->[$i]{targetbases};
           return 0 unless defined $tb && $tb =~ /^\d+(?:\.\d+)?$/ && $tb > 0;
@@ -5940,6 +5968,7 @@ $runstep{$runstep_name} = {
           my ($i) = @_;
           return 0 if $R_samples->[$i]{type} eq 'FASTA';
           return 1 unless $R_cfg->{bbmap}{enabled};
+          return 0 if $S_STATIC_APPLIES;   # complement of downsampling_bbmap's static answer
           ensure_targetbases_computed($i);
           my $tb = $R_samples->[$i]{targetbases};
           return 1 unless defined $tb && $tb =~ /^\d+(?:\.\d+)?$/ && $tb > 0;
@@ -14052,7 +14081,7 @@ $runstep{$runstep_name} = {
       requires   => [ 'main_assembly_present' ],
       produces   => [ 'chewbbaca_batch_done' ],
       applies_if => sub {
-          return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_species_batch') eq 'per_species_batch' ) ? 1 : 0;
+          return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_sample') eq 'per_species_batch' ) ? 1 : 0;
       },
 };
 
@@ -15174,8 +15203,13 @@ $runstep{$runstep_name} = {
       group      => 'chewbbaca_mode',
       requires   => [ 'main_assembly_present', 'species_determined' ],
       produces   => [ 'chewbbaca_per_sample_done' ],
+      rerun_paths => [
+          "__DIR-CLUSTERING__/chewbbaca/*/*/per_sample/rawdata/__BASE__",
+          "__DIR-CLUSTERING__/chewbbaca/*/*/per_sample/json/__BASE__.json",
+          "__DIR-CLUSTERING__/chewbbaca/*/*/per_sample/tsv/__BASE__.profile.tsv",
+      ],
       applies_if => sub {
-          return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_species_batch') eq 'per_sample' ) ? 1 : 0;
+          return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_sample') eq 'per_sample' ) ? 1 : 0;
       },
 };
 
@@ -15442,6 +15476,7 @@ sub preprocess_chewbbaca_per_sample {
     my $species      = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "";
 
     my @schemas = matching_chewbbaca_schemas_for_species($species);
+    my @locked;   # (lockfile, readyfile, command) per schema -- see run_chewbbaca_locked
 
     if (!@schemas) {
         log_message("NOTICE: Sample $sample_name: no chewBBACA schema configured for species [$species], skipping");
@@ -15502,15 +15537,58 @@ sub preprocess_chewbbaca_per_sample {
 
         $command_part = fill_placeholders($command_part, $samplenr, $runstep_name);
 
-        $command = ($command eq "") ? $command_part : "$command ; $command_part";
+        my $lockdir = fill_placeholders("__DIR-CLUSTERING__/chewbbaca/.locks", $samplenr, $runstep_name);
+        ensure_dir($lockdir);
+        push @locked, "$lockdir/$s->{schema_dirname}.lock", "$lockdir/$s->{schema_dirname}.ready", $command_part;
     }
 
-    if ($command eq "") {
+    if (!@locked) {
         postprocess_chewbbaca_per_sample($samplenr);
+        return "";
     }
 
-    return $command;
+    return join("\t", "SUB", "run_chewbbaca_locked", @locked);
 }
+
+# Several samples may run AlleleCall against the same schema at the same
+# time in parallel mode. chewBBACA allows that only with --no-inferred
+# (schema files are then never written) and only once one allele call has
+# created the schema's pre-computed data. So, per schema:
+#   - first call in this output directory, or --no-inferred missing from
+#     chewbbaca.arguments: exclusive lock (runs alone)
+#   - afterwards: shared lock (any number at the same time)
+# The lock files live in the output directory, never in the database.
+# Runs in the forked child (internal sub): only writes files.
+$INTERNAL_SUB{run_chewbbaca_locked} = sub {
+    my (@args) = @_;
+    my $failed = 0;
+    my $no_inferred = ( $R_cfg->{chewbbaca}{arguments} // "" ) =~ /--no-inferred\b/ ? 1 : 0;
+    while ( my ($lockfile, $readyfile, $cmd) = splice(@args, 0, 3) ) {
+        my $lfh;
+        unless ( open( $lfh, '>>', $lockfile ) ) {
+            log_message("WARNING: chewBBACA: cannot open lock file [$lockfile]: $! -- running without lock");
+            undef $lfh;
+        }
+        if ($lfh) {
+            my $exclusive = ( !$no_inferred || !-e $readyfile ) ? 1 : 0;
+            flock( $lfh, $exclusive ? LOCK_EX : LOCK_SH );
+            # Another sample may have finished the first call while we waited.
+            if ( $exclusive && $no_inferred && -e $readyfile ) {
+                flock( $lfh, LOCK_SH );   # downgrade (atomic for flock on Linux)
+            }
+        }
+        log_message("INFO: chewBBACA: $cmd");
+        print {$log_fh_bash} "[" . timestamp_UTC() . "] $cmd\n" if $log_fh_bash;
+        my $rc = system( "bash", "-c", $cmd );
+        if ( $rc == 0 ) {
+            if ( !-e $readyfile && open( my $r, '>', $readyfile ) ) { close $r; }
+        } else {
+            $failed = 1;
+        }
+        close $lfh if $lfh;   # releases the lock
+    }
+    return $failed;
+};
 
 # POST---------------------------------
 
@@ -15522,6 +15600,9 @@ sub postprocess_chewbbaca_per_sample {
     my $runstep_name = "chewbbaca_per_sample";
     my $sample_name  = $R_samples->[$samplenr]{name};
     my $species      = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "";
+    # Folder name as sort_assemblies makes it (Campylobacter_jejuni) -- the
+    # aggregation step chewbbaca_regenerate_per_batch looks there.
+    ( my $species_dirname = $species ) =~ s/\s/_/g;
 
     my @schemas = matching_chewbbaca_schemas_for_species($species);
 
@@ -15536,6 +15617,7 @@ sub postprocess_chewbbaca_per_sample {
         my $found_resultpath = find_chewie_resultpath($rawdata_dir);
         unless ($found_resultpath && -d $found_resultpath) {
             log_message("WARNING: No chewBBACA result found for sample $sample_name, schema $s->{schema_dirname}", "red");
+            set_runtime_issue($samplenr, "warning", "cgMLST (chewBBACA, schema $s->{schema_dirname}) produced no result", $runstep_name);
             next;
         }
 
@@ -15555,7 +15637,7 @@ sub postprocess_chewbbaca_per_sample {
         run_chewbbaca_hashing(
             result_dir        => $chewbbaca_results_path,
             assembly_base_dir => dirname(fill_placeholders("__DIR-ASSEMBLIES__/__BASE__.fasta", $samplenr, $runstep_name)),
-            species_dirname   => $species,
+            species_dirname   => $species_dirname,
             scheme_dirname    => $s->{schema_dirname},
         );
 
@@ -15571,12 +15653,12 @@ sub postprocess_chewbbaca_per_sample {
             next;
         }
 
-        my $cgmlst_record = build_chewbbaca_cgmlst_record($rec, $s->{schema_dirname}, $species);
+        my $cgmlst_record = build_chewbbaca_cgmlst_record($rec, $s->{schema_dirname}, $species_dirname);
 
         my ($crc32_header, $crc32_rows) = read_tsv_rows_by_first_column("$hashed_results_path/results_alleles_crc32.tsv");
 
         write_canonical_chewbbaca_sample_files(
-            species_dirname => $species,
+            species_dirname => $species_dirname,
             schema_dirname  => $s->{schema_dirname},
             sample_name     => $sample_name,
             cgmlst_record   => $cgmlst_record,
@@ -15631,7 +15713,7 @@ $runstep{$runstep_name} = {
       requires   => [ 'chewbbaca_per_sample_done' ],
       produces   => [ 'chewbbaca_regenerated_done' ],
       applies_if => sub {
-          return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_species_batch') eq 'per_sample' ) ? 1 : 0;
+          return ( $R_cfg->{chewbbaca}{enabled} && lc($R_cfg->{general}{chewbbaca_mode} // 'per_sample') eq 'per_sample' ) ? 1 : 0;
       },
 };
 
@@ -15648,6 +15730,7 @@ sub preprocess_chewbbaca_regenerate_per_batch {
     # clear any old results, same as batch-mode postprocessing does
     $rundata{clustering}{results} = [];
     for my $sample (@$R_samples) {
+        delete $sample->{results}{chewbbaca}{schemas};   # rebuilt below (was pushed twice)
         delete $sample->{main_results}{typing}{cgmlst_schemas};
         delete $sample->{main_results}{typing}{cgmlst_call_rate};
         delete $sample->{main_results}{typing}{cgmlst_call_rate_schema};
@@ -16391,10 +16474,32 @@ our @BATCH_RUNSTEPS_POST = qw( multiqc );
 ## real testing or processing begins. Aborts the whole run on any problem
 ## found, rather than letting a misconfigured/newly-added runstep deadlock
 ## silently partway through a long run.
-log_message("NOTICE: Validating pipeline configuration");
-normalize_species_runsteps();   # species => [...] adds implicit requires species_determined
-validate_runstep_graph();
-prepare_rerun();   # rerun=<steps>: remove their results + dependents' (resume mode only)
+# Resuming an output directory that was started with the other chewBBACA
+# mode: keep that mode, otherwise every sample would be called again
+# (per_sample is the default since v1; older runs used per_species_batch).
+# An explicit chewbbaca_mode on the command line always wins.
+if ( is_resume_mode() && ( $rundata{config}{overrides} // "" ) !~ /chewbbaca_mode=/ ) {
+    my $mode  = lc( $R_cfg->{general}{chewbbaca_mode} // "per_sample" );
+    my $clus  = eval { fill_placeholders("__DIR-CLUSTERING__/chewbbaca") } // "";
+    my @batch = $clus ne "" ? glob("$clus/*/*/per_batch/rawdata/chewbbaca_results") : ();
+    my @per   = $clus ne "" ? glob("$clus/*/*/per_sample/rawdata/*") : ();
+    if ( $mode eq "per_sample" && @batch && !@per ) {
+        $R_cfg->{general}{chewbbaca_mode} = "per_species_batch";
+        log_message("NOTICE: Resume: this output directory was analysed with chewbbaca_mode=per_species_batch -- keeping that mode (set chewbbaca_mode=per_sample to change)");
+    } elsif ( $mode eq "per_species_batch" && @per && !@batch ) {
+        $R_cfg->{general}{chewbbaca_mode} = "per_sample";
+        log_message("NOTICE: Resume: this output directory was analysed with chewbbaca_mode=per_sample -- keeping that mode (set chewbbaca_mode=per_species_batch to change)");
+    }
+}
+
+{
+    my $t0 = time();
+    log_message("NOTICE: Validating pipeline configuration...");
+    normalize_species_runsteps();   # species => [...] adds implicit requires species_determined
+    validate_runstep_graph();       # logs the time of each check
+    prepare_rerun();   # rerun=<steps>: remove their results + dependents' (resume mode only)
+    log_message(sprintf("NOTICE: Validating pipeline configuration: done (%.1f s)", time() - $t0));
+}
 
 # Dump the complete runstep dependency graph to the log immediately after
 # validation. This makes it trivial to diagnose requires-configuration bugs
@@ -32397,12 +32502,20 @@ sub validate_exactly_one_applicable_producer {
 # Single entry point -- collects every problem from all three checks before
 # stopping, so a developer sees all issues in one pass.
 sub validate_runstep_graph {
-    my @problems = (
-        validate_requires_have_data_keys(),
-        detect_runstep_dependency_cycles(),
-        validate_exactly_one_applicable_producer(),
-        validate_no_duplicate_hash_keys(),    # catches Perl silent-overwrite bugs
-    );
+    # Structural check: applies_if answers from the config only (see
+    # $S_STATIC_APPLIES) -- no tool may run here, before any sample data.
+    local $S_STATIC_APPLIES = 1;
+    my @problems;
+    for my $check (
+        [ "data-key registry",       \&validate_requires_have_data_keys ],
+        [ "dependency cycles",       \&detect_runstep_dependency_cycles ],
+        [ "one producer per key",    \&validate_exactly_one_applicable_producer ],
+        [ "duplicate hash keys",     \&validate_no_duplicate_hash_keys ],   # Perl silent-overwrite bugs
+    ) {
+        my $t0 = time();
+        push @problems, $check->[1]->();
+        log_message(sprintf("INFO: Graph validation: %-22s %.2f s", $check->[0], time() - $t0));
+    }
 
     return unless @problems;
 
@@ -34901,6 +35014,10 @@ sub precompute_runstep_applicability {
         per_runstep => {},
         applicable  => {},
     );
+
+    # Only the progress-bar denominator: answer from the config, never run
+    # a tool here (the scheduler re-asks applies_if at dispatch time).
+    local $S_STATIC_APPLIES = 1;
 
     for my $i ( 0 .. $#$R_samples ) {
         for my $name ( @$runstep_names ) {

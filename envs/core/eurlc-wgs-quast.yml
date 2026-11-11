@@ -5,5 +5,11 @@ channels:
   - defaults
 dependencies:
   - quast=5.3.0
-  - python>=3.8,<3.13    # constrain Python -- quast 5.3.0 tested against 3.8-3.12
-  - setuptools           # provides distutils shim for Python 3.12+
+  # quast 5.3.0 is tested against Python 3.8-3.12.
+  - python>=3.8,<3.13
+  # Not the pkg_resources problem (see optional/eurlc-wgs-sistr.yml): quast
+  # imports distutils, which Python 3.12 removed from the standard library;
+  # setuptools provides a distutils replacement. Deliberately unpinned --
+  # setuptools 81+ still provides it. If a reinstall ever fails with
+  # "No module named 'pkg_resources'", pin setuptools<81 here too.
+  - setuptools

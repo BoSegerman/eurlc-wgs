@@ -88,6 +88,19 @@ $rundata{timestamps}{pipeline_start}{timestamp_UTC}   = timestamp_UTC();
 $rundata{timestamps}{pipeline_start}{timestamp_local} = timestamp_local(); 
 
 
+# The command line exactly as the user gave it, before any rewriting --
+# shown in the run banner in the log (see write_run_start_banner).
+our @ORIGINAL_ARGV = @ARGV;
+
+# How this run relates to the output directory, set by the overwrite check:
+#   "new"         -- output directory did not exist
+#   "overwritten" -- an existing output directory was removed first
+#   "resumed"     -- existing output directory kept (overwrite=resume)
+our $S_RUN_MODE = "new";
+our $RUN_BANNER_TAG = "EURLC-WGS RUN";   # searchable marker in log/log.txt
+our $S_RUN_NUMBER   = 1;                 # set by write_run_start_banner
+our $MAIN_PID       = $$;                # forked children must not write the END banner
+
 my $USE_COLOR = (-t STDOUT) ? 1 : 0;
 
 foreach my $arg (@ARGV) {
@@ -683,17 +696,21 @@ sub group_settled {
 # scheduler would run the selection as soon as the FIRST group member
 # finished, before slower members had a chance (in sequential mode the
 # list order already guarantees it).
-$data_key{all_assemblers_settled} = { check => sub { group_settled('assembler',          $_[0]) } };
-$data_key{all_mlst_settled}       = { check => sub { group_settled('mlst_determination', $_[0]) } };
-$data_key{all_amr_settled}        = { check => sub { group_settled('amr',                $_[0]) } };
-$data_key{all_serotyping_settled} = { check => sub { group_settled('serotyping',         $_[0]) } };
+$data_key{all_assemblers_settled} = { check => sub { group_settled('assembler',          $_[0]) }, derived_from => { group => 'assembler' } };
+$data_key{all_mlst_settled}       = { check => sub { group_settled('mlst_determination', $_[0]) }, derived_from => { group => 'mlst_determination' } };
+$data_key{all_amr_settled}        = { check => sub { group_settled('amr',                $_[0]) }, derived_from => { group => 'amr' } };
+$data_key{all_serotyping_settled} = { check => sub { group_settled('serotyping',         $_[0]) }, derived_from => { group => 'serotyping' } };
 
 # Kraken2 contamination screening has run (or does not apply). Species-
 # specific typing steps wait for it, so they only start once both the
 # species call and the contamination picture are known.
-$data_key{kraken2_settled} = { check => sub { runstep_settled('Kraken2', $_[0]) } };
+$data_key{kraken2_settled} = { check => sub { runstep_settled('Kraken2', $_[0]) }, derived_from => { runstep => 'Kraken2' } };
+# (derived_from: keys that no runstep "produces" but that are computed from
+# other runsteps' results -- used by rerun= to find dependent steps.)
+$data_key{any_assembler_done}{derived_from} = { group => 'assembler' };
 
 $data_key{any_mlst_done} = {
+    derived_from => { group => 'mlst_determination' },
     check => sub {
         my ($i) = @_;
         for my $k (qw(mlst_assembled fastmlst_assembled)) {
@@ -703,6 +720,7 @@ $data_key{any_mlst_done} = {
     },
 };
 $data_key{any_amr_done} = {
+    derived_from => { group => 'amr' },
     check => sub {
         my ($i) = @_;
         for my $k (qw(amrfinderplus_done resfinder_fasta_done resfinder_fastq_done)) {
@@ -1175,7 +1193,15 @@ $rundata{config}{defaults} = {
         # the runsteps you care about.
         parallel_default_threads => 99,
         parallel_default_ram_gb  => 999,
+        # What to do when the output directory already exists:
+        #   prompt -- ask (default); yes -- remove it and start over;
+        #   no -- stop; resume -- keep it and only run what is missing
+        #   ("extend" is accepted as an older name for resume).
         overwrite  => "prompt",
+        # Comma-separated runsteps to run again in an existing output
+        # directory, together with every step that depends on them.
+        # Implies overwrite=resume. Example: rerun=lissero  or  rerun=spades
+        rerun      => "",
         recursive  => 0,
         verbose    => 0,
         fastq      => 1,   # analyze FASTQ input -- see --fastq/--fasta in the manual
@@ -1976,6 +2002,10 @@ COMMON OPTIONS:
     datadir=<dir>                Use a specific input data directory
     threads=<n>                  Number of threads
     --overwrite                  Overwrite existing results
+    --resume                     Continue in an existing output directory, only
+                                 running what is missing (overwrite=resume)
+    rerun=<step>[,<step>...]     Run these steps again in an existing output
+                                 directory, plus every step that depends on them
     --recursive                  Scan directories recursively for input files
     --verbose                    Verbose output
     --no-color / --color         Force-disable / force-enable colored output
@@ -2485,6 +2515,11 @@ my %postmountcheckhandlers = (
         $R_cfg->{general}{"overwrite"} = "yes"; 
         log_message("NOTICE: Overriding from launch-arguments:overwrite=yes");
         $rundata{config}{overrides} .= "overwrite=yes\n";
+    },
+    resume => sub {
+        $R_cfg->{general}{"overwrite"} = "resume";
+        log_message("NOTICE: Overriding from launch-arguments:overwrite=resume");
+        $rundata{config}{overrides} .= "overwrite=resume\n";
     },
     # The three below are intentional no-ops: each flag is already acted on
     # elsewhere (see the early color/runmode checks near the top of the
@@ -3067,6 +3102,23 @@ unless ( any_input_files_exist( getdir("in"), $R_cfg->{"general"}->{"recursive"}
 #------------------------
 # base path
 
+# overwrite=extend is the older name of overwrite=resume; rerun=<steps>
+# implies resume (it only makes sense in an existing output directory).
+{
+    my $ow = lc( $R_cfg->{general}{overwrite} // "prompt" );
+    if ($ow eq "extend") {
+        log_message("NOTICE: overwrite=extend is now called overwrite=resume -- treating it as resume");
+        $R_cfg->{general}{overwrite} = "resume";
+    }
+    if ( ( $R_cfg->{general}{rerun} // "" ) =~ /\S/ && lc( $R_cfg->{general}{overwrite} ) ne "resume" ) {
+        log_message("NOTICE: rerun=$R_cfg->{general}{rerun} given -- using overwrite=resume");
+        $R_cfg->{general}{overwrite} = "resume";
+    }
+    if ( is_resume_mode() && !-d peekdir("out") ) {
+        graceful_die("overwrite=resume / rerun= needs an existing output directory, but [" . peekdir("out") . "] does not exist");
+    }
+}
+
 if( -d peekdir("out") ){
 
   my $outdirname =  basename(peekdir("out"));
@@ -3089,6 +3141,7 @@ if( -d peekdir("out") ){
     
      execute_and_log( "rm -r '" . getdir("out") . "'" );
      getdir("out");  #creates the output dir
+     $S_RUN_MODE = "overwritten";
       
   }  
   #--- overwrite mode
@@ -3096,20 +3149,22 @@ if( -d peekdir("out") ){
      log_message("NOTICE: Output directory already exists.. removing old data");
      execute_and_log( "rm -r '" . getdir("out") . "'" );
      getdir("out");  #creates the output dir
+     $S_RUN_MODE = "overwritten";
   }    
   #--- no-overwrite mode
   elsif( lc($R_cfg->{"general"}->{"overwrite"})  eq  "no") {
      log_message( "WARNING: Output directory $outdirname already exists. (Overwrite mode is set to 'no')");
      graceful_die("Output directory [$outdirname] already exists and overwrite mode is 'no'");
   } 
-  #--- extend mode   - experimental!  
-  elsif( lc($R_cfg->{"general"}->{"overwrite"})  eq  "extend") {
-     log_message( "NOTICE: Output directory $outdirname already exists.- Extending analysis");
+  #--- resume mode: keep everything, each runstep skips what already exists
+  elsif( is_resume_mode() ) {
+     log_message( "NOTICE: Output directory $outdirname already exists -- resuming (existing results are reused, only missing steps are run)", "yellow");
+     $S_RUN_MODE = "resumed";
   }      
   #--- unrecognized value -- don't silently do nothing and leave the
   #    existing output directory in an undecided state
   else {
-     graceful_die("Output directory [$outdirname] already exists and general.overwrite has an unrecognized value [" . $R_cfg->{"general"}->{"overwrite"} . "] -- expected one of: prompt, yes, no, extend");
+     graceful_die("Output directory [$outdirname] already exists and general.overwrite has an unrecognized value [" . $R_cfg->{"general"}->{"overwrite"} . "] -- expected one of: prompt, yes, no, resume");
   }
 }
 else{
@@ -3124,6 +3179,25 @@ getdir("out,log");      # creates out/log/  -- initiate_logfile() needs this
 getdir("out,control");  # creates out/control/  -- control channel spool dir
 
 initiate_logfile();
+if ( $S_RUN_MODE eq "resumed" ) {
+    # Keep the program/database/config logs of the earlier run: they are
+    # rewritten below for this run, but reused results came from that one.
+    my $vdir = getdir("out,log") . "/versioning_explicit";
+    if (-d $vdir) {
+        my $prev = $S_RUN_NUMBER - 1;
+        my $mt   = POSIX::strftime("%Y%m%d-%H%M%S", localtime( ( stat($vdir) )[9] ));
+        my $dest = getdir("out,log") . "/previous_runs/run$prev" . "_$mt";
+        make_path( getdir("out,log") . "/previous_runs" );
+        if ( move($vdir, "$dest") ) {
+            log_message("NOTICE: Version logs of the earlier run kept in log/previous_runs/" . basename($dest));
+        } else {
+            log_message("WARNING: Could not move $vdir to $dest: $!", "yellow");
+        }
+    }
+    my $rr = $R_cfg->{general}{rerun} // "";
+    log_message("NOTICE: Resumed run #$S_RUN_NUMBER in this output directory" . ( $rr =~ /\S/ ? " (rerun: $rr)" : "" )
+              . " -- search the log for \"$RUN_BANNER_TAG\" to find each (re)start", "yellow");
+}
 
 
 
@@ -7854,6 +7928,7 @@ $runstep{$runstep_name} = {
       message    => "Running Spades...",
       long_name  => "Spades",
       output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/Spades",
+      rerun_paths => [ "__DIR-ALTERNATIVE-ASSEMBLIES__/Spades/__BASE__" ],   # rerun=: also remove the work dir
       resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.spades.fasta",
       resultfiles_status => "NA",
 
@@ -8035,6 +8110,7 @@ sub define_shovill_runstep {
         message    => "Running $label...",
         long_name  => $label,
         output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/" . ucfirst($name),
+        rerun_paths => [ "__DIR-ALTERNATIVE-ASSEMBLIES__/" . ucfirst($name) . "/__BASE__" ],
         resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.$name.fasta",
         resultfiles_status => "NA",
 
@@ -8130,6 +8206,7 @@ $runstep{$runstep_name} = {
       message    => "Running Skesa...",
       long_name  => "Skesa",
       output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/Skesa",
+      rerun_paths => [ "__DIR-ALTERNATIVE-ASSEMBLIES__/Skesa/__BASE__" ],   # rerun=: also remove the work dir
       resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta",
       resultfiles_status => "NA",
 
@@ -8306,6 +8383,7 @@ $runstep{$runstep_name} = {
       message    => "Running Unicycler...",
       long_name  => "Unicycler",
       output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/Unicycler",
+      rerun_paths => [ "__DIR-ALTERNATIVE-ASSEMBLIES__/Unicycler/__BASE__" ],   # rerun=: also remove the work dir
       resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.unicycler.fasta",
       resultfiles_status => "NA",
 
@@ -8708,6 +8786,8 @@ $runstep{$runstep_name} = {
       message    => "Running Quast...",
       long_name  => "Quast",
       output_dir => "__DIR-QC3__/quast",
+      # rerun=: the main report dir and the per-assembler alternative reports
+      rerun_paths => [ "__DIR-QC3__/quast/__BASE__", "__DIR-QC3__/quast/alternative_assemblies/__BASE__-*" ],
       resultfile => "__DIR-QC3__/quast/__BASE__/report.txt",
       alt_resultfile => "__DIR-QC3__/quast/alternative_assemblies/__BASE__-__ASSEMBLER__/report.txt",
       resultfiles_status => "NA",
@@ -16040,44 +16120,67 @@ sub _cleanup_fastq_dir {
 
 log_message("NOTICE: collecting sample information.");
 
-# Only generate filelist if overwrite mode allows it
-if ($R_cfg->{"general"}->{"overwrite"} ne "extend" || ! -f getdir("out,log") . "/filelist_fastq.txt") {
-
-    log_message("INFO: Preparing list of input files");
-    
+# The sample set of an output directory is fixed by its first run. A
+# resumed run (overwrite=resume / rerun=) reuses the saved file lists in
+# log/ and never adds samples: results from different runs could otherwise
+# come from different program and database versions. Input files that
+# have appeared since are reported, not analysed -- analyse them in a new
+# run (and combine runs afterwards).
+{
     my $recursive_flag = $R_cfg->{"general"}->{"recursive"} ? 1 : 0;
-
-    if ($recursive_flag) {
-        log_message("NOTICE: Recursive search enabled -- scanning [" . getdir("in") . "] and all subdirectories for input files. This may take a while for large directory trees.");
-    }
-
-    my @list_off_files_fastq = $R_cfg->{"general"}{"fastq"} ? prepare_fastq_files(getdir("in"),$recursive_flag) : ();
-    my @list_off_files_fasta = $R_cfg->{"general"}{"fasta"} ? prepare_fasta_files(getdir("in"),$recursive_flag) : ();
-    
     my $filelist_path_fastq = getdir("out,log") . "/filelist_fastq.txt";
-    open(my $fh, '>', $filelist_path_fastq) or graceful_die("Could not open '$filelist_path_fastq' for writing: $!");
-
-    foreach my $file (@list_off_files_fastq) {
-        print $fh "$file\n";
-    }
-    close($fh);
-
-    log_message("INFO: Wrote ".scalar(@list_off_files_fastq)." fastq files to '$filelist_path_fastq'");
-
-    ## FASTA
     my $filelist_path_fasta = getdir("out,log") . "/filelist_fasta.txt";
-    open( $fh, '>', $filelist_path_fasta) or graceful_die("Could not open '$filelist_path_fasta' for writing: $!");
 
-    foreach my $file (@list_off_files_fasta) {
-       print $fh "$file\n";
+    if ( !is_resume_mode() ) {
+
+        log_message("INFO: Preparing list of input files");
+
+        if ($recursive_flag) {
+            log_message("NOTICE: Recursive search enabled -- scanning [" . getdir("in") . "] and all subdirectories for input files. This may take a while for large directory trees.");
+        }
+
+        my @list_off_files_fastq = $R_cfg->{"general"}{"fastq"} ? prepare_fastq_files(getdir("in"),$recursive_flag) : ();
+        my @list_off_files_fasta = $R_cfg->{"general"}{"fasta"} ? prepare_fasta_files(getdir("in"),$recursive_flag) : ();
+
+        open(my $fh, '>', $filelist_path_fastq) or graceful_die("Could not open '$filelist_path_fastq' for writing: $!");
+        print $fh "$_\n" for @list_off_files_fastq;
+        close($fh);
+        log_message("INFO: Wrote ".scalar(@list_off_files_fastq)." fastq files to '$filelist_path_fastq'");
+
+        open($fh, '>', $filelist_path_fasta) or graceful_die("Could not open '$filelist_path_fasta' for writing: $!");
+        print $fh "$_\n" for @list_off_files_fasta;
+        close($fh);
+        log_message("INFO: Wrote ".scalar(@list_off_files_fasta)." fasta files to '$filelist_path_fasta'");
     }
-    close($fh);
-    log_message("INFO: Wrote ".scalar(@list_off_files_fasta)." fasta files to '$filelist_path_fasta'");
+    else {
+        my @missing_lists = grep { !-f $_ } ($filelist_path_fastq, $filelist_path_fasta);
+        if (@missing_lists) {
+            graceful_die("Cannot resume: the sample list of the earlier run is missing ("
+                       . join(", ", map { basename($_) } @missing_lists) . " in " . getdir("out,log") . "). "
+                       . "Without it the sample set cannot be guaranteed to be the same -- start a new run instead.");
+        }
+        log_message("NOTICE: Resuming with the sample list of the earlier run (log/filelist_fastq.txt, log/filelist_fasta.txt)");
 
-
+        # Report input files that are not part of this output directory.
+        my %saved;
+        for my $f ($filelist_path_fastq, $filelist_path_fasta) {
+            open(my $in, '<', $f) or next;
+            while (my $l = <$in>) { chomp $l; $saved{$l} = 1 if $l ne ""; }
+            close $in;
+        }
+        my @now = (
+            ( $R_cfg->{"general"}{"fastq"} ? prepare_fastq_files(getdir("in"), $recursive_flag) : () ),
+            ( $R_cfg->{"general"}{"fasta"} ? prepare_fasta_files(getdir("in"), $recursive_flag) : () ),
+        );
+        my @new = grep { !$saved{$_} } @now;
+        if (@new) {
+            my $n = scalar @new;
+            my @show = @new[0 .. ($n > 10 ? 9 : $n - 1)];
+            log_message("WARNING: $n input file(s) in [" . getdir("in") . "] are not part of this output directory and are NOT analysed in a resumed run"
+                      . " (analyse them in a new run): " . join(", ", map { basename( (split /\t/, $_)[0] ) } @show) . ( $n > 10 ? ", ..." : "" ), "yellow");
+        }
+    }
 }
-
-
 
 $rundata{stats}{PE}    //= 0;
 $rundata{stats}{SE}    //= 0;
@@ -16253,6 +16356,7 @@ our @BATCH_RUNSTEPS_POST = qw( multiqc );
 log_message("NOTICE: Validating pipeline configuration");
 normalize_species_runsteps();   # species => [...] adds implicit requires species_determined
 validate_runstep_graph();
+prepare_rerun();   # rerun=<steps>: remove their results + dependents' (resume mode only)
 
 # Dump the complete runstep dependency graph to the log immediately after
 # validation. This makes it trivial to diagnose requires-configuration bugs
@@ -19394,7 +19498,7 @@ sub print_main_html_report {
 
     my $amr_table = main_report_section_amr();
 
-    my $config_seal_html = get_config_seal_html_for_report();
+    my $config_seal_html = get_config_seal_html_for_report() . get_resume_html_for_report();
 
     # Inject seal banner CSS and the banner itself into the report HTML.
     # We do this via post-processing rather than relying on the template
@@ -25524,6 +25628,14 @@ Kraken2 => {
         ],
     },
 
+    run_history => {
+        title => "Run history",
+        category => "",
+        fields => [
+            { label => "Results reused from an earlier run", path => [ "reused_steps_text" ], hide_if_missing => 1 },
+        ],
+    },
+
     # v1 typing tools
     sistr => {
         title => "Salmonella serotyping by SISTR",
@@ -25802,6 +25914,7 @@ sub get_detailed_report_runstep_order {
             resfinder_fasta
             chewbbaca
             multiqc
+            run_history
         )
     ];
 }
@@ -27840,6 +27953,97 @@ sub guess_illumina_instrument_type {
 
 ####################################################################################################
 
+####################################################################################################
+## Run banners
+##
+## The main log (and the tool-output logs) are appended to across runs in
+## the same output directory -- a resumed run (overwrite=resume / rerun=)
+## continues the same files. Every run therefore starts with a banner that
+## stands out and can be searched for:
+##
+##     grep -n "EURLC-WGS RUN" log/log.txt
+##
+## lists every start and end, so you can jump from one (re)start to the
+## next. The banner shows the run number in this output directory, how the
+## run relates to it (new / overwritten / resumed / rerun), and the command
+## line exactly as typed.
+
+# ($RUN_BANNER_TAG and $S_RUN_NUMBER are declared near the top of the
+# script, next to $S_RUN_MODE -- they are used before execution reaches
+# this point.)
+
+sub _shell_quote_arg {
+    my ($a) = @_;
+    return $a if $a =~ m{^[\w\-./:=,@+%]+$};
+    (my $q = $a) =~ s/'/'\\''/g;
+    return "'$q'";
+}
+
+sub write_run_start_banner {
+    my ($logfile) = @_;
+
+    # Run number = earlier start banners in this log + 1.
+    my $previous = 0;
+    if ( open(my $in, '<', $logfile) ) {
+        while (my $l = <$in>) { $previous++ if index($l, "$RUN_BANNER_TAG START") >= 0; }
+        close $in;
+    }
+    $S_RUN_NUMBER = $previous + 1;
+
+    my $mode_text =
+        $S_RUN_MODE eq "resumed"     ? "RESUMED in existing output directory -- existing results are reused"
+      : $S_RUN_MODE eq "overwritten" ? "NEW (existing output directory was removed first)"
+      :                                "NEW";
+    my $rerun = $R_cfg->{general}{rerun} // "";
+    $mode_text .= "; rerun requested for: $rerun" if $rerun =~ /\S/;
+
+    my $cmd = join(" ", basename($0), map { _shell_quote_arg($_) } @ORIGINAL_ARGV);
+    my $line = "#" x 100;
+
+    my @banner = (
+        "",
+        $line,
+        "####  $RUN_BANNER_TAG START  #$S_RUN_NUMBER   " . timestamp_local() . "   (UTC " . timestamp_UTC() . ")",
+        "####  Mode:      $mode_text",
+        "####  Command:   $cmd",
+        "####  Directory: " . getcwd(),
+        "####  User/host: " . ( detect_username() || "?" ) . "@" . ( detect_hostname() || "?" )
+            . "   pipeline " . ( $rundata{pipeline_info}{name} // "eurlc-wgs" ) . " " . ( $rundata{pipeline_info}{version} // "" ),
+        $line,
+        "",
+    );
+    my $text = join("\n", @banner) . "\n";
+
+    print {$log_fh}      $text;
+    print {$log_fh_bash} $text if $log_fh_bash;
+    for my $f ( "$S_logdir/stdout.txt", "$S_logdir/stderr.txt" ) {
+        if ( open(my $fh, '>>', $f) ) { print {$fh} $text; close $fh; }
+    }
+}
+
+# End marker, written from the END block (normal exit, errors and Ctrl+C).
+sub write_run_end_banner {
+    my ($exit_code) = @_;
+    return unless $logfile_open && $log_fh;
+    my $elapsed = time() - ( $rundata{timestamps}{pipeline_start}{time_value} // time() );
+    my $status  = $exit_code == 0 ? "finished OK"
+                : $exit_code == 3 ? "finished, some samples abandoned"
+                : $exit_code == 2 ? "nothing to analyze"
+                : $exit_code == 4 ? "interrupted"
+                :                   "stopped with an error";
+    my $text = "\n####  $RUN_BANNER_TAG END    #$S_RUN_NUMBER   " . timestamp_local()
+             . "   exit code $exit_code ($status), elapsed " . format_elapsed($elapsed) . "\n"
+             . ( "#" x 100 ) . "\n\n";
+    print {$log_fh} $text;
+    print {$log_fh_bash} $text if $log_fh_bash;
+}
+
+END {
+    my $code = $?;
+    eval { write_run_end_banner($code) } if defined $MAIN_PID && $$ == $MAIN_PID;
+    $? = $code;
+}
+
 sub initiate_logfile {
     my $logfile = getdir("out,log") . "/log.txt";
     my $bash_logfile = getdir("out,log") . "/bash_commands.log";
@@ -27854,6 +28058,10 @@ sub initiate_logfile {
     $log_fh_bash->autoflush(1);
         
     $logfile_open = 1;
+
+    # Clear, searchable start marker for this run (the log is appended to
+    # across resumed runs). Also written to the tool output logs.
+    write_run_start_banner($logfile);
 
     print {$log_fh}  "-------------------------------------\n" .
                      "Commands executed before the logfile was opened:\n" . 
@@ -32217,6 +32425,8 @@ sub run_data_driven_runsteps {
             next;
         }
 
+        note_if_reused($i, $name) unless defined $command && $command ne "";
+
         if ( defined $command && $command ne "" ) {
             run_step(
                 name       => $def->{long_name},
@@ -32494,7 +32704,7 @@ sub run_step {
     my $formated_msg = log_progress($samplenr, $message);
 
     
-    if (should_run($resultfile)) {
+    {
 
       # Control channel check (§11.3) -- honour any pending pause/resume/
       # terminate commands before starting a new piece of work. Called here
@@ -32515,22 +32725,192 @@ sub run_step {
           elapsed_s => $result ? $result->{elapsed_s} : undef,
       );
 
-    } else {
-      log_message("NOTICE: Skipping step: $name. Already exists (extend mode)");   
     }
 
 }
 
 #########################################################################################################
-sub should_run {
-    my ($resultfilepath) = @_;
+## rerun=<step>[,<step>...]
+##
+## Runs the named runsteps again in an existing output directory, together
+## with every runstep that depends on them, for all samples. It works by
+## removing their result files before the run: each runstep's preprocessing
+## then finds nothing and runs the tool, while everything else is reused
+## (resume mode). Dependents come from the requires/produces graph,
+## including composite keys via data_key{...}{derived_from}.
+##
+## What is removed per (sample, runstep): the resultfile; the output_dir if
+## it is per sample (contains __BASE__); and any rerun_paths (contract
+## field, globs allowed). Only paths inside the output directory are ever
+## touched. Selection/check steps without result files simply run again.
+## Batch steps whose results cannot be resolved per sample (e.g. chewBBACA
+## per species) get a warning telling what to remove by hand.
 
-    # if in extend mode and result file already exists → skip
-    if (lc($R_cfg->{general}->{overwrite}) eq "extend" && -f $resultfilepath) {
-        return 0;  # should not run
+# Runsteps whose results are invalidated when the steps in @$start rerun.
+sub rerun_closure {
+    my ($start) = @_;
+    my %in = map { $_ => 1 } @$start;
+    my @all = ( @PER_SAMPLE_RUNSTEPS, @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST );
+
+    my %producers;   # key -> [runsteps]
+    for my $n (@all) { push @{ $producers{$_} }, $n for @{ $runstep{$n}{produces} // [] }; }
+    my $sources = sub {
+        my ($key) = @_;
+        my @s = @{ $producers{$key} // [] };
+        my $d = $data_key{$key}{derived_from};
+        if ($d) {
+            push @s, group_members($d->{group}) if $d->{group};
+            push @s, $d->{runstep}              if $d->{runstep};
+        }
+        return @s;
+    };
+
+    my $changed = 1;
+    while ($changed) {
+        $changed = 0;
+        for my $n (@all) {
+            next if $in{$n};
+            for my $key ( @{ $runstep{$n}{requires} // [] } ) {
+                if ( grep { $in{$_} } $sources->($key) ) { $in{$n} = 1; $changed = 1; last; }
+            }
+        }
+    }
+    return grep { $in{$_} } @all;   # in run order
+}
+
+sub prepare_rerun {
+    my $spec = $R_cfg->{general}{rerun} // "";
+    return unless $spec =~ /\S/;
+
+    my @all   = ( @PER_SAMPLE_RUNSTEPS, @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST );
+    my %known = map { $_ => 1 } @all;
+    my @asked = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, $spec;
+    my @unknown = grep { !$known{$_} } @asked;
+    if (@unknown) {
+        graceful_die("rerun=: unknown runstep(s): " . join(", ", @unknown)
+                   . ". Valid names: " . join(" ", @all));
     }
 
-    return 1;  # should run
+    my @steps = rerun_closure(\@asked);
+    my %asked = map { $_ => 1 } @asked;
+    my @dependents = grep { !$asked{$_} } @steps;
+
+    log_message("NOTICE: rerun: " . join(", ", @asked)
+              . ( @dependents ? " -- and the steps that depend on it: " . join(", ", @dependents) : "" ), "yellow");
+
+    # Steps that are switched off for every sample will not run at all.
+    for my $n (@asked) {
+        my $def = $runstep{$n};
+        next unless exists $def->{applies_if};
+        my $any = grep { eval { $def->{applies_if}->($_) } } 0 .. $#$R_samples;
+        log_message("WARNING: rerun: [$n] does not apply to any sample with the current configuration"
+                  . " (switched off?) -- it will not run", "yellow") unless $any;
+    }
+
+    my $outroot = abs_path( getdir("out") ) // getdir("out");
+    my ($n_removed, @manual) = (0);
+
+    my $remove = sub {
+        my ($path) = @_;
+        my $abs = abs_path($path) // $path;
+        unless ( index($abs, "$outroot/") == 0 ) {
+            log_message("WARNING: rerun: not removing [$path] -- outside the output directory", "red");
+            return;
+        }
+        if    (-d $abs) { remove_tree($abs); }
+        elsif (-e $abs) { unlink $abs; }
+        else            { return; }
+        log_message("INFO: rerun: removed $abs");
+        $n_removed++;
+    };
+
+    for my $n (@steps) {
+        my $def      = $runstep{$n};
+        my $is_batch = !grep { $_ eq $n } @PER_SAMPLE_RUNSTEPS;
+        my @templates;
+        push @templates, $def->{resultfile} if ( $def->{resultfile} // "" ) ne "";
+        push @templates, $def->{output_dir} if !$is_batch && ( $def->{output_dir} // "" ) =~ /__BASE__/;
+        push @templates, @{ $def->{rerun_paths} // [] };
+        next unless @templates;
+
+        my $unresolved = 0;
+        for my $i ( 0 .. $#$R_samples ) {
+            for my $tpl (@templates) {
+                my $path = eval { fill_placeholders($tpl, $i, $n) } // "";
+                if ( $path eq "" || $path =~ /__[A-Z0-9-]+__/ ) { $unresolved = 1; next; }
+                $remove->($_) for ( $path =~ /[*?\[]/ ? glob($path) : ($path) );
+            }
+        }
+        if ($is_batch && $unresolved) {
+            push @manual, "$n (" . ( $def->{output_dir} // "?" ) . ")";
+        }
+    }
+
+    log_message("NOTICE: rerun: removed $n_removed result file(s)/folder(s); the steps above will run again, everything else is reused");
+    if (@manual) {
+        log_message("WARNING: rerun: batch step results not removed automatically -- remove them by hand if they must be redone: "
+                  . join("; ", @manual), "yellow");
+    }
+    $rundata{rerun}{requested} = \@asked;
+    $rundata{rerun}{steps}     = \@steps;
+}
+
+#########################################################################################################
+## Provenance in resumed runs
+##
+## A runstep whose preprocessing finds an existing result (and returns "")
+## and whose result file is older than this run was reused from an earlier
+## run. Recorded per sample in results.run_history.reused_steps and summed
+## up in the main report banner.
+
+sub note_if_reused {
+    my ($i, $name) = @_;
+    return unless $S_RUN_MODE eq "resumed";
+    my $tpl = $runstep{$name}{resultfile} // "";
+    return if $tpl eq "";
+    my $path = eval { fill_placeholders($tpl, $i, $name) } // "";
+    return if $path eq "" || !-e $path;
+    my $start = $rundata{timestamps}{pipeline_start}{time_value} // time();
+    return unless ( stat($path) )[9] < $start;
+    my $h    = $R_samples->[$i]{results}{run_history} //= {};
+    my $list = $h->{reused_steps} //= [];
+    push @$list, $name unless grep { $_ eq $name } @$list;
+    $h->{reused_steps_text} = join(", ", @$list);
+}
+
+# Banner for the main HTML report (resumed runs only).
+sub get_resume_html_for_report {
+    return "" unless $S_RUN_MODE eq "resumed";
+    my %steps; my $n_samples = 0;
+    for my $s (@$R_samples) {
+        my $l = $s->{results}{run_history}{reused_steps} or next;
+        next unless @$l;
+        $n_samples++;
+        $steps{$_}++ for @$l;
+    }
+    my $rerun = $R_cfg->{general}{rerun} // "";
+    my $txt = "Resumed run (#$S_RUN_NUMBER in this output directory)"
+            . ( $rerun =~ /\S/ ? " &mdash; rerun: <b>" . encode_entities($rerun) . "</b>" : "" );
+    my $detail = %steps
+        ? "Results reused from earlier run(s) for $n_samples sample(s): " . encode_entities( join(", ", sort keys %steps) )
+          . ". Program and database versions of earlier runs: log/previous_runs/."
+        : "No earlier results were reused.";
+    return <<"HTML";
+<div class="seal-banner seal-warning">
+  <span class="seal-icon">&#8635;</span>
+  <span class="seal-label">$txt<br><small style='opacity:0.75'>$detail</small></span>
+</div>
+HTML
+}
+
+#########################################################################################################
+# Resume mode: keep the existing output directory; every runstep's
+# preprocessing finds its existing result file and goes straight to
+# result_parsing, so only missing steps are run. (overwrite=extend is the
+# older name and is normalised to "resume" at startup.)
+sub is_resume_mode {
+    my $ow = lc( $R_cfg->{general}{overwrite} // "" );
+    return ( $ow eq "resume" || $ow eq "extend" ) ? 1 : 0;
 }
 
 ###################################################################################################
@@ -32831,6 +33211,7 @@ sub run_parallel_runsteps {
                 # Empty command: step handled internally by preprocessing
                 # (e.g. "already done" path calls result_parsing itself).
                 if (!defined $command || $command eq "") {
+                    note_if_reused($i, $name);
                     $S_par_done{"$i,$name"} = 1;
                     $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
                     $done_count++;

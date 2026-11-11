@@ -4,3 +4,7 @@ channels:
   - bioconda
 dependencies:
   - lissero=0.4.9
+  # lissero 0.4.9 imports pkg_resources, which setuptools removed in v81
+  # (install failed with "No module named 'pkg_resources'", Nov 2026).
+  # Remove this pin when lissero is upgraded -- test without it first.
+  - setuptools<81

@@ -793,42 +793,12 @@ if(peekdir("conda") eq ""){
 #----------------------
 # output dir
 
-setdir("out" , peekdir("in") . "/$rundata{pipeline_info}{name}" . ( $S_QCSCREEN ? "_qcscreen" : "" ));
-
-#----------------------
-#output sections
-
-setdir("out,results"     , peekdir("out") . "/results"); 
-setdir("out,report"      , peekdir("out") . "/report"); 
-setdir("out,large_files" , peekdir("out") . "/large_files"); 
-setdir("out,data"        , peekdir("out") . "/data"); 
-setdir("out,log"         , peekdir("out") . "/log");
-setdir("out,control"     , peekdir("out") . "/control");   # control channel spool dir (§11.3)
-
-setdir("out,report,assets"      , peekdir("out,report") . "/assets"); 
-setdir("out,report,samples_html"      , peekdir("out,report") . "/samples_html"); 
-setdir("out,report,samples_pdf"      , peekdir("out,report") . "/samples_pdf"); 
-setdir("out,report,clustering"      , peekdir("out,report") . "/clustering"); 
-setdir("out,report,tables"      , peekdir("out,report") . "/tables"); 
-
-setdir("out,results,qc"         , peekdir("out,results") . "/qc");  
-setdir("out,results,assemblies" , peekdir("out,results") . "/assemblies");
-setdir("out,results,typing"     , peekdir("out,results") . "/typing");
-setdir("out,results,clustering" , peekdir("out,results") . "/clustering");
-setdir("out,results,amr"        , peekdir("out,results") . "/amr");
-
-setdir("out,results,assemblies,annotated"              , peekdir("out,results,assemblies") . "/annotated"); 
-setdir("out,results,assemblies,alternative_assemblies" , peekdir("out,results,assemblies") . "/alternative_assemblies"); 
-
-setdir("out,results,qc,stage1_rawdata"     , peekdir("out,results,qc") . "/stage1_rawdata"); 
-setdir("out,results,qc,stage2_trimmeddata" , peekdir("out,results,qc") . "/stage2_trimmeddata"); 
-setdir("out,results,qc,stage3_assemblies"  , peekdir("out,results,qc") . "/stage3_assemblies"); 
-setdir("out,results,qc,stage4_analysis"    , peekdir("out,results,qc") . "/stage4_analysis"); 
-
-setdir("out,large_files,fastq"      , peekdir("out,large_files") . "/fastq");
-
-setdir("out,large_files,fastq,trimmed"             , peekdir("out,large_files,fastq") . "/trimmed");
-setdir("out,large_files,fastq,trimmed_downsampled" , peekdir("out,large_files,fastq") . "/trimmed_downsampled"); 
+# Default: <data folder>/eurlc-wgs (eurlc-wgs_qcscreen for --qc-screen).
+# Set again after the arguments are read when datadir= or outdir= is given
+# (see "Output folder" after the premount handlers).
+our $S_OUTDIR_ARG;   # outdir=<folder>, absolute; undef = default location
+our $S_DEFAULT_OUT_NAME = $rundata{pipeline_info}{name} . ( $S_QCSCREEN ? "_qcscreen" : "" );
+set_output_paths( peekdir("in") . "/$S_DEFAULT_OUT_NAME" );
 
 ###################################################################################################
 ## capture output suffixes
@@ -1257,6 +1227,11 @@ $rundata{config}{defaults} = {
         # has well over 40GB of free RAM, and the slightly more precise
         # full-tree placement is wanted.
         checkm_reduced_tree => 1,
+        # Species this installation works with. Species-specific tools with
+        # enabled = auto (SISTR, SeqSero2, ECTyper, LisSero, VirulenceFinder)
+        # are switched on for these, and --setup installs them. A genus covers
+        # all its species. Add one later with: --resume enable=<species>
+        species_scope => "Campylobacter, Salmonella, Escherichia coli, Listeria",
         chewbbaca_mode => "per_sample",  # or "per_species_batch" -- see chewbbaca_per_sample / chewbbaca
         chewbbaca_write_md5 => 0,  # CRC32+SHA256 is the standard pair; MD5 is extra, off by default
         assume_yes => 0, 
@@ -1601,17 +1576,19 @@ $rundata{config}{defaults} = {
             install_version  => "1.27.1",
     },    
     # --- v1 typing / characterisation tools ---
-    # Off by default; switch on per tool (they only run for the species
-    # they apply to, see the runstep 'species' field).
+    # Species-specific: 'species' = the species/genera the tool runs for
+    # (comma-separated; also used by the runstep). enabled = auto: on when
+    # one of them is in general.species_scope; 1/0 overrides that.
     sistr => {
             # SISTR (sistr_cmd): Salmonella serovar prediction from the
-            # assembly (antigen genes + cgMLST-330). Off until verified on
-            # the target installation; runs only for Salmonella samples.
+            # assembly (antigen genes + cgMLST-330). Runs only for Salmonella
+            # samples.
             # NOTE: on first use sistr_cmd downloads its own database (from
             # Zenodo) -- needs network once, not yet covered by db_freeze.
             version_check => "loose",
             required  => 0,
-            enabled   => 0,
+            enabled   => "auto",
+            species   => "Salmonella",
             arguments => "--qc",
             # Which SISTR field becomes the serotype: "serovar" (SISTR's own
             # overall prediction -- default) or "serovar_cgmlst" (cgMLST-330
@@ -1633,7 +1610,8 @@ $rundata{config}{defaults} = {
             # Fallback for SISTR in select_main_serotype.
             version_check => "loose",
             required  => 0,
-            enabled   => 0,
+            enabled   => "auto",
+            species   => "Salmonella",
             arguments => "",
             env       => "eurlc-wgs-seqsero2",
             yml       => "optional/eurlc-wgs-seqsero2.yml",
@@ -1652,7 +1630,8 @@ $rundata{config}{defaults} = {
             # sketch that may need downloading on first use).
             version_check => "loose",
             required  => 0,
-            enabled   => 0,
+            enabled   => "auto",
+            species   => "Escherichia coli, Shigella",
             arguments => "--pathotype",
             env       => "eurlc-wgs-ectyper",
             yml       => "optional/eurlc-wgs-ectyper.yml",
@@ -1664,7 +1643,8 @@ $rundata{config}{defaults} = {
             # LisSero: Listeria monocytogenes molecular serogroup.
             version_check => "loose",
             required  => 0,
-            enabled   => 0,
+            enabled   => "auto",
+            species   => "Listeria monocytogenes",
             arguments => "--min_id 95 --min_cov 95",
             env       => "eurlc-wgs-lissero",
             yml       => "optional/eurlc-wgs-lissero.yml",
@@ -1678,7 +1658,8 @@ $rundata{config}{defaults} = {
             # (empty = all databases in virulencefinder_db).
             version_check => "loose",
             required  => 0,
-            enabled   => 0,
+            enabled   => "auto",
+            species   => "Escherichia coli, Shigella",
             arguments => "",
             databases => "virulence_ecoli,stx",
             db_path   => "__DB__/virulencefinder",
@@ -1868,7 +1849,7 @@ my $R_cfg_species     = $rundata{config}{effective}{species};
 # alternate syntax exists. Existing "param=value" usage is untouched: the
 # regex only matches a bare token with no "=" already attached.
 {
-    my %path_taking_arg = map { lc($_) => 1 } qw(datadir database configfile);
+    my %path_taking_arg = map { lc($_) => 1 } qw(datadir outdir database configfile);
     my @rewritten;
     my $i = 0;
     while ($i < @ARGV) {
@@ -2026,7 +2007,10 @@ COMMON OPTIONS:
                                    default  use built-in defaults, ignore any config file
                                    write    write a default config file and exit
     database=<dir>               Use a specific database directory
-    datadir=<dir>                Use a specific input data directory
+    datadir=<dir>                Use a specific input data directory; results
+                                 go to <dir>/eurlc-wgs unless outdir= is given
+    outdir=<dir>                 Write results to exactly this folder (instead
+                                 of <data folder>/eurlc-wgs)
     threads=<n>                  Number of threads
     --overwrite                  Overwrite existing results
     --qc-screen                  Quick QC check of the raw reads only (Q30
@@ -2206,6 +2190,13 @@ HELP
     setdir("db", abs_path($resolved_db));
     log_message("NOTICE: Using custom database directory: [" . peekdir("db") . "]");
     },
+    outdir => sub {
+    my $arg = shift;
+    graceful_die("Argument outdir= needs a folder, e.g. outdir=/analysis/run192_wgs") if !defined $arg || $arg eq "";
+    # Used as given: this folder IS the output folder (what eurlc-wgs/ is by
+    # default). Applied after all premount handlers -- see "Output folder".
+    $S_OUTDIR_ARG = File::Spec->rel2abs($arg);
+  },
     datadir => sub {
     my $arg_datadir = shift;
 
@@ -2255,6 +2246,35 @@ foreach my $key (keys %args) {
 
 }
 
+
+###################################################################################################
+## Output folder
+##   default            <data folder>/eurlc-wgs   (follows datadir=)
+##   outdir=<folder>    exactly that folder
+## Resuming with only outdir= given: the data folder is taken from the
+## earlier run (log/input_dir.txt), so "eurlc-wgs outdir=X --resume" works.
+{
+    my $resumeish = exists $args{resume} || exists $args{rerun}
+                 || ( $args{overwrite} // "" ) =~ /^(resume|extend)$/i;
+    if ( defined $S_OUTDIR_ARG && !exists $args{datadir} && $resumeish ) {
+        my $f = "$S_OUTDIR_ARG/log/input_dir.txt";
+        if ( -f $f && open( my $fh, '<', $f ) ) {
+            chomp( my $saved = <$fh> // "" );
+            close $fh;
+            if ( $saved ne "" && -d $saved && $saved ne peekdir("in") ) {
+                setdir("in", $saved);
+                log_message("NOTICE: Resume: data folder of this analysis is [$saved] (from log/input_dir.txt)");
+            }
+        }
+    }
+    set_output_paths( $S_OUTDIR_ARG // ( peekdir("in") . "/$S_DEFAULT_OUT_NAME" ) );
+    $S_logdir      = peekdir("out,log");
+    $S_control_dir = peekdir("out,control");
+    $capture_output_hide    = " 1>>\"$S_logdir/stdout.txt\" 2>>\"$S_logdir/stderr.txt\"";
+    $capture_stderr_hide    = " 2>>\"$S_logdir/stderr.txt\"";
+    $capture_output_verbose = " > >(tee -a \"$S_logdir/stdout.txt\") 2> >(tee -a \"$S_logdir/stderr.txt\" >&2)";
+    $capture_stderr_verbose = " 2> >(tee -a \"$S_logdir/stderr.txt\" >&2)";
+}
 
 ###################################################################################################
 ## mount-check
@@ -2403,7 +2423,7 @@ if (-f $rundata{config}{path}) {
                     my $value = $cfg->{$section}{$param};
 
                     if (is_known_boolean_field($section, $param)) {
-                        my $normalized = normalize_boolean_value($value);
+                        my $normalized = normalize_boolean_value($value, $param);
                         if (defined $normalized) {
                             $value = $normalized;
                         }
@@ -2758,7 +2778,7 @@ foreach my $key (keys %args) {
             my $apply_value = $value;
 
             if (is_known_boolean_field($section, $param)) {
-                my $normalized = normalize_boolean_value($value);
+                my $normalized = normalize_boolean_value($value, $param);
                 if (defined $normalized) {
                     $apply_value = $normalized;
                 }
@@ -2846,28 +2866,50 @@ foreach my $key (keys %args) {
 }
 
 ###################################################################################################
-## enable=<tool>[,<tool>...] / disable=<tool>[,<tool>...]: short form of
-## <tool>.enabled=1 / <tool>.enabled=0. Handled after the dispatch loop so
-## the result does not depend on hash order: enable=/disable= win over a
-## <tool>.enabled=... given on the same command line. A tool named in both
-## is an error.
+## enable=<tool|species>[,...] / disable=<tool|species>[,...]: short form of
+## <tool>.enabled=1 / <tool>.enabled=0. A species or genus name (e.g.
+## enable=Salmonella) means every species-specific tool for it. Handled after
+## the dispatch loop so the result does not depend on hash order:
+## enable=/disable= win over a <tool>.enabled=... given on the same command
+## line. A tool named in both is an error. Afterwards enabled = auto is
+## resolved against general.species_scope (resolve_auto_enabled).
 {
     my %want;   # section -> 1/0
+    my %explicit;   # section named directly (wins over a species expansion)
     for my $what ( [ enable => 1 ], [ disable => 0 ] ) {
         my ($arg, $val) = @$what;
         next unless exists $args{$arg};
         $args_handled{$arg} = 1;
         my @names = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $args{$arg} // "" );
-        graceful_die("Argument [$arg=] needs one or more tool names, e.g. $arg=sistr,seqsero2") unless @names;
+        graceful_die("Argument [$arg=] needs one or more tool or species names, e.g. $arg=sistr or $arg=Salmonella") unless @names;
         for my $n (@names) {
             my ($section) = grep { lc($_) eq lc($n) } keys %$R_cfg;
-            unless ( defined $section && ref $R_cfg->{$section} eq 'HASH' && exists $R_cfg->{$section}{enabled} ) {
-                my @valid = sort grep { ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled} } keys %$R_cfg;
-                graceful_die("Argument [$arg=$n]: [$n] is not a tool that can be switched on/off. Valid names: @valid");
+            my @sections;
+            my $is_tool = 0;
+            if ( defined $section && ref $R_cfg->{$section} eq 'HASH' && exists $R_cfg->{$section}{enabled} ) {
+                @sections = ($section);
+                $is_tool  = 1;
+            } else {
+                # a species/genus: all species-specific tools for it
+                @sections = grep { species_lists_overlap( [ $n ], config_species_list($_) ) } species_specific_tools();
+                unless (@sections) {
+                    my @valid = sort grep { ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled} } keys %$R_cfg;
+                    my %sp; $sp{$_}++ for map { @{ config_species_list($_) } } species_specific_tools();
+                    graceful_die("Argument [$arg=$n]: [$n] is neither a tool that can be switched on/off nor a species with species-specific tools."
+                               . " Tools: @valid. Species: " . join(", ", sort keys %sp));
+                }
+                log_message("NOTICE: $arg=$n: " . join(", ", @sections));
             }
-            graceful_die("Tool [$section] is given both in enable= and disable=")
-                if exists $want{$section} && $want{$section} != $val;
-            $want{$section} = $val;
+            for my $sec (@sections) {
+                if ( exists $want{$sec} && $want{$sec} != $val ) {
+                    # enable=Salmonella disable=sistr: the named tool wins
+                    next if $explicit{$sec} && !$is_tool;
+                    graceful_die("Tool [$sec] is given both in enable= and disable=")
+                        if ( $explicit{$sec} // 0 ) == $is_tool;
+                }
+                $want{$sec} = $val;
+                $explicit{$sec} = 1 if $is_tool;
+            }
         }
     }
     for my $section ( sort keys %want ) {
@@ -2875,6 +2917,7 @@ foreach my $key (keys %args) {
         log_message("NOTICE: Overriding from launch-arguments: $section.enabled=$want{$section}");
         $rundata{config}{overrides} .= "$section.enabled=$want{$section}\n";
     }
+    resolve_auto_enabled();
 }
 
 ###################################################################################################
@@ -3026,21 +3069,30 @@ if (lc($R_cfg->{general}->{trimming} // "") eq "fastp" && $R_cfg->{fastp}{enable
 # defined yet at this point, so the config is what we can check). Shovill
 # variants (shovill_spades, shovill_skesa) also need the [shovill] tool
 # switch on.
+# main_assembly can also be set per species ([species__X] main_assembly=...);
+# every assembler named in any of them is switched on.
 {
-    my $ma = lc( $R_cfg->{general}{main_assembly} // "" );
+    my @where = ( [ "general", $R_cfg->{general} ] );
+    push @where, map { [ "species $_", $R_cfg->{species}{$_} ] }
+                 grep { ref $R_cfg->{species}{$_} eq 'HASH' && defined $R_cfg->{species}{$_}{main_assembly} }
+                 sort keys %{ $R_cfg->{species} // {} };
+    for my $w (@where) {
+        my ($label, $h) = @$w;
+        my $ma = lc( $h->{main_assembly} // "" );
 
-    # Before shovill was split into variants, "shovill" meant shovill
-    # running SPAdes -- keep old configs working.
-    if ( $ma eq "shovill" ) {
-        log_message("NOTICE: general.main_assembly=shovill now means shovill_spades (shovill with SPAdes) -- adjusting");
-        $ma = $R_cfg->{general}{main_assembly} = "shovill_spades";
-    }
+        # Before shovill was split into variants, "shovill" meant shovill
+        # running SPAdes -- keep old configs working.
+        if ( $ma eq "shovill" ) {
+            log_message("NOTICE: $label main_assembly=shovill now means shovill_spades (shovill with SPAdes) -- adjusting");
+            $ma = $h->{main_assembly} = "shovill_spades";
+        }
 
-    if ( $ma ne "" && ref $R_cfg->{$ma} eq 'HASH' && exists $R_cfg->{$ma}{enabled} ) {
-        for my $section ( $ma =~ /^shovill_/ ? ( 'shovill', $ma ) : ( $ma ) ) {
-            next if ( $R_cfg->{$section}{enabled} // 0 ) == 1;
-            log_message("NOTICE: Adjusting parameter: $section.enabled=1 (needed for main_assembly=$ma)");
-            $R_cfg->{$section}{enabled} = 1;
+        if ( $ma ne "" && ref $R_cfg->{$ma} eq 'HASH' && exists $R_cfg->{$ma}{enabled} ) {
+            for my $section ( $ma =~ /^shovill_/ ? ( 'shovill', $ma ) : ( $ma ) ) {
+                next if ( $R_cfg->{$section}{enabled} // 0 ) == 1;
+                log_message("NOTICE: Adjusting parameter: $section.enabled=1 (needed for main_assembly=$ma, $label)");
+                $R_cfg->{$section}{enabled} = 1;
+            }
         }
     }
 }
@@ -3204,30 +3256,60 @@ unless ( any_input_files_exist( getdir("in"), $R_cfg->{"general"}->{"recursive"}
     }
 }
 
+ # Can the output folder be written? (A read-only data folder is the
+ # usual case: results go into it by default.)
+{
+    my $out    = peekdir("out");
+    my $target = -d $out ? $out : dirname($out);
+    $target = dirname($target) while !-d $target && $target ne dirname($target);
+    unless ( -w $target ) {
+        my $in_data = !defined $S_OUTDIR_ARG;
+        graceful_die("Cannot write the output folder [$out]: [$target] is not writable"
+            . ( $in_data ? " (the data folder may be read-only). Give a writable output folder with outdir=<folder>, e.g. outdir=\$HOME/analysis/" . basename( peekdir("in") ) . "_eurlc-wgs" : "" ));
+    }
+    # outdir= must not point at an unrelated folder: the overwrite choices
+    # below can delete it.
+    if ( defined $S_OUTDIR_ARG && -d $out ) {
+        opendir( my $dh, $out );
+        my @content = grep { !/^\.\.?$/ } readdir($dh);
+        closedir $dh;
+        my $is_ours = -f "$out/log/log.txt" || -f "$out/filelist_fastq.txt" || -f "$out/data/rundata.json";
+        graceful_die("outdir=[$out] exists and contains other files -- it is not an eurlc-wgs output folder. Choose a new or empty folder.")
+            if @content && !$is_ours;
+    }
+}
+
 if( -d peekdir("out") ){
 
   my $outdirname =  basename(peekdir("out"));
 
-  #--- prompt mode
+  #--- prompt mode: overwrite, resume, or stop
   if( lc($R_cfg->{"general"}{"overwrite"})  eq  "prompt") {
 
      if ($ASSUME_YES) {
-         graceful_die("Output directory [$outdirname] already exists and overwrite mode is 'prompt' -- this is a destructive decision and is never auto-approved under assume-yes. Set general.overwrite to 'yes' or 'no' to run without interaction.");
+         graceful_die("Output directory [$outdirname] already exists and overwrite mode is 'prompt' -- this decision is never auto-approved under assume-yes. Use --resume to continue in it, or set overwrite=yes / overwrite=no.");
      }
 
-     log_message("WARNING: Output directory [$outdirname] already exists. Data will be overwritten.", "red");
-     my $answer = prompt_yes_no("Proceed?", 0);
+     log_message("WARNING: Output directory [" . peekdir("out") . "] already exists.", "red");
+     my $answer = prompt_choice("Overwrite it (all earlier results are deleted), resume in it (reuse earlier results), or stop?",
+                                [ "o" => "overwrite", "r" => "resume", "s" => "stop" ], "s");
 
-     log_message("INFO: Output directory already exists. Proceed =[" . ($answer ? "y" : "n") . "]"); 
+     log_message("INFO: Output directory already exists. Answer =[$answer]");
 
-     unless ($answer) {
-         graceful_die("User declined to overwrite existing output directory [$outdirname]");
+     if ( $answer eq "stop" ) {
+         graceful_die("Stopped -- existing output directory [$outdirname] left as it is");
      }
-    
-     execute_and_log( "rm -r '" . getdir("out") . "'" );
-     getdir("out");  #creates the output dir
-     $S_RUN_MODE = "overwritten";
-      
+     elsif ( $answer eq "resume" ) {
+         $R_cfg->{general}{overwrite} = "resume";
+         $rundata{config}{overrides} .= "overwrite=resume (chosen at prompt)\n";
+         log_message("NOTICE: Output directory $outdirname already exists -- resuming (existing results are reused, only missing steps are run)", "yellow");
+         $S_RUN_MODE = "resumed";
+     }
+     else {
+         execute_and_log( "rm -r '" . getdir("out") . "'" );
+         getdir("out");  #creates the output dir
+         $S_RUN_MODE = "overwritten";
+     }
   }  
   #--- overwrite mode
   elsif( lc($R_cfg->{"general"}->{"overwrite"})  eq  "yes") {
@@ -3264,6 +3346,12 @@ getdir("out,log");      # creates out/log/  -- initiate_logfile() needs this
 getdir("out,control");  # creates out/control/  -- control channel spool dir
 
 initiate_logfile();
+# Which data folder these results belong to (also lets "outdir=X --resume"
+# find the data again; see "Output folder").
+if ( open( my $ifh, '>', getdir("out,log") . "/input_dir.txt" ) ) {
+    print {$ifh} abs_path( peekdir("in") ) . "\n";
+    close $ifh;
+}
 if ( $S_RUN_MODE eq "resumed" ) {
     # Keep the program/database/config logs of the earlier run: they are
     # rewritten below for this run, but reused results came from that one.
@@ -4629,6 +4717,87 @@ sub ensure_genomesize_computed {
     estimate_genomesize($samplenr);
     $s->{_genomesize_species} = $sp;
     delete $s->{targetbases};   # derived from the values just recomputed
+}
+
+###################################################################################################
+## Species scope (general.species_scope) and enabled = auto.
+
+# Set "key = value" in [section] of an INI-style config file, in place:
+# replaces an existing (uncommented) key line, otherwise adds the line right
+# after the section header (adding the section if missing). Keeps every
+# other line, comment and the order. Returns 1 on success.
+sub set_config_file_value {
+    my ($path, $section, $key, $value) = @_;
+    open( my $in, '<', $path ) or do { log_message("WARNING: Cannot read [$path]: $!"); return 0; };
+    my @lines = <$in>;
+    close $in;
+    my ($in_sec, $done, $hdr_idx) = (0, 0, undef);
+    for my $k ( 0 .. $#lines ) {
+        if ( $lines[$k] =~ /^\s*\[([^\]]+)\]/ ) {
+            $in_sec = lc($1) eq lc($section) ? 1 : 0;
+            $hdr_idx = $k if $in_sec && !defined $hdr_idx;
+            next;
+        }
+        if ( $in_sec && !$done && $lines[$k] =~ /^\s*\Q$key\E\s*[=:]/i ) {
+            $lines[$k] = "$key = $value\n";
+            $done = 1;
+        }
+    }
+    unless ($done) {
+        if ( defined $hdr_idx ) { splice @lines, $hdr_idx + 1, 0, "$key = $value\n"; }
+        else                    { push @lines, "\n[$section]\n$key = $value\n"; }
+    }
+    my $tmp = "$path.tmp$$";
+    open( my $out, '>', $tmp ) or do { log_message("WARNING: Cannot write [$tmp]: $!"); return 0; };
+    print {$out} @lines;
+    close $out;
+    return rename( $tmp, $path ) ? 1 : 0;
+}
+
+# [tool] species = "A, B" as an array ref (used by the runstep 'species' field).
+sub config_species_list {
+    my ($section) = @_;
+    my $v = $R_cfg->{$section}{species} // "";
+    return [ grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, $v ];
+}
+
+# Tool sections that declare the species they are for.
+sub species_specific_tools {
+    return sort grep { ref $R_cfg->{$_} eq 'HASH' && $_ ne 'general' && $_ ne 'species'
+                       && exists $R_cfg->{$_}{enabled} && ( $R_cfg->{$_}{species} // "" ) =~ /\S/ } keys %$R_cfg;
+}
+
+# Do two species/genus lists share anything? A genus matches its species
+# in either direction (scope "Listeria" covers tool "Listeria monocytogenes",
+# scope "Escherichia coli" covers a tool for "Escherichia").
+sub species_lists_overlap {
+    my ($a, $b) = @_;
+    my $norm = sub { my $x = lc shift; $x =~ s/_/ /g; $x =~ s/^\s+|\s+$//g; $x =~ s/\s+/ /g; $x };
+    for my $x ( map { $norm->($_) } @$a ) {
+        for my $y ( map { $norm->($_) } @$b ) {
+            next if $x eq "" || $y eq "";
+            return 1 if $x eq $y || index($x, "$y ") == 0 || index($y, "$x ") == 0;
+        }
+    }
+    return 0;
+}
+
+# enabled = auto -> 1 if the tool's species overlap general.species_scope,
+# else 0. Runs right after the command line is applied, before --setup and
+# before the runsteps are built, so everything later sees plain 1/0.
+sub resolve_auto_enabled {
+    my @scope = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $R_cfg->{general}{species_scope} // "" );
+    my (@on, @off);
+    for my $sec ( sort keys %$R_cfg ) {
+        next unless ref $R_cfg->{$sec} eq 'HASH' && lc( $R_cfg->{$sec}{enabled} // "" ) eq "auto";
+        my $sp = config_species_list($sec);
+        my $on = @$sp && species_lists_overlap( $sp, \@scope ) ? 1 : 0;
+        $R_cfg->{$sec}{enabled} = $on;
+        push @{ $on ? \@on : \@off }, $sec;
+    }
+    log_message("NOTICE: Species scope: " . ( @scope ? join(", ", @scope) : "(none)" )
+              . ( @on ? " -- species tools on: " . join(", ", @on) : "" ));
+    log_message("INFO: Species tools off (species not in scope): " . join(", ", @off)) if @off;
 }
 
 # Largest genus other than the sample's own, from a Kraken2/Bracken result
@@ -8851,7 +9020,16 @@ sub preprocess_select_main_assembly {
 
 
     
-    my $criteria = $R_cfg->{general}{main_assembly} // "";
+    # Per species if configured ([species__X] main_assembly), else general.
+    my $species  = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "";
+    my $criteria = get_config_value_for_species($species, 'main_assembly', $R_cfg->{general}{main_assembly}) // "";
+    my $named_without_result = "";
+    if ( ( grep { $_ eq $criteria } group_members('assembler') )
+         && !( $R_samples->[$samplenr]{results}{$criteria} && defined $R_samples->[$samplenr]{results}{$criteria}{total_length} ) ) {
+        $named_without_result = $criteria;
+        $criteria = "fewest_contigs500";
+    }
+    my $selection_note = "";
     
     if($sample_type eq "FASTA"){       $main_assembler = "imported";   $reason = "rawdata was an assembly";   }
     elsif( grep { $_ eq $criteria } group_members('assembler') ){
@@ -8868,6 +9046,31 @@ sub preprocess_select_main_assembly {
         my $gate_note;
         ($main_assembler, $gate_note) = select_assembly_winner($samplenr, $comparator);
         $reason = $what . ( $gate_note ne "" ? " ($gate_note)" : "" );
+        $reason = "$named_without_result produced no assembly -- $reason" if $named_without_result ne "";
+    }
+
+    # All candidates with their key numbers, for the report and rundata.json
+    # (what was compared, and why one was chosen).
+    if ( $sample_type ne "FASTA" ) {
+        my %excluded = %{ $R_samples->[$samplenr]{_assembly_excluded} // {} };
+        delete $R_samples->[$samplenr]{_assembly_excluded};
+        my @rows;
+        for my $name ( group_members('assembler') ) {
+            my $c = $R_samples->[$samplenr]{results}{$name};
+            next unless $c && ref $c eq 'HASH' && defined $c->{total_length};
+            push @rows, {
+                assembler   => $name,
+                total_length => $c->{total_length},
+                contigs     => $c->{nr_contigs},
+                contigs_500 => $c->{nr_contigs_largerthan_500},
+                n50         => $c->{n50},
+                status      => ( defined $main_assembler && $name eq $main_assembler ) ? "selected"
+                             : $excluded{$name} ? "set aside: $excluded{$name}" : "",
+            };
+        }
+        $R_samples->[$samplenr]{results}{$runstep_name}{candidates} = \@rows;
+        log_message("INFO: $sample_name assembly candidates: " . join("; ", map {
+            "$_->{assembler} $_->{total_length} bp, $_->{contigs_500} contigs500, N50 $_->{n50}" . ( $_->{status} ne "" ? " [$_->{status}]" : "" ) } @rows));
     }
 
     
@@ -9004,22 +9207,52 @@ sub select_assembly_winner {
     }
 
     my $species   = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "";
-    my $fail_size = get_config_value_for_species($species, "fail_assembly_size");
-    my $threshold = parse_threshold_string($fail_size);
+
+    # Size gates, tried in order; the first that sets aside some (not all)
+    # candidates is used:
+    #   1. warning_assembly_size  (catches "a bit too large", e.g. SPAdes
+    #                              picking up junk while SKESA is fine)
+    #   2. fail_assembly_size
+    #   3. only if the species has neither: expected genome size (config,
+    #      genome size list or k-mer estimate) +- assembly_size_tolerance
+    #      (default 0.2 = 20 %)
+    my @gates;
+    for my $key (qw(warning_assembly_size fail_assembly_size)) {
+        my $thr = parse_threshold_string( get_config_value_for_species($species, $key) );
+        push @gates, [ $key, $thr ] if $thr && @{ $thr->{conditions} // [] };
+    }
+    unless (@gates) {
+        ensure_genomesize_computed($samplenr);
+        my $gs  = $R_samples->[$samplenr]{estimated_genomesize} // 0;
+        my $tol = get_config_value_for_species($species, "assembly_size_tolerance", 0.2);
+        $tol = 0.2 unless defined $tol && $tol =~ /^\d*\.?\d+$/ && $tol > 0;
+        if ( $gs =~ /^\d+(?:\.\d+)?$/ && $gs > 0 ) {
+            my ($lo, $hi) = ( int( $gs * ( 1 - $tol ) ), int( $gs * ( 1 + $tol ) ) );
+            push @gates, [ "expected genome size " . int($gs) . " bp +-" . ( $tol * 100 ) . "%",
+                           { raw => "<$lo >$hi", conditions => [ { op => '<', value => $lo }, { op => '>', value => $hi } ] } ];
+        }
+    }
 
     my $note = "";
-    if ($threshold && %candidates) {
+    my %excluded_why;
+    for my $g (@gates) {
+        last unless %candidates;
+        my ($gname, $threshold) = @$g;
         my @excluded = grep { threshold_matches($candidates{$_}{total_length}, $threshold) } sort keys %candidates;
+        next unless @excluded;
         if (@excluded == keys %candidates) {
-            $note = "all assemblies outside fail_assembly_size $threshold->{raw} -- size check not applied";
+            $note = "all assemblies outside $gname $threshold->{raw}";
+            next;   # try the next, wider gate
         }
-        elsif (@excluded) {
-            $note = "excluded by size check (fail_assembly_size $threshold->{raw}): "
-                  . join(", ", map { "$_ [" . $candidates{$_}{total_length} . " bp]" } @excluded);
-            delete @candidates{@excluded};
-        }
-        log_message("NOTICE: Sample $R_samples->[$samplenr]{name}: main assembly selection: $note", "yellow") if $note ne "";
+        $note = "set aside by size check ($gname $threshold->{raw}): "
+              . join(", ", map { "$_ [" . $candidates{$_}{total_length} . " bp]" } @excluded);
+        $excluded_why{$_} = "size outside $gname $threshold->{raw}" for @excluded;
+        delete @candidates{@excluded};
+        last;
     }
+    $note .= " -- size check not applied" if $note =~ /^all assemblies/;
+    $R_samples->[$samplenr]{_assembly_excluded} = \%excluded_why;
+    log_message("NOTICE: Sample $R_samples->[$samplenr]{name}: main assembly selection: $note", "yellow") if $note ne "";
 
     my $winner = gatekeeper_select_winner( \%candidates, $comparator, \@ASSEMBLER_TIEBREAK ) // "";
     return wantarray ? ( $winner, $note ) : $winner;
@@ -12410,7 +12643,7 @@ $runstep{$runstep_name} = {
       resultfiles_status => "NA",
 
       group      => 'serotyping',
-      species    => [ 'Salmonella' ],
+      species    => config_species_list('sistr'),   # from [sistr] species
       requires   => [ 'main_assembly_present', 'kraken2_settled' ],
       produces   => [ 'sistr_done' ],
       applies_if => sub { return $R_cfg->{sistr}{enabled} ? 1 : 0; },
@@ -12605,7 +12838,7 @@ $runstep{$runstep_name} = {
       resultfiles_status => "NA",
 
       group      => 'serotyping',
-      species    => [ 'Salmonella' ],
+      species    => config_species_list('seqsero2'),   # from [seqsero2] species
       requires   => [ 'main_assembly_present', 'kraken2_settled' ],
       produces   => [ 'seqsero2_done' ],
       applies_if => sub { return $R_cfg->{seqsero2}{enabled} ? 1 : 0; },
@@ -12807,7 +13040,7 @@ $runstep{$runstep_name} = {
       resultfiles_status => "NA",
 
       group      => 'serotyping',
-      species    => [ 'Escherichia coli', 'Shigella' ],
+      species    => config_species_list('ectyper'),   # from [ectyper] species
       requires   => [ 'main_assembly_present', 'kraken2_settled' ],
       produces   => [ 'ectyper_done' ],
       applies_if => sub { return $R_cfg->{ectyper}{enabled} ? 1 : 0; },
@@ -12986,7 +13219,7 @@ $runstep{$runstep_name} = {
       resultfiles_status => "NA",
 
       group      => 'serotyping',
-      species    => [ 'Listeria monocytogenes' ],
+      species    => config_species_list('lissero'),   # from [lissero] species
       requires   => [ 'main_assembly_present', 'kraken2_settled' ],
       produces   => [ 'lissero_done' ],
       applies_if => sub { return $R_cfg->{lissero}{enabled} ? 1 : 0; },
@@ -13273,7 +13506,7 @@ $runstep{$runstep_name} = {
       resultfile => "__DIR-TYPING__/virulencefinder/__BASE__/__BASE__.virulencefinder.json",
       resultfiles_status => "NA",
 
-      species    => [ 'Escherichia coli', 'Shigella' ],
+      species    => config_species_list('virulencefinder'),   # from [virulencefinder] species
       requires   => [ 'main_assembly_present', 'kraken2_settled' ],
       produces   => [ 'virulencefinder_done' ],
       applies_if => sub { return $R_cfg->{virulencefinder}{enabled} ? 1 : 0; },
@@ -18476,6 +18709,7 @@ sub prompt_yes_no {
     print "$question [$default]: ";
 
     my $answer = <STDIN>;
+    return $default_yes unless defined $answer;   # stdin closed (EOF): take the default
     chomp $answer;
     $answer =~ s/\s+//g;
 
@@ -18487,6 +18721,31 @@ sub prompt_yes_no {
     return prompt_yes_no($question, $default_yes);
 }
 
+# One-letter choice: prompt_choice("Question?", [ "o" => "overwrite", "r" => "resume" ], "r")
+# Returns the chosen word. Empty answer = the default key.
+sub prompt_choice {
+    my ($question, $opts, $default) = @_;
+    my @pairs = @$opts;
+    my (%word, @shown);
+    while ( my ($k, $w) = splice(@pairs, 0, 2) ) {
+        $word{$k} = $w;
+        push @shown, ( $k eq $default ? uc($k) : $k ) . "=$w";
+    }
+    while (1) {
+        print "$question [" . join(", ", @shown) . "]: ";
+        my $answer = <STDIN>;
+        $answer = "" unless defined $answer;
+        chomp $answer;
+        $answer =~ s/\s+//g;
+        $answer = lc $answer;
+        return $word{$default} if $answer eq "";
+        return $word{$answer} if exists $word{$answer};
+        my ($by_word) = grep { $word{$_} eq $answer } keys %word;
+        return $word{$by_word} if defined $by_word;
+        print "Please answer " . join(", ", map { "$_" } sort keys %word) . ".\n";
+    }
+}
+
 sub prompt_yes_no_yesstoall {
     my ($question, $default_yes) = @_;
 
@@ -18494,6 +18753,7 @@ sub prompt_yes_no_yesstoall {
     print "$question [$default (a=assume yes for following questions)]: ";
 
     my $answer = <STDIN>;
+    return $default_yes unless defined $answer;   # stdin closed (EOF): take the default
     chomp $answer;
     $answer =~ s/\s+//g;
 
@@ -20122,10 +20382,12 @@ sub is_known_boolean_field {
 # warn and leave the setting unchanged rather than silently storing something
 # unrecognized.
 sub normalize_boolean_value {
-    my ($value) = @_;
+    my ($value, $param) = @_;
     return undef unless defined $value;
     my $v = lc($value);
     $v =~ s/^\s+|\s+$//g;
+    # enabled = auto: decided by general.species_scope (resolve_auto_enabled)
+    return "auto" if $v eq "auto" && ( $param // "" ) eq "enabled";
     return 1 if $v eq "yes" || $v eq "true"  || $v eq "on"  || $v eq "1";
     return 0 if $v eq "no"  || $v eq "false" || $v eq "off" || $v eq "0";
     return undef;
@@ -24330,6 +24592,15 @@ sub print_detailed_report_tsv_table {
                     next;
                 }
 
+                # list fields (columns => ...): one compact text cell in the TSV
+                if ( $field->{columns} && ref $value eq 'ARRAY' ) {
+                    $values_by_sample{$sample_name} = join("; ", map {
+                        my $r = $_;
+                        join(" ", grep { $_ ne "" } map { $r->{ $_->[1] } // "" } @{ $field->{columns} })
+                    } @$value) || "n/a";
+                    next;
+                }
+
                 $values_by_sample{$sample_name} =
                     defined $value
                     ? detailed_report_format_value($value, $field)
@@ -25821,6 +26092,9 @@ Kraken2 => {
         fields => [
             { label => "Selected assembly", path => [ "main_assembly_assembler" ] },
             { label => "Reason", path => [ "main_assembly_reason" ] },
+            { label => "Candidates", path => [ "candidates" ], hide_if_missing => 1,
+              columns => [ [ "Assembler", "assembler" ], [ "Size (bp)", "total_length" ], [ "Contigs", "contigs" ],
+                           [ "Contigs 500+", "contigs_500" ], [ "N50", "n50" ], [ "", "status" ] ] },
         ],
     },
 
@@ -26525,6 +26799,21 @@ sub detailed_report_runstep_section {
 
         next if $field->{hide_if_missing} && !defined $value;
         next if $field->{hide_if_zero} && defined $value && $value =~ /^0(?:\.0+)?$/;
+
+        # A list of records shown as a small table: columns => [ [label, key], ... ]
+        if ( $field->{columns} && ref $value eq 'ARRAY' ) {
+            next unless @$value;
+            my $tbl = "<table class=\"summary-table\"><thead><tr>"
+                    . join("", map { "<th>" . encode_entities( $_->[0] ) . "</th>" } @{ $field->{columns} })
+                    . "</tr></thead><tbody>";
+            for my $row (@$value) {
+                my $sel = ( ( $row->{status} // "" ) eq "selected" ) ? " style=\"font-weight:600\"" : "";
+                $tbl .= "<tr$sel>" . join("", map { "<td>" . encode_entities( $row->{ $_->[1] } // "" ) . "</td>" } @{ $field->{columns} }) . "</tr>";
+            }
+            $tbl .= "</tbody></table>";
+            $html .= detailed_report_raw_row($label, $tbl);
+            next;
+        }
 
         my $formatted = detailed_report_format_value($value, $field);
 
@@ -28511,8 +28800,11 @@ sub print_run_summary {
             $add->("    [$t->{section}] " . scalar(@s) . " " . join("/", @{ $t->{species} }) . " sample(s): $list", "yellow");
             $sections{ $t->{section} } = 1;
         }
+        # one species name per tool covers all of that species' tools
+        my %sp; $sp{ $_->{species}[0] } = 1 for @S_TOOLS_NOT_RUN;
         $add->("    to run them now, keeping all other results:");
-        $add->("      " . _suggest_command( "enable=" . join(",", sort keys %sections) ));
+        $add->("      " . _suggest_command( "enable=" . join(",", sort keys %sp) ));
+        $add->("    (or add the species to species_scope in the configuration to always include it)");
     }
 
     # Where to look
@@ -30190,6 +30482,25 @@ sub _cmd_setup {
         log_message("NOTICE:   eurlc-wgs --setup configfile=$custom_config");
     }
 
+    # ── 2b. Species scope ────────────────────────────────────────────
+    # Species-specific tools are installed for general.species_scope
+    # (resolved before this point). Given on the command line
+    # (--setup species_scope="Campylobacter"), it is also written to the
+    # configuration file in use, so later runs use the same scope.
+    log_message("NOTICE:");
+    log_message("NOTICE: Species scope: " . ( $R_cfg->{general}{species_scope} // "" ));
+    if ( ( $rundata{config}{overrides} // "" ) =~ /general\.species_scope=/ ) {
+        my $cfg_path = $rundata{config}{path} // "";
+        if ( $cfg_path ne "" && -f $cfg_path ) {
+            if ( set_config_file_value( $cfg_path, "general", "species_scope", $R_cfg->{general}{species_scope} ) ) {
+                log_message("NOTICE: Saved species_scope in $cfg_path", "green");
+            }
+        } else {
+            log_message("NOTICE: No configuration file in use -- species_scope applies to this setup only.", "yellow");
+            log_message("NOTICE: To keep it, write a config (configfile=write) and set species_scope in its [general] section.", "yellow");
+        }
+    }
+
     # ── 3. Conda environments ─────────────────────────────────────────
     log_message("NOTICE:");
     log_message("NOTICE: ── Conda environments ──────────────────────────");
@@ -30200,8 +30511,8 @@ sub _cmd_setup {
         next unless ref($R_cfg->{$tool}) eq 'HASH';
         my $env = $R_cfg->{$tool}{env} // "";
         next if $env eq "" || $env eq "base";
-        next if $seen_env{$env}++;
-        next unless ($R_cfg->{$tool}{enabled} // 1);
+        next unless ($R_cfg->{$tool}{enabled} // 1);   # before marking seen: a disabled
+        next if $seen_env{$env}++;                     # tool must not hide a shared env
         push @tools_by_env, { tool => $tool, env => $env };
     }
 
@@ -36426,6 +36737,49 @@ sub _check_path_confinement {
     log_message("ERROR: Refusing to create directory outside the '$root_level' root. [$resolved_dir] is not inside [$resolved_root]", "red");
     close_logfile();
     exit 1;
+}
+
+# Registers the output root and every output sub-folder under it (paths
+# only -- nothing is created here).
+sub set_output_paths {
+    my ($root) = @_;
+    setdir("out" , $root);
+
+    #----------------------
+    #output sections
+
+    setdir("out,results"     , peekdir("out") . "/results"); 
+    setdir("out,report"      , peekdir("out") . "/report"); 
+    setdir("out,large_files" , peekdir("out") . "/large_files"); 
+    setdir("out,data"        , peekdir("out") . "/data"); 
+    setdir("out,log"         , peekdir("out") . "/log");
+    setdir("out,control"     , peekdir("out") . "/control");   # control channel spool dir (§11.3)
+
+    setdir("out,report,assets"      , peekdir("out,report") . "/assets"); 
+    setdir("out,report,samples_html"      , peekdir("out,report") . "/samples_html"); 
+    setdir("out,report,samples_pdf"      , peekdir("out,report") . "/samples_pdf"); 
+    setdir("out,report,clustering"      , peekdir("out,report") . "/clustering"); 
+    setdir("out,report,tables"      , peekdir("out,report") . "/tables"); 
+
+    setdir("out,results,qc"         , peekdir("out,results") . "/qc");  
+    setdir("out,results,assemblies" , peekdir("out,results") . "/assemblies");
+    setdir("out,results,typing"     , peekdir("out,results") . "/typing");
+    setdir("out,results,clustering" , peekdir("out,results") . "/clustering");
+    setdir("out,results,amr"        , peekdir("out,results") . "/amr");
+
+    setdir("out,results,assemblies,annotated"              , peekdir("out,results,assemblies") . "/annotated"); 
+    setdir("out,results,assemblies,alternative_assemblies" , peekdir("out,results,assemblies") . "/alternative_assemblies"); 
+
+    setdir("out,results,qc,stage1_rawdata"     , peekdir("out,results,qc") . "/stage1_rawdata"); 
+    setdir("out,results,qc,stage2_trimmeddata" , peekdir("out,results,qc") . "/stage2_trimmeddata"); 
+    setdir("out,results,qc,stage3_assemblies"  , peekdir("out,results,qc") . "/stage3_assemblies"); 
+    setdir("out,results,qc,stage4_analysis"    , peekdir("out,results,qc") . "/stage4_analysis"); 
+
+    setdir("out,large_files,fastq"      , peekdir("out,large_files") . "/fastq");
+
+    setdir("out,large_files,fastq,trimmed"             , peekdir("out,large_files,fastq") . "/trimmed");
+    setdir("out,large_files,fastq,trimmed_downsampled" , peekdir("out,large_files,fastq") . "/trimmed_downsampled"); 
+
 }
 
 sub peekdir {

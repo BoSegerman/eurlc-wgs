@@ -92,6 +92,10 @@ $rundata{timestamps}{pipeline_start}{timestamp_local} = timestamp_local();
 # The command line exactly as the user gave it, before any rewriting --
 # shown in the run banner in the log (see write_run_start_banner).
 our @ORIGINAL_ARGV = @ARGV;
+# --qc-screen: quick QC check of the raw reads only (see "QC screen" below).
+# Detected here, directly on @ARGV, because it decides the output folder,
+# which is set before the arguments are parsed.
+our $S_QCSCREEN = ( grep { /^-{0,2}qc-?screen$/i } @ARGV ) ? 1 : 0;
 
 # How this run relates to the output directory, set by the overwrite check:
 #   "new"         -- output directory did not exist
@@ -104,6 +108,7 @@ our $MAIN_PID       = $$;                # forked children must not write the EN
 our @S_RUN_ISSUES   = ();                # every ERROR/WARNING logged, for the end-of-run summary
 our $S_ISSUES_PAUSED = 0;                # 1 while re-printing already collected messages
 our @S_TOOLS_NOT_RUN = ();               # filled by report_species_tools_not_run()
+our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
 our $S_STATIC_APPLIES = 0;               # 1 while applies_if is asked structurally (graph check,
                                          # progress denominator): answer from config only, never
                                          # compute from data (e.g. no jellyfish run)
@@ -788,7 +793,7 @@ if(peekdir("conda") eq ""){
 #----------------------
 # output dir
 
-setdir("out" , peekdir("in") . "/$rundata{pipeline_info}{name}");
+setdir("out" , peekdir("in") . "/$rundata{pipeline_info}{name}" . ( $S_QCSCREEN ? "_qcscreen" : "" ));
 
 #----------------------
 #output sections
@@ -1022,10 +1027,20 @@ my %QC_MEASURE_DEF = (
         path     => [qw(qscore trimmed av_read_len)],
         label    => 'Trimmed read average length',
     },
+    qscore_trimmed_too_short_pct => {
+        category => 'qscore',
+        path     => [qw(qscore trimmed too_short_pct)],
+        label    => 'Reads removed as too short after trimming (%)',
+    },
+    qscore_raw_adapter_trimmed_pct => {
+        category => 'qscore',
+        path     => [qw(qscore raw adapter_trimmed_pct)],
+        label    => 'Reads with adapter (%)',
+    },
     coverage_trimmed_q30_coverage => {
         category => 'coverage',
         path     => [qw(coverage trimmed q30_coverage)],
-        label    => 'Trimmed read aQ30+ coverage',
+        label    => 'Trimmed read Q30+ coverage',
     },
     coverage_trimmed_coverage => {
         category => 'coverage',
@@ -1781,6 +1796,9 @@ $rundata{config}{defaults} = {
             gc         => 50,
             schema     => "chewie_ns_ecoli",
             filter     => "cgMLST_ecoli",
+            # Kraken assigns part of any E. coli to Shigella (and vice versa):
+            # not counted as contamination.
+            crossreactive_genus => "Shigella",
         },
         "Salmonella enterica" => {
             genomesize => 5000000,
@@ -1812,6 +1830,8 @@ $rundata{config}{defaults} = {
             fail_qscore_raw_q30_rate => "<0.50",              
             fail_coverage_trimmed_q30_coverage => "<30",          
             fail_contamination_species_level => ">5",                        
+            fail_contamination_genus_level   => ">5",    # largest other genus (crossreactive_genus excluded)
+            warning_qscore_trimmed_average_read_length => "<50",
         },
     },
     
@@ -2009,6 +2029,9 @@ COMMON OPTIONS:
     datadir=<dir>                Use a specific input data directory
     threads=<n>                  Number of threads
     --overwrite                  Overwrite existing results
+    --qc-screen                  Quick QC check of the raw reads only (Q30
+                                 coverage, species, other genus, read length);
+                                 output in eurlc-wgs_qcscreen/
     --resume                     Continue in an existing output directory, only
                                  running what is missing (overwrite=resume)
     rerun=<step>[,<step>...]     Run these steps again in an existing output
@@ -2855,6 +2878,24 @@ foreach my $key (keys %args) {
 }
 
 ###################################################################################################
+## QC screen (--qc-screen): a quick check of the raw reads that tells the
+## sequencing lab whether a sample needs a bioinformatician's look. Runs only
+## prescan, fastp, species determination and (if needed) the genome size
+## estimate, then evaluates the normal QC thresholds and writes a compact
+## traffic-light report. The run list is cut down further below (after the
+## run-order lists are defined). Follow-up is a normal analysis, which can
+## be started on the same input at any time.
+if ($S_QCSCREEN) {
+    $R_cfg->{general}{trimming} = "fastp";   # Q30 and read-length numbers come from fastp
+    $R_cfg->{fastp}{enabled}    = 1;
+    if ( $R_cfg->{general}{fasta} ) {
+        $R_cfg->{general}{fasta} = 0;
+        log_message("NOTICE: QC screen: FASTA input is not screened (reads only)");
+    }
+    log_message("NOTICE: QC screen mode: raw-read QC only -- output in " . peekdir("out"), "green");
+}
+
+###################################################################################################
 ## summarize/summarise: deliberately handled here, after the entire dispatch
 ## loop above, instead of inside it -- see the comment in %postmountcheckhandlers
 ## where it used to live. This guarantees every other override (including
@@ -2899,6 +2940,8 @@ my %early_handled_args = (
     "import-schema"    => 1,   # also matches --import-schema=Dir (prefix match below)
     "update-catalog"   => 1,   # also matches --update-catalog[=url]
     "install-efsa-schemas" => 1,  # install EFSA One Health cgMLST schemas (also matches =species,...)
+    "qc-screen"        => 1,   # QC screen mode, checked directly against @ARGV ($S_QCSCREEN)
+    "qcscreen"         => 1,
 );
 # generate-seal=Name and install-scheme/schema=Species are passed as keys with the =... suffix
 for my $key (keys %args_handled) {
@@ -3700,6 +3743,7 @@ $INTERNAL_SUB{fastq_prescan_internal} = sub {
             adapters_checked        => 0,
             adapters_found          => 0,
             adapter_hits            => {},
+            adapter_pos_hist        => {},   # 1-based start of the first adapter hit -> reads
             header_examples         => [],
             header_patterns         => {},
             source_patterns         => {},
@@ -3808,12 +3852,18 @@ $INTERNAL_SUB{fastq_prescan_internal} = sub {
 
             if ($bucket->{reads_scanned} <= $MAX_ADAPTER_READS) {
                 $bucket->{adapters_checked}++;
+                # earliest hit of any adapter: its position drives the
+                # adapter-content curve (share of reads with adapter by position)
+                my ($best_pos, $best_i);
                 for (my $i = 0; $i < @adapters; $i++) {
-                    if (index($seq, $adapters[$i]) != -1) {
-                        $bucket->{adapters_found}++;
-                        $bucket->{adapter_hits}{$constants_adapters[$i]}++;
-                        last;
-                    }
+                    my $pos = index($seq, $adapters[$i]);
+                    next if $pos < 0;
+                    ($best_pos, $best_i) = ($pos, $i) if !defined $best_pos || $pos < $best_pos;
+                }
+                if (defined $best_pos) {
+                    $bucket->{adapters_found}++;
+                    $bucket->{adapter_hits}{$constants_adapters[$best_i]}++;
+                    $bucket->{adapter_pos_hist}{ $best_pos + 1 }++;
                 }
             }
 
@@ -4581,6 +4631,94 @@ sub ensure_genomesize_computed {
     delete $s->{targetbases};   # derived from the values just recomputed
 }
 
+# Largest genus other than the sample's own, from a Kraken2/Bracken result
+# hash ({bracken}{genus}{entries}, fallback {kraken2}{genus}). Skips the main
+# genus and the species' crossreactive_genus list (config, comma-separated;
+# e.g. Shigella for Escherichia coli, which Kraken cannot separate cleanly).
+# Returns (name, percent); ("n/a", 0) if there is none.
+sub largest_other_genus {
+    my ($res, $main_genus, $species) = @_;
+    my @hits = @{ $res->{bracken}{genus}{entries} // [] };
+    @hits = @{ $res->{kraken2}{genus} // [] } unless @hits;
+    my %skip;
+    $skip{ lc $main_genus } = 1 if defined $main_genus && $main_genus ne "n/a";
+    if ( defined $species && $species ne "n/a" ) {
+        my $cross = get_config_value_for_species($species, 'crossreactive_genus', "") // "";
+        $skip{ lc $_ } = 1 for grep { $_ ne "" } split /\s*,\s*/, $cross;
+    }
+    # no main genus known: the top hit is the sample itself
+    my $start = ( defined $main_genus && $main_genus ne "n/a" ) ? 0 : 1;
+    for my $k ( $start .. $#hits ) {
+        my $name = $hits[$k]{name} // next;
+        next if $name eq "n/a" || $skip{ lc $name };
+        return ( $name, $hits[$k]{percent} // 0 );
+    }
+    return ( "n/a", 0 );
+}
+
+# Typical genome sizes per species, for species that have no genomesize in
+# the configuration. Two tab-separated files, same format
+#     <species or genus><TAB><size in bp>[<TAB>comment]     (# = comment line)
+#   1. <db>/genome_sizes.tsv                 -- local additions/overrides
+#   2. share/eurlc-wgs/assets/genome_sizes.tsv (bundled; or assets/ next to
+#      the script in a development install)
+# An exact species match wins; otherwise a genus-only line. Returns
+# (size, source) or () if nothing matches.
+my %_genome_size_list;
+my $_genome_size_list_loaded = 0;
+sub lookup_typical_genome_size {
+    my ($species) = @_;
+    unless ($_genome_size_list_loaded) {
+        $_genome_size_list_loaded = 1;
+        my $script_dir = eval { dirname(abs_path($0)) } // "";
+        my @files = (
+            [ ( peekdir("db") // "" ) . "/genome_sizes.tsv", "local list" ],
+            [ ( peekdir("conda") // "" ) . "/share/eurlc-wgs/assets/genome_sizes.tsv", "bundled list" ],
+            [ "$script_dir/assets/genome_sizes.tsv", "bundled list" ],
+        );
+        for my $f (@files) {
+            my ($path, $label) = @$f;
+            next unless -f $path;
+            open( my $fh, '<', $path ) or next;
+            my $n = 0;
+            while ( my $line = <$fh> ) {
+                next if $line =~ /^\s*(#|$)/;
+                chomp $line;
+                my ($name, $size) = split /\t/, $line;
+                next unless defined $size && $size =~ /^\s*\d+\s*$/;
+                ( my $key = lc $name ) =~ s/_/ /g;
+                $key =~ s/^\s+|\s+$//g;
+                next if exists $_genome_size_list{$key};   # first file wins
+                $_genome_size_list{$key} = [ $size + 0, $label ];
+                $n++;
+            }
+            close $fh;
+            log_message("INFO: Genome size list [$path]: $n entries");
+        }
+    }
+    ( my $sp = lc( $species // "" ) ) =~ s/_/ /g;
+    $sp =~ s/^\s+|\s+$//g;
+    return () if $sp eq "";
+    return @{ $_genome_size_list{$sp} } if $_genome_size_list{$sp};
+    my ($genus) = split / /, $sp;
+    return ( $_genome_size_list{$genus}[0], "$_genome_size_list{$genus}[1], genus $genus" ) if $genus && $_genome_size_list{$genus};
+    return ();
+}
+
+# Raw-read coverage from fastp_rawdata's totals. fastp_rawdata runs before
+# the species is known, so its own numbers may lack a genome size; this
+# recomputes them at the end of the run.
+sub refresh_raw_coverage {
+    my ($samplenr) = @_;
+    my $s = $R_samples->[$samplenr];
+    my $before = $s->{results}{fastp_rawdata}{summary}{before_filtering} or return;
+    ensure_genomesize_computed($samplenr);
+    my $gs = $s->{estimated_genomesize} // 0;
+    return unless $gs =~ /^\d+(?:\.\d+)?$/ && $gs > 0;
+    $s->{main_results}{coverage}{raw}{coverage}     = safe_quota( $before->{total_bases}, $gs, "n/a" );
+    $s->{main_results}{coverage}{raw}{q30_coverage} = safe_quota( $before->{q30_bases},   $gs, "n/a" );
+}
+
 sub ensure_targetbases_computed {
     my ($samplenr) = @_;
     ensure_genomesize_computed($samplenr);
@@ -4657,6 +4795,19 @@ sub estimate_genomesize {
     
     $genomesize  = normalize_genomesize($genomesize);
 
+    # Not in the configuration: typical size from the genome size list
+    # (db/genome_sizes.tsv first, then the bundled list) before falling back
+    # to the k-mer estimate.
+    if ( ( !defined $genomesize || $genomesize eq "" || $genomesize =~ /^(0|auto)$/i )
+         && defined $prespeciescheck_result && $prespeciescheck_result !~ /^(n\/a|)$/i ) {
+        my ($size, $source) = lookup_typical_genome_size($prespeciescheck_result);
+        if ($size) {
+            $R_samples->[$samplenr]{estimated_genomesize}        = $size;
+            $R_samples->[$samplenr]{estimated_genomesize_method} = "typical size for $prespeciescheck_result ($source)";
+            return;
+        }
+    }
+
     if (defined $genomesize && $genomesize ne "" && $genomesize !~ /^(0|auto)$/i) {
       $R_samples->[$samplenr]{estimated_genomesize_method} = "provided estimate for $prespeciescheck_result";
     }  
@@ -4682,7 +4833,14 @@ sub estimate_genomesize {
         }    
         my $base = fill_placeholders("__BASE__", $samplenr);
 
-        # k-mer estimate: once per sample (0 = tried and failed)
+        # k-mer estimate: once per sample (0 = tried and failed). Not while
+        # $S_NO_KMER is set (species not known yet): leave the genome size
+        # open, the next call computes it.
+        if ( $S_NO_KMER && !exists $R_samples->[$samplenr]{kmer_genomesize} ) {
+            $R_samples->[$samplenr]{estimated_genomesize}        = undef;
+            $R_samples->[$samplenr]{estimated_genomesize_method} = "pending (species not known yet)";
+            return;
+        }
         unless ( exists $R_samples->[$samplenr]{kmer_genomesize} ) {
             check_conda_tool("jellyfish");
             $R_samples->[$samplenr]{kmer_genomesize} = determine_genomesize_jellyfish($R1, $R2, $base) // 0;
@@ -4945,7 +5103,7 @@ sub run_jellyfish {
     }
 
     ensure_dir($jellyfish_path);
-    log_message("NOTICE: $basename: estimating genome size from k-mer counts (jellyfish)...");
+    log_message("NOTICE: $basename: estimating genome size from k-mer counts (jellyfish) -- no genome size configured for its species");
     
     my $count_cmd = "conda run -n $R_cfg->{jellyfish}->{env} --no-capture-output bash -c \"$input_cmd | jellyfish count /dev/fd/0 -t $R_cfg->{general}->{threads} -s 100M -o $jf_file -m 21\"";
 
@@ -5393,7 +5551,10 @@ sub postprocess_fastp_rawdata {
                
    $R_samples->[$samplenr]{results}{$runstep_name} = $parsed;
 
-   ensure_genomesize_computed($samplenr);
+   # Species is not known yet: use a configured genome size if there is
+   # one, but do not run jellyfish for it. Raw coverage is (re)computed at
+   # the end, once the species is known -- see refresh_raw_coverage().
+   { local $S_NO_KMER = 1; ensure_genomesize_computed($samplenr); }
 
    my $genomesize = $R_samples->[$samplenr]{estimated_genomesize} // 0;
    my $maxdepth =  $R_samples->[$samplenr]{maxdepth};
@@ -5434,8 +5595,10 @@ sub postprocess_fastp_rawdata {
    $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{R2_R1_read_len_balance} = safe_rel($target->{summary}{after_filtering}{read2_mean_length},$target->{summary}{after_filtering}{read1_mean_length}, "n/a");
    $R_samples->[$samplenr]{main_results}{qscore}{raw}{R2_R1_read_len_balance} = safe_rel($target->{summary}{before_filtering}{read2_mean_length},$target->{summary}{before_filtering}{read1_mean_length}, "n/a");
        
-   $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{av_read_len} = ($target->{summary}{after_filtering}{read1_mean_length}+$target->{summary}{after_filtering}{read2_mean_length})/2;
-   $R_samples->[$samplenr]{main_results}{qscore}{raw}{av_read_len} = ($target->{summary}{before_filtering}{read1_mean_length}+$target->{summary}{before_filtering}{read2_mean_length})/2;
+   # mean of R1 and R2 -- or just R1 for single-end data (no read2 values)
+   my $mean_len = sub { my @v = grep { defined && /^\d+(?:\.\d+)?$/ } @_; @v ? ( List::Util::sum(@v) / @v ) : "n/a" };
+   $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{av_read_len} = $mean_len->( $target->{summary}{after_filtering}{read1_mean_length},  $target->{summary}{after_filtering}{read2_mean_length} );
+   $R_samples->[$samplenr]{main_results}{qscore}{raw}{av_read_len}     = $mean_len->( $target->{summary}{before_filtering}{read1_mean_length}, $target->{summary}{before_filtering}{read2_mean_length} );
        
    $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{gc} =  $rate_to_pct->($target->{summary}{after_filtering}{gc_content});
 
@@ -5448,6 +5611,20 @@ sub postprocess_fastp_rawdata {
 
 
    $R_samples->[$samplenr]{main_results}{coverage}{raw}{coverage} = $coverage_before // 0;
+
+   # Read loss and adapters (fastp's own counts over all reads). Short
+   # reads after trimming are the real problem with adapter-heavy data, so
+   # both are QC measures (qscore_trimmed_too_short_pct, ..._adapter_trimmed_pct).
+   {
+       my $total_reads = $target->{summary}{before_filtering}{total_reads};
+       my $fr  = $target->{filtering_result} // {};
+       my $ac  = $target->{adapter_cutting}  // {};
+       $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{too_short_pct} =
+           defined $fr->{too_short_reads} ? sprintf("%.1f", safe_rel($fr->{too_short_reads}, $total_reads, 0)) : "n/a";
+       $R_samples->[$samplenr]{main_results}{qscore}{raw}{adapter_trimmed_pct} =
+           defined $ac->{adapter_trimmed_reads} ? sprintf("%.1f", safe_rel($ac->{adapter_trimmed_reads}, $total_reads, 0)) : "n/a";
+       $R_samples->[$samplenr]{main_results}{qscore}{raw}{insert_size_peak} = $target->{insert_size}{peak} // "n/a";
+   }
 
 
 
@@ -5641,12 +5818,12 @@ $runstep{$runstep_name} = {
       applies_if => sub {
           my ($i) = @_;
           return 0 if $R_samples->[$i]{type} eq 'FASTA';
-          return 0 unless $R_cfg->{bbmap}{enabled};
-          return 1 if $S_STATIC_APPLIES;   # data-dependent part decided at run time
-          ensure_targetbases_computed($i);
-          my $tb = $R_samples->[$i]{targetbases};
-          return 0 unless defined $tb && $tb =~ /^\d+(?:\.\d+)?$/ && $tb > 0;
-          return 1;
+          # Config only. Both schedulers ask applies_if before requires,
+          # and in parallel mode a "no" is final -- so it must not depend on
+          # data that only exists once the species is known (targetbases).
+          # A sample without a usable target (maxdepth 0) is handled in the
+          # preprocessing: reads are linked instead of downsampled.
+          return $R_cfg->{bbmap}{enabled} ? 1 : 0;
       },
 };
 
@@ -5749,12 +5926,27 @@ sub preprocess_downsampling {
     
     log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
 
+    # Species is known here (requires species_determined), so the
+    # species' maxdepth/genomesize apply; jellyfish only runs if the
+    # genome size is not configured for it.
+    ensure_targetbases_computed($samplenr);
     my $tb = $R_samples->[$samplenr]{targetbases};
 
     if (!defined $tb || $tb eq "" || $tb !~ /^\d+(?:\.\d+)?$/ || $tb <= 0) {
-        log_message("NOTICE: Sample $sample_name: targetbases is undefined or 0, skipping downsampling", "yellow");
+        # No target depth (maxdepth 0/none): use the trimmed reads as they are.
+        log_message("NOTICE: Sample $sample_name: no downsampling target (maxdepth 0) -- using the trimmed reads as they are");
         $R_samples->[$samplenr]{downsampled} = 0;
-        return "";
+        $R_samples->[$samplenr]{_downsampling_linked} = 1;
+        my $link = $runstep{check_for_no_downsampling}{cmd_template}{$sample_type} // "";
+        my $have = $sample_type eq "PE"
+            ? ( -e fill_placeholders("__R1TD__", $samplenr) && -e fill_placeholders("__R2TD__", $samplenr) )
+            : -e fill_placeholders("__SETD__", $samplenr);
+        if ( $have || $link eq "" ) {
+            postprocess_nodownsampling($samplenr);
+            return "";
+        }
+        ensure_dir(fill_placeholders($runstep{check_for_no_downsampling}{output_dir}, $samplenr));
+        return fill_placeholders($link, $samplenr, "check_for_no_downsampling");
     }
 
     ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir},  $samplenr));
@@ -5780,6 +5972,9 @@ sub postprocess_downsampling {
     my $sample_name  = $R_samples->[$samplenr]{name};
     my $sample_type  = $R_samples->[$samplenr]{type}; 
     my $resultfile   = fill_placeholders($runstep{$runstep_name}{resultfile}, $samplenr, $runstep_name);
+
+    # Reads were linked, not downsampled (no target depth) -- see preprocessing.
+    return postprocess_nodownsampling($samplenr) if delete $R_samples->[$samplenr]{_downsampling_linked};
 
     # verify outputfiles
     if ($sample_type eq "PE") {
@@ -5967,12 +6162,7 @@ $runstep{$runstep_name} = {
       applies_if => sub {
           my ($i) = @_;
           return 0 if $R_samples->[$i]{type} eq 'FASTA';
-          return 1 unless $R_cfg->{bbmap}{enabled};
-          return 0 if $S_STATIC_APPLIES;   # complement of downsampling_bbmap's static answer
-          ensure_targetbases_computed($i);
-          my $tb = $R_samples->[$i]{targetbases};
-          return 1 unless defined $tb && $tb =~ /^\d+(?:\.\d+)?$/ && $tb > 0;
-          return 0;
+          return $R_cfg->{bbmap}{enabled} ? 0 : 1;   # exact complement, config only
       },
 };
 
@@ -6090,7 +6280,8 @@ $runstep{$runstep_name} = {
       # Was an unconditional "REQUIRED STEP" in the old @runorder_loop1 --
       # no enabled flag, always applies. FASTA naturally excluded since
       # trimmed_downsampled_fastq is never satisfied for it.
-      requires   => [ 'trimmed_downsampled_fastq' ],
+      # species_determined: coverage uses the species' genome size
+      requires   => [ 'trimmed_downsampled_fastq', 'species_determined' ],
       produces   => [ 'fastq_stats_trimmed_done' ],
       applies_if => sub { return 1; },
 };
@@ -6224,6 +6415,7 @@ sub postprocess_fastq_stats_trimmed {
 
     my $res = $R_samples->[$samplenr]{results}{$runstep_name};
 
+    ensure_genomesize_computed($samplenr);   # species known (requires species_determined)
     my $bases = $res->{total}{bases};
     my $Q30bases = $res->{total}{q30_bases};
     my $reads = $res->{total}{reads};
@@ -6447,7 +6639,8 @@ $runstep{$runstep_name} = {
       resultfile => "__DIR-QC2__/Fastp_trimmed_data/__BASE__.trimmed.json",
       resultfiles_status => "NA",
 
-      requires   => [ 'trimmed_downsampled_fastq' ],
+      # species_determined: coverage uses the species' genome size
+      requires   => [ 'trimmed_downsampled_fastq', 'species_determined' ],
       produces   => [ 'fastp_trimmed_data_done' ],
       applies_if => sub { return $R_cfg->{fastp}{rerun} ? 1 : 0; },
 };
@@ -6557,6 +6750,7 @@ sub postprocess_fastp_trimmed_data {
     
    $R_samples->[$samplenr]{results}{$runstep_name} = $parsed;
    
+   ensure_genomesize_computed($samplenr);   # species known (requires species_determined)
    my $genomesize = $R_samples->[$samplenr]{estimated_genomesize};
    my $targetbases =  $R_samples->[$samplenr]{targetbases};
    my $maxdepth =  $R_samples->[$samplenr]{maxdepth};
@@ -7299,13 +7493,8 @@ sub postprocess_kraken2 {
     # contamination check: genus level
     # use second-ranked entry, with bracken -> kraken2 fallback
 
-    my $genus2_result         = $R_samples->[$samplenr]{results}{$runstep_name}{bracken}{genus}{entries}[1]{name}    // "n/a";
-    my $genus2_result_percent = $R_samples->[$samplenr]{results}{$runstep_name}{bracken}{genus}{entries}[1]{percent} // 0;
-
-    if ($genus2_result eq "n/a") {
-        $genus2_result         = $R_samples->[$samplenr]{results}{$runstep_name}{kraken2}{genus}[1]{name}    // "n/a";
-        $genus2_result_percent = $R_samples->[$samplenr]{results}{$runstep_name}{kraken2}{genus}[1]{percent} // 0;
-    }
+    my ($genus2_result, $genus2_result_percent) =
+        largest_other_genus( $R_samples->[$samplenr]{results}{$runstep_name}, $genus_result, $species_result );
 
     my $color = "green";
     if ($genus2_result_percent > 5) { $color = "yellow"; }
@@ -16451,6 +16640,16 @@ our @PER_SAMPLE_RUNSTEPS = qw(
 our @BATCH_RUNSTEPS_PRE  = qw( sort_assemblies checkm chewbbaca chewbbaca_regenerate_per_batch );
 our @BATCH_RUNSTEPS_POST = qw( multiqc );
 
+# QC screen: only the quick raw-read steps; genome size (config, list, or
+# jellyfish when needed) and the QC evaluation happen at the end.
+our @QCSCREEN_RUNSTEPS = qw( sample_prescan fastp_rawdata check_for_no_trimming find_species_kraken2 );
+if ($S_QCSCREEN) {
+    my %keep = map { $_ => 1 } @QCSCREEN_RUNSTEPS;
+    @PER_SAMPLE_RUNSTEPS = grep { $keep{$_} } @PER_SAMPLE_RUNSTEPS;
+    @BATCH_RUNSTEPS_PRE  = ();
+    @BATCH_RUNSTEPS_POST = ();
+}
+
 # Sanity check: every listed name must have a runstep definition. A typo
 # here would otherwise make a runstep silently never run.
 {
@@ -16494,7 +16693,7 @@ if ( is_resume_mode() && ( $rundata{config}{overrides} // "" ) !~ /chewbbaca_mod
 
 {
     my $t0 = time();
-    log_message("NOTICE: Validating pipeline configuration...");
+    log_message("INFO: Validating pipeline configuration");
     normalize_species_runsteps();   # species => [...] adds implicit requires species_determined
     validate_runstep_graph();       # logs the time of each check
     prepare_rerun();   # rerun=<steps>: remove their results + dependents' (resume mode only)
@@ -16746,6 +16945,9 @@ for(my $samplenr=0;$samplenr< @$R_samples; $samplenr++ ){
    # finished.
    load_expectations($samplenr);
 
+   refresh_raw_coverage($samplenr);   # now with the species' genome size
+   qcscreen_prepare_sample($samplenr) if $S_QCSCREEN;
+
    evaluate_sample_qc($samplenr);
 
 }
@@ -16761,10 +16963,14 @@ save_hash_as_json($rundata_file, \%rundata);
 ## call reporting subs and close
   
 
-summarize_results();
+# QC screen: its own compact report (written after the exit code is known,
+# below); the full report needs results the screen does not produce.
+unless ($S_QCSCREEN) {
+    summarize_results();
 
-# Detected species whose species-specific tools are disabled in the config.
-report_species_tools_not_run( \@PER_SAMPLE_RUNSTEPS );
+    # Detected species whose species-specific tools are disabled in the config.
+    report_species_tools_not_run( \@PER_SAMPLE_RUNSTEPS );
+}
 
 # Exit code decision -- must run BEFORE close_logfile() so the two
 # log_message calls below actually reach the logfile.
@@ -16782,6 +16988,8 @@ my $_exit_code = 0;
         $_exit_code = 3;
     }
 }
+
+write_qcscreen_outputs($_exit_code) if $S_QCSCREEN;
 
 print_run_summary($_exit_code);
 
@@ -28310,7 +28518,7 @@ sub print_run_summary {
     # Where to look
     my $out = eval { abs_path( getdir("out") ) } // "";
     if ( $out ne "" ) {
-        my $report = "$out/report/main_report.html";
+        my $report = $S_QCSCREEN ? "$out/qcscreen_report.html" : "$out/report/main_report.html";
         $add->(sprintf "  %-12s %s", "Report:", $report) if -f $report;
         $add->(sprintf "  %-12s %s", "Log:", "$out/log/log.txt   (search: \"$RUN_BANNER_TAG\")");
     }
@@ -28337,6 +28545,347 @@ sub print_run_summary {
     print {$log_fh} $plain if $logfile_open && $log_fh;
     if ( $out ne "" && open( my $fh, '>', "$out/log/run_summary.txt" ) ) { print {$fh} $plain; close $fh; }
 }
+
+###################################################################################################
+## QC screen (--qc-screen) -- metrics, verdict, report and JSON status.
+##
+## The screen runs only sample_prescan, fastp_rawdata and find_species_kraken2
+## (see @QCSCREEN_RUNSTEPS). At the end of the run, per sample:
+##   qcscreen_prepare_sample  -- trimmed Q30 coverage from fastp's
+##       after-filtering totals and the genome size (config, genome size
+##       list, or jellyfish), and the largest other genus from the species
+##       determination; then the normal QC thresholds are evaluated.
+##   qcscreen_sample_status   -- traffic light: worst of the QC thresholds
+##       and the runtime issues (FAIL/CRITICAL = red, WARNING = yellow).
+## write_qcscreen_outputs writes qcscreen_report.html and qcscreen_status.json
+## at the top of the output folder.
+
+sub qcscreen_prepare_sample {
+    my ($i) = @_;
+    my $s = $R_samples->[$i];
+
+    # Coverage after trimming (fastp output, i.e. before any downsampling)
+    my $after = $s->{results}{fastp_rawdata}{summary}{after_filtering};
+    my $gs    = $s->{estimated_genomesize} // 0;
+    if ( $after && $gs =~ /^\d+(?:\.\d+)?$/ && $gs > 0 ) {
+        $s->{main_results}{coverage}{trimmed}{coverage}     = safe_quota( $after->{total_bases}, $gs, "n/a" );
+        $s->{main_results}{coverage}{trimmed}{q30_coverage} = safe_quota( $after->{q30_bases},   $gs, "n/a" );
+    }
+
+    # Largest other genus, from the species determination (100 000 reads)
+    my $tax = $s->{main_results}{taxonomy} // {};
+    my ($g, $p) = largest_other_genus( $s->{results}{find_species_kraken2} // {}, $tax->{genus}, $tax->{species} );
+    $s->{main_results}{contamination}{genus}        = $g;
+    $s->{main_results}{contamination}{genus_level}  = $p;
+    $s->{main_results}{contamination}{genus_method} = "Kraken2/Bracken (species determination subset)";
+
+    if ( ( $tax->{species} // "n/a" ) =~ /^(n\/a|)$/ ) {
+        set_runtime_issue($i, "warning", "Species could not be determined");
+    }
+}
+
+# BEGIN: this file-scope table sits after the main program, which has
+# already run before a plain assignment here would execute.
+my %_QCSCREEN_RANK;
+BEGIN { %_QCSCREEN_RANK = ( PASS => 0, WARNING => 1, CRITICAL => 2, FAIL => 3 ); }
+
+sub qcscreen_sample_status {
+    my ($s) = @_;
+    my $status = $s->{report_issues}{summary}{status} // "PASS";
+    $status = "PASS" unless exists $_QCSCREEN_RANK{$status};
+    my @msgs;
+    for my $lvl (qw(fail critical warning)) {
+        push @msgs, @{ $s->{report_issues}{summary}{issues}{$lvl} // [] };
+        my @rt = @{ $s->{runtime_issues}{issues}{$lvl} // [] };
+        push @msgs, @rt;
+        my $L = uc $lvl;
+        $status = $L if @rt && $_QCSCREEN_RANK{$L} > $_QCSCREEN_RANK{$status};
+    }
+    if ( $s->{fatal_error} ) {
+        $status = "FAIL";
+        push @msgs, @{ $s->{fatal_error_message} // [] };
+    }
+    my %seen;
+    @msgs = grep { defined $_ && $_ ne "" && !$seen{$_}++ } @msgs;
+    return ( $status, \@msgs );
+}
+
+sub _qcs_light { my ($st) = @_; return $st eq "PASS" ? "green" : $st eq "WARNING" ? "yellow" : "red"; }
+
+sub _qcs_num {
+    my ($v, $fmt) = @_;
+    return "&ndash;" if !defined $v || $v eq "" || $v !~ /^-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?$/;
+    return sprintf($fmt // "%.1f", $v);
+}
+
+# One table cell, coloured by the QC status of a measure.
+sub _qcs_cell {
+    my ($s, $measure, $text, $kind) = @_;
+    my $st = $measure ? ( $s->{qc_checks}{$measure}{status} // "NOT_EVALUATED" ) : "NOT_EVALUATED";
+    my $cls = " class=\"num" . ( $st eq "NOT_EVALUATED" ? "" : " m-" . lc( _qcs_light($st) ) ) . "\"";
+    my $tip = $measure ? encode_entities( $s->{qc_checks}{$measure}{message} // "" ) : "";
+    $cls =~ s/num ?// if ( $kind // "" ) eq "text";
+    return "<td$cls" . ( $tip ne "" ? " title=\"$tip\"" : "" ) . ">$text</td>";
+}
+
+# Adapter-content curve per sample: share of scanned reads (R1+R2) whose
+# first adapter hit starts at or before each position.
+sub _qcs_adapter_curve {
+    my ($s) = @_;
+    my $ps = $s->{results}{fastq_prescan} or return;
+    my (%hist, $checked, $maxlen, $files);
+    for my $b (qw(R1 R2)) {
+        my $bk = $ps->{$b} or next;
+        next unless $bk->{adapters_checked};
+        $files++;
+        $checked += $bk->{adapters_checked} // 0;
+        $hist{$_} += $bk->{adapter_pos_hist}{$_} for keys %{ $bk->{adapter_pos_hist} // {} };
+        my $ml = $bk->{max_length} // $bk->{longest} // 0;
+        $maxlen = $ml if !$maxlen || $ml > $maxlen;
+    }
+    return unless $checked && $maxlen;
+    my ($cum, @pts) = (0);
+    for my $pos ( 1 .. $maxlen ) {
+        $cum += $hist{$pos} // 0;
+        push @pts, [ $pos, 100 * $cum / $checked ];
+    }
+    return { points => \@pts, maxlen => $maxlen, checked => $checked, per_file => int( $checked / ( $files || 1 ) ) };
+}
+
+sub _qcs_adapter_svg {
+    my (@series) = @_;   # [ name, curve ]
+    @series = grep { $_->[1] } @series;
+    return "<p class=\"muted\">No adapter scan data available.</p>" unless @series;
+    my ( $W, $H, $L, $R, $T, $B ) = ( 860, 280, 52, 16, 14, 40 );
+    my $xmax = 0; my $ymax = 10;
+    for my $se (@series) {
+        $xmax = $se->[1]{maxlen} if $se->[1]{maxlen} > $xmax;
+        my $last = $se->[1]{points}[-1][1];
+        $ymax = $last if $last > $ymax;
+    }
+    $ymax = $ymax <= 10 ? 10 : $ymax <= 25 ? 25 : $ymax <= 50 ? 50 : 100;
+    my $px = sub { $L + ( $_[0] - 1 ) / ( $xmax > 1 ? $xmax - 1 : 1 ) * ( $W - $L - $R ) };
+    my $py = sub { $T + ( 1 - $_[0] / $ymax ) * ( $H - $T - $B ) };
+    my @pal = map { "#$_" } qw(2a6fdb e8710a 1e9e6a c2185b 7b4fd6 8d6e00 00838f d84315 5d6d7e 9e9d24);
+    my $svg = "<svg viewBox=\"0 0 $W $H\" class=\"chart\" role=\"img\" aria-label=\"Adapter content by read position\">";
+    for my $k ( 0 .. 4 ) {
+        my $yv = $ymax * $k / 4; my $y = sprintf("%.1f", $py->($yv));
+        $svg .= "<line x1=\"$L\" x2=\"" . ( $W - $R ) . "\" y1=\"$y\" y2=\"$y\" class=\"grid\"/>"
+              . "<text x=\"" . ( $L - 6 ) . "\" y=\"" . ( $y + 4 ) . "\" class=\"ax\" text-anchor=\"end\">" . ( $yv == int $yv ? $yv : sprintf("%.1f", $yv) ) . "%</text>";
+    }
+    my $step = $xmax > 200 ? 50 : $xmax > 100 ? 25 : 10;
+    for ( my $x = $step; $x <= $xmax; $x += $step ) {
+        $svg .= "<text x=\"" . sprintf("%.1f", $px->($x)) . "\" y=\"" . ( $H - $B + 16 ) . "\" class=\"ax\" text-anchor=\"middle\">$x</text>";
+    }
+    $svg .= "<text x=\"" . ( ( $W + $L ) / 2 ) . "\" y=\"" . ( $H - 6 ) . "\" class=\"ax\" text-anchor=\"middle\">Position in read (bp)</text>";
+    my $n = 0;
+    for my $se (@series) {
+        my ($name, $c) = @$se;
+        my $col = $pal[ $n++ % @pal ];
+        my $d = join(" ", map { sprintf("%s%.1f,%.1f", ( $_ == 0 ? "M" : "L" ), $px->( $c->{points}[$_][0] ), $py->( $c->{points}[$_][1] )) } 0 .. $#{ $c->{points} });
+        my $tip = encode_entities($name) . sprintf(": %.1f%% of reads contain adapter (first %d reads per file)", $c->{points}[-1][1], $c->{per_file});
+        $svg .= "<path d=\"$d\" fill=\"none\" stroke=\"$col\" stroke-width=\"1.8\"><title>$tip</title></path>";
+        $se->[2] = $col;
+    }
+    $svg .= "</svg><div class=\"legend\">"
+          . join("", map { "<span><i style=\"background:$_->[2]\"></i>" . encode_entities($_->[0]) . "</span>" } @series)
+          . "</div>";
+    return $svg;
+}
+
+sub write_qcscreen_outputs {
+    my ($exit_code) = @_;
+    my $out = getdir("out");
+    my @rows; my %count = ( green => 0, yellow => 0, red => 0 );
+    my ( %instr, %runs, %flow, $cycles, $tot_reads, $tot_bases, $tot_q30, @dates );
+    my @json_samples; my @curves;
+
+    for my $i ( 0 .. $#$R_samples ) {
+        my $s   = $R_samples->[$i];
+        my $mr  = $s->{main_results} // {};
+        my ($st, $msgs) = qcscreen_sample_status($s);
+        my $light = _qcs_light($st);
+        $count{$light}++;
+
+        my $rd = $mr->{run_data} // {};
+        $instr{ $rd->{instrument} . ( ( $rd->{machine_alias} // "n/a" ) ne "n/a" && $rd->{machine_alias} ne $rd->{instrument} ? " ($rd->{machine_alias})" : "" ) }++
+            if ( $rd->{instrument} // "n/a" ) ne "n/a" && $rd->{instrument} ne "";
+        $runs{ $rd->{run_number} }++ if ( $rd->{run_number} // "" ) =~ /\S/ && $rd->{run_number} ne "n/a";
+        $flow{ $rd->{flowcell} }++   if ( $rd->{flowcell}   // "" ) =~ /\S/ && $rd->{flowcell}   ne "n/a";
+        my $longest = $mr->{qscore}{raw}{longest_read_len};
+        $cycles = $longest if defined $longest && $longest =~ /^\d+$/ && ( !$cycles || $longest > $cycles );
+        my $before = $s->{results}{fastp_rawdata}{summary}{before_filtering} // {};
+        my $after  = $s->{results}{fastp_rawdata}{summary}{after_filtering}  // {};
+        $tot_reads += $before->{total_reads} // 0;
+        $tot_bases += $before->{total_bases} // 0;
+        $tot_q30   += $before->{q30_bases}   // 0;
+        my $d = normalize_date_to_ymd( $s->{rawdata_stats}{R1}{created} // $s->{rawdata_stats}{SE}{created} );
+        push @dates, $d if $d;
+
+        my $tax     = $mr->{taxonomy} // {};
+        my $species = $tax->{species} // "n/a";
+        my $sp_html = $species eq "n/a" || $species eq ""
+            ? "<span class=\"muted\">not determined</span>"
+            : "<em>" . encode_entities($species) . "</em> <span class=\"muted\">" . _qcs_num( $tax->{species_score}, "%d" ) . "%</span>";
+        my $cg = $mr->{contamination}{genus} // "n/a";
+        my $other_html = $cg eq "n/a" ? "&ndash;"
+            : encode_entities($cg) . " " . _qcs_num( $mr->{contamination}{genus_level}, "%.2f" ) . "%";
+        my $gs_method = $s->{estimated_genomesize_method} // "";
+        my $gs_src = $gs_method =~ /^provided/ ? "config" : $gs_method =~ /^typical/ ? "list" : $gs_method =~ /k-mer/ ? "k-mer est." : $gs_method =~ /fallback/ ? "default" : "";
+        my $gs_html = _qcs_num( ( $s->{estimated_genomesize} // 0 ) / 1e6, "%.2f" ) . ( $gs_src ne "" ? " <span class=\"tag\" title=\"" . encode_entities($gs_method) . "\">$gs_src</span>" : "" );
+        my $q30mb = defined $after->{q30_bases} ? _qcs_num( $after->{q30_bases} / 1e6, "%.0f" ) : "&ndash;";
+
+        # Remarks go on their own line under the sample (keeps the table narrow)
+        my $remarks = @$msgs
+            ? "<tr class=\"remarks row-$light\"><td></td><td colspan=\"9\"><ul>"
+              . join("", map { "<li>" . encode_entities($_) . "</li>" } @$msgs[ 0 .. ( $#$msgs < 4 ? $#$msgs : 4 ) ])
+              . ( @$msgs > 5 ? "<li class=\"muted\">+" . ( @$msgs - 5 ) . " more (see the log)</li>" : "" )
+              . "</ul></td></tr>"
+            : "";
+
+        push @rows, "<tr class=\"row-$light\">"
+            . "<td><span class=\"light $light\" aria-hidden=\"true\"></span><span class=\"st\">" . ( $st eq "PASS" ? "OK" : $st ) . "</span></td>"
+            . "<td class=\"name\">" . encode_entities( $s->{name} // "?" ) . "</td>"
+            . "<td>$sp_html</td>"
+            . _qcs_cell( $s, "contamination_genus_level", $other_html, "text" )
+            . "<td class=\"num\">$q30mb</td>"
+            . "<td class=\"num\">$gs_html</td>"
+            . _qcs_cell( $s, "coverage_trimmed_q30_coverage", _qcs_num( $mr->{coverage}{trimmed}{q30_coverage}, "%.0f" ) . "&times;" )
+            . _qcs_cell( $s, "qscore_trimmed_average_read_length", _qcs_num( $mr->{qscore}{trimmed}{av_read_len}, "%.0f" ) )
+            . _qcs_cell( $s, "qscore_trimmed_too_short_pct", _qcs_num( $mr->{qscore}{trimmed}{too_short_pct} ) )
+            . _qcs_cell( $s, "qscore_raw_adapter_trimmed_pct", _qcs_num( $mr->{qscore}{raw}{adapter_trimmed_pct} ) )
+            . "</tr>" . $remarks;
+
+        push @curves, [ $s->{name} // "?", _qcs_adapter_curve($s) ];
+        push @json_samples, {
+            name                => $s->{name},
+            status              => $st,
+            light               => $light,
+            species             => $species,
+            species_score       => $tax->{species_score},
+            other_genus         => $cg,
+            other_genus_pct     => $mr->{contamination}{genus_level},
+            q30_bases_trimmed   => $after->{q30_bases},
+            genome_size         => $s->{estimated_genomesize},
+            genome_size_method  => $gs_method,
+            q30_coverage        => $mr->{coverage}{trimmed}{q30_coverage},
+            mean_read_length    => $mr->{qscore}{trimmed}{av_read_len},
+            too_short_pct       => $mr->{qscore}{trimmed}{too_short_pct},
+            adapter_pct         => $mr->{qscore}{raw}{adapter_trimmed_pct},
+            insert_size_peak    => $mr->{qscore}{raw}{insert_size_peak},
+            issues              => $msgs,
+        };
+    }
+
+    my $overall = $count{red} ? "red" : $count{yellow} ? "yellow" : "green";
+    $overall = "red" if $exit_code != 0 && $exit_code != 3;
+    my $n = scalar @$R_samples;
+    my $headline =
+        $overall eq "green"  ? "All $n samples passed the QC screen"
+      : $overall eq "yellow" ? "$count{yellow} of $n samples have warnings &ndash; ask a bioinformatician to assess them"
+      :                        ( $count{red} || "Some" ) . " of $n samples did not pass &ndash; contact a bioinformatician before continuing";
+
+    my $ri    = $rundata{illuminafiles}{runinfo}{run} // {};
+    my $date  = $ri->{date} || ( sort @dates )[0] || "&ndash;";
+    my $join  = sub { my $h = shift; my @k = sort keys %$h; @k ? encode_entities( join(", ", @k) ) : "&ndash;" };
+    my $q30pct = $tot_bases ? sprintf("%.1f %%", 100 * $tot_q30 / $tot_bases) : "&ndash;";
+    my $runname = encode_entities( basename( peekdir("in") // "" ) );
+    my $generated = get_datetime_for_report();
+
+    my $html = <<"HTML";
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QC screen &ndash; $runname</title>
+<style>
+:root{--ink:#1d2430;--muted:#6b7480;--line:#e3e6ea;--bg:#f6f7f9;--card:#fff;--green:#1e9e5a;--yellow:#e0a100;--red:#d23b3b;
+--g-bg:#e8f6ee;--y-bg:#fdf5dd;--r-bg:#fbe7e7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{background:#24303f;color:#fff;padding:18px 28px}header h1{margin:0;font-size:20px;font-weight:600}
+header .sub{color:#c6ced8;font-size:13px;margin-top:2px}
+main{max-width:1280px;margin:0 auto;padding:20px 28px 40px}
+.verdict{display:flex;align-items:center;gap:14px;padding:16px 20px;border-radius:8px;margin-bottom:18px;font-size:17px;font-weight:600}
+.verdict.green{background:var(--g-bg);color:#14663b}.verdict.yellow{background:var(--y-bg);color:#7a5800}.verdict.red{background:var(--r-bg);color:#8f1f1f}
+.verdict .light{width:22px;height:22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px 20px;margin-bottom:18px}
+.card h2{font-size:15px;margin:0 0 12px;font-weight:600}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px 24px}
+.facts div span{display:block;color:var(--muted);font-size:12px}.facts div b{font-weight:600}
+.counts{display:flex;gap:18px;margin-top:4px;font-size:13px}.counts span{display:flex;align-items:center;gap:6px}
+table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.02em;vertical-align:bottom}
+td.num,th.num{text-align:right;white-space:nowrap}td.name{font-weight:600;white-space:nowrap}
+td.m-green{color:#14663b}td.m-yellow{background:var(--y-bg);color:#7a5800;font-weight:600}td.m-red{background:var(--r-bg);color:#8f1f1f;font-weight:600}
+tr.remarks td{border-top:0;padding-top:0;padding-bottom:9px}tr.remarks ul{margin:0;padding-left:16px}tr.remarks li{font-size:12px;color:#4a5361}
+tbody tr:has(+ tr.remarks) td{border-bottom:0}
+
+.light{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:7px;vertical-align:-1px}
+.light.green{background:var(--green)}.light.yellow{background:var(--yellow)}.light.red{background:var(--red)}
+.st{font-weight:600;font-size:12px}.muted{color:var(--muted)}
+.tag{display:inline-block;font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:0 4px;margin-left:4px}
+.chart{width:100%;height:auto}.chart .grid{stroke:var(--line)}.chart .ax{fill:var(--muted);font-size:11px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;margin-top:6px}.legend i{display:inline-block;width:14px;height:3px;margin-right:5px;vertical-align:middle}
+.note{font-size:12px;color:var(--muted)}.note p{margin:4px 0}
+footer{font-size:12px;color:var(--muted);text-align:center;margin-top:26px}
+.scroll{overflow-x:auto}
+\@media print{body{background:#fff}header{background:#fff;color:#000;border-bottom:2px solid #000}.card{break-inside:avoid}}
+</style></head><body>
+<header><h1>QC screen &ndash; $runname</h1><div class="sub">Generated $generated &middot; eurlc-wgs ${\ get_pipeline_version_for_report() }</div></header>
+<main>
+<div class="verdict $overall"><span class="light $overall" aria-hidden="true"></span>$headline</div>
+<div class="card"><h2>Run</h2><div class="facts">
+<div><span>Instrument</span><b>${\ $join->(\%instr) }</b></div>
+<div><span>Run number</span><b>${\ $join->(\%runs) }</b></div>
+<div><span>Flowcell</span><b>${\ $join->(\%flow) }</b></div>
+<div><span>Date</span><b>${\ encode_entities($date) }</b></div>
+<div><span>Max read length</span><b>${\ ( $cycles // "&ndash;" ) }</b></div>
+<div><span>Reads</span><b>${\ ( $tot_reads ? sprintf("%.2f M", $tot_reads / 1e6) : "&ndash;" ) }</b></div>
+<div><span>Bases</span><b>${\ ( $tot_bases ? sprintf("%.2f Gb", $tot_bases / 1e9) : "&ndash;" ) }</b></div>
+<div><span>Q30 bases</span><b>$q30pct</b></div>
+</div>
+<div class="counts"><span><i class="light green"></i>$count{green} OK</span><span><i class="light yellow"></i>$count{yellow} warning</span><span><i class="light red"></i>$count{red} not passed</span></div>
+</div>
+<div class="card"><h2>Samples</h2><div class="scroll"><table>
+<thead><tr><th>Status</th><th>Sample</th><th>Species</th><th>Largest other genus</th><th class="num">Q30 bases<br>Mb</th><th class="num">Genome<br>size Mb</th><th class="num">Q30<br>coverage</th><th class="num">Mean read<br>length bp</th><th class="num">Too short<br>%</th><th class="num">With<br>adapter %</th></tr></thead>
+<tbody>
+${\ join("\n", @rows) }
+</tbody></table></div>
+<div class="note"><p>Values after adapter and quality trimming (fastp). Coloured cells are outside a QC threshold; hover a cell for the threshold. Thresholds are the same as in the full analysis and are set in the configuration (per species where configured).</p></div>
+</div>
+<div class="card"><h2>Adapter content</h2>
+${\ _qcs_adapter_svg(@curves) }
+<div class="note"><p>Share of reads containing an Illumina adapter at or before each position (first reads of each file). Adapters early in the read mean short inserts: after trimming those reads become short or are removed.</p></div>
+</div>
+<div class="card note"><h2 style="color:var(--ink)">How to read this report</h2>
+<p><span class="light green"></span><b>OK</b> &ndash; all checks within thresholds.</p>
+<p><span class="light yellow"></span><b>Warning</b> &ndash; a value is outside a warning threshold, or the species could not be determined. A bioinformatician should look at the sample.</p>
+<p><span class="light red"></span><b>Not passed</b> &ndash; a value is outside a critical or fail threshold (e.g. Q30 coverage below the minimum, more than 5 % of another genus). Contact a bioinformatician before the sample is used.</p>
+<p>Species and other genus: Kraken2/Bracken on 100&nbsp;000 trimmed reads. Genome size: from the configuration, the genome size list, or a k-mer estimate (jellyfish) when the species is unknown or not listed.</p>
+</div>
+<footer>Input ${\ get_input_path_for_report() } &middot; ${\ get_user_for_report() }\@${\ get_hostname_for_report() } &middot; full results and log in ${\ encode_entities($out) }</footer>
+</main></body></html>
+HTML
+
+    my $report = "$out/qcscreen_report.html";
+    if ( open( my $fh, '>:encoding(UTF-8)', $report ) ) { print {$fh} $html; close $fh; }
+    else { log_message("ERROR: Could not write QC screen report [$report]: $!", "red"); }
+
+    write_json_file( {
+        pipeline   => "eurlc-wgs",
+        version    => $rundata{pipeline_info}{version},
+        mode       => "qcscreen",
+        generated  => $generated,
+        input      => $rundata{pipeline_info}{input_path},
+        exit_code  => $exit_code,
+        overall    => $overall,
+        counts     => \%count,
+        report     => $report,
+        samples    => \@json_samples,
+    }, "$out/qcscreen_status.json" );
+
+    log_message("NOTICE: QC screen report: $report", $overall eq "green" ? "green" : $overall eq "yellow" ? "yellow" : "red");
+    return $overall;
+}
+
 
 sub initiate_logfile {
     my $logfile = getdir("out,log") . "/log.txt";
@@ -32609,6 +33158,7 @@ sub test_data_driven_runsteps {
 
     my $sample_name = $R_samples->[$i]{name} // "sample $i";
     my $in_parallel = lc($R_cfg->{general}{parallel_mode} // 'off') eq 'on';
+    local $S_STATIC_APPLIES = 1;   # test phase: no sample data yet, never run tools here
 
     for my $name ( @$runstep_names ) {
         my $def = $runstep{$name};

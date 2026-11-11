@@ -1,0 +1,127 @@
+# eurlc-wgs -- typical genome sizes (bp), used when a species has no
+# genomesize in the configuration ([species__<name>] genomesize=...).
+#
+# Format: <species or genus><TAB><size in bp><TAB><comment>
+# Lines starting with # are comments. A species line wins over a genus line.
+# Values are rounded typical sizes of complete genomes (NCBI RefSeq), meant
+# for coverage estimates (+-10 % is fine for that), not as reference values.
+#
+# Local additions or corrections: put a file with the same format in the
+# database folder as genome_sizes.tsv -- its entries take precedence.
+#
+# --- Campylobacteraceae / Helicobacter
+Campylobacter jejuni	1700000
+Campylobacter coli	1750000
+Campylobacter lari	1550000
+Campylobacter upsaliensis	1700000
+Campylobacter fetus	1850000
+Campylobacter hyointestinalis	1800000
+Campylobacter	1700000	genus fallback
+Arcobacter butzleri	2300000
+Aliarcobacter butzleri	2300000
+Helicobacter pylori	1650000
+# --- Enterobacterales
+Salmonella enterica	4850000
+Salmonella bongori	4500000
+Salmonella	4850000	genus fallback
+Escherichia coli	5100000
+Escherichia albertii	4700000
+Escherichia	5000000	genus fallback
+Shigella flexneri	4600000
+Shigella sonnei	4900000
+Shigella boydii	4600000
+Shigella dysenteriae	4400000
+Shigella	4700000	genus fallback
+Klebsiella pneumoniae	5500000
+Klebsiella oxytoca	6000000
+Klebsiella aerogenes	5300000
+Enterobacter cloacae	4900000
+Citrobacter freundii	5100000
+Citrobacter koseri	4700000
+Cronobacter sakazakii	4400000
+Proteus mirabilis	4000000
+Serratia marcescens	5200000
+Yersinia enterocolitica	4600000
+Yersinia pseudotuberculosis	4750000
+Yersinia pestis	4650000
+Morganella morganii	3900000
+Hafnia alvei	4700000
+# --- Listeria
+Listeria monocytogenes	3000000
+Listeria innocua	3000000
+Listeria ivanovii	2900000
+Listeria welshimeri	2800000
+Listeria seeligeri	2800000
+Listeria	2950000	genus fallback
+# --- Staphylococcus / Streptococcus / Enterococcus
+Staphylococcus aureus	2800000
+Staphylococcus epidermidis	2500000
+Staphylococcus pseudintermedius	2600000
+Staphylococcus hyicus	2500000
+Staphylococcus	2700000	genus fallback
+Streptococcus pneumoniae	2100000
+Streptococcus pyogenes	1850000
+Streptococcus agalactiae	2100000
+Streptococcus suis	2100000
+Streptococcus equi	2150000
+Streptococcus uberis	1900000
+Streptococcus dysgalactiae	2150000
+Streptococcus	2100000	genus fallback
+Enterococcus faecalis	2900000
+Enterococcus faecium	2900000
+Enterococcus	2900000	genus fallback
+# --- Bacillota, other
+Clostridioides difficile	4200000
+Clostridium perfringens	3300000
+Clostridium botulinum	3900000
+Bacillus cereus	5400000
+Bacillus subtilis	4200000
+Bacillus anthracis	5250000
+Bacillus licheniformis	4300000
+Paenibacillus larvae	4300000
+Erysipelothrix rhusiopathiae	1800000
+Lactococcus lactis	2500000
+# --- Pseudomonadota, other
+Pseudomonas aeruginosa	6500000
+Pseudomonas fluorescens	6500000
+Acinetobacter baumannii	3950000
+Vibrio parahaemolyticus	5100000
+Vibrio cholerae	4050000
+Vibrio vulnificus	5100000
+Aeromonas hydrophila	4900000
+Aeromonas salmonicida	4700000
+Legionella pneumophila	3400000
+Francisella tularensis	1900000
+Brucella abortus	3300000
+Brucella melitensis	3300000
+Brucella suis	3300000
+Brucella	3300000	genus fallback
+Bordetella pertussis	4100000
+Bordetella bronchiseptica	5300000
+Pasteurella multocida	2300000
+Mannheimia haemolytica	2650000
+Actinobacillus pleuropneumoniae	2300000
+Glaesserella parasuis	2300000
+Haemophilus influenzae	1850000
+Neisseria meningitidis	2200000
+Neisseria gonorrhoeae	2150000
+Coxiella burnetii	2050000
+Burkholderia pseudomallei	7200000
+Burkholderia mallei	5800000
+Moraxella bovis	2350000
+# --- Actinomycetota and others
+Mycobacterium tuberculosis	4400000
+Mycobacterium bovis	4350000
+Mycobacterium avium	5000000
+Mycobacterium	4400000	genus fallback
+Corynebacterium diphtheriae	2450000
+Corynebacterium pseudotuberculosis	2350000
+Rhodococcus equi	5100000
+Dichelobacter nodosus	1400000
+Fusobacterium necrophorum	2300000
+Leptospira interrogans	4650000
+Borrelia burgdorferi	1550000
+Chlamydia psittaci	1170000
+Mycoplasma bovis	1000000
+Mycoplasmopsis bovis	1000000
+Mycoplasma gallisepticum	1000000

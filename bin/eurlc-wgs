@@ -100,6 +100,9 @@ our $S_RUN_MODE = "new";
 our $RUN_BANNER_TAG = "EURLC-WGS RUN";   # searchable marker in log/log.txt
 our $S_RUN_NUMBER   = 1;                 # set by write_run_start_banner
 our $MAIN_PID       = $$;                # forked children must not write the END banner
+our @S_RUN_ISSUES   = ();                # every ERROR/WARNING logged, for the end-of-run summary
+our $S_ISSUES_PAUSED = 0;                # 1 while re-printing already collected messages
+our @S_TOOLS_NOT_RUN = ();               # filled by report_species_tools_not_run()
 
 my $USE_COLOR = (-t STDOUT) ? 1 : 0;
 
@@ -2006,6 +2009,9 @@ COMMON OPTIONS:
                                  running what is missing (overwrite=resume)
     rerun=<step>[,<step>...]     Run these steps again in an existing output
                                  directory, plus every step that depends on them
+    enable=<tool>[,<tool>...]    Switch tools on, e.g. enable=sistr,seqsero2
+                                 (same as sistr.enabled=1 ...)
+    disable=<tool>[,<tool>...]   Switch tools off, e.g. disable=bakta
     --recursive                  Scan directories recursively for input files
     --verbose                    Verbose output
     --no-color / --color         Force-disable / force-enable colored output
@@ -2809,6 +2815,38 @@ foreach my $key (keys %args) {
             $R_cfg->{general}{fasta} = 1;
             log_message("NOTICE: Both --fastq and --fasta given: analyzing both input types");
         }
+    }
+}
+
+###################################################################################################
+## enable=<tool>[,<tool>...] / disable=<tool>[,<tool>...]: short form of
+## <tool>.enabled=1 / <tool>.enabled=0. Handled after the dispatch loop so
+## the result does not depend on hash order: enable=/disable= win over a
+## <tool>.enabled=... given on the same command line. A tool named in both
+## is an error.
+{
+    my %want;   # section -> 1/0
+    for my $what ( [ enable => 1 ], [ disable => 0 ] ) {
+        my ($arg, $val) = @$what;
+        next unless exists $args{$arg};
+        $args_handled{$arg} = 1;
+        my @names = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $args{$arg} // "" );
+        graceful_die("Argument [$arg=] needs one or more tool names, e.g. $arg=sistr,seqsero2") unless @names;
+        for my $n (@names) {
+            my ($section) = grep { lc($_) eq lc($n) } keys %$R_cfg;
+            unless ( defined $section && ref $R_cfg->{$section} eq 'HASH' && exists $R_cfg->{$section}{enabled} ) {
+                my @valid = sort grep { ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled} } keys %$R_cfg;
+                graceful_die("Argument [$arg=$n]: [$n] is not a tool that can be switched on/off. Valid names: @valid");
+            }
+            graceful_die("Tool [$section] is given both in enable= and disable=")
+                if exists $want{$section} && $want{$section} != $val;
+            $want{$section} = $val;
+        }
+    }
+    for my $section ( sort keys %want ) {
+        $R_cfg->{$section}{enabled} = $want{$section};
+        log_message("NOTICE: Overriding from launch-arguments: $section.enabled=$want{$section}");
+        $rundata{config}{overrides} .= "$section.enabled=$want{$section}\n";
     }
 }
 
@@ -14259,7 +14297,7 @@ sub postprocess_chewbbaca {
             my $found_resultpath = find_chewie_resultpath($rawdata_dir);
 
             unless ($found_resultpath && -d $found_resultpath) {
-                log_message("WARNING: No result subdirectory found for [$schema_dirname] ($found_resultpath)");
+                log_message("WARNING: No chewBBACA result folder found for [$schema_dirname] in [$rawdata_dir]");
                 next;
             }
 
@@ -16634,11 +16672,13 @@ my $_exit_code = 0;
     if (@abandoned) {
         my $count = scalar @abandoned;
         my @names = map { $_->{name} // "?" } @abandoned;
-        log_message("NOTICE: $count sample(s) were abandoned during analysis: " . join(", ", @names));
-        log_message("NOTICE: Exiting with code 3 (partial success -- see abandoned samples above)");
+        log_message("INFO: $count sample(s) were abandoned during analysis: " . join(", ", @names));
+        log_message("INFO: Exiting with code 3 (partial success -- see abandoned samples)");
         $_exit_code = 3;
     }
 }
+
+print_run_summary($_exit_code);
 
 close_logfile();
 
@@ -19311,6 +19351,12 @@ sub find_chewie_resultpath {
     my ($output_dir) = @_;
 
     return undef if !defined $output_dir || !-d $output_dir;
+
+    # Already renamed by an earlier result_parsing (always the case when
+    # a run is resumed: chewBBACA is skipped and its folder was renamed to
+    # chewbbaca_results the first time round).
+    my $renamed = File::Spec->catdir($output_dir, "chewbbaca_results");
+    return $renamed if -d $renamed;
 
     my $standard = File::Spec->catdir($output_dir, "results");
 
@@ -28044,6 +28090,149 @@ END {
     $? = $code;
 }
 
+###################################################################################################
+## End-of-run summary. Printed to the screen (and the log, and
+## log/run_summary.txt) as the last thing a run does, so the important
+## facts -- QC outcome, abandoned samples, every error and warning, tools
+## that did not run -- are in one place instead of far up the terminal
+## history. Searchable in the log as "EURLC-WGS RUN SUMMARY".
+
+# Command the user can run next: the original arguments without any
+# overwrite/resume/rerun/enable flag, plus --resume and the given extras.
+sub _suggest_command {
+    my (@extra) = @_;
+    my @keep = grep { !/^-{0,2}(?:overwrite|resume|rerun|enable)(?:=|$)/ } @ORIGINAL_ARGV;
+    return join(" ", basename($0), map { _shell_quote_arg($_) } @keep, "--resume", @extra);
+}
+
+sub _issue_group_lines {
+    my ($level, $max) = @_;
+    my (%n, %first, @order);
+    for my $is ( grep { $_->{level} eq $level } @S_RUN_ISSUES ) {
+        push @order, $is->{text} unless $n{ $is->{text} }++;
+        $first{ $is->{text} } //= $is->{at};
+    }
+    my @lines;
+    for my $txt ( @order[ 0 .. ( $#order < $max - 1 ? $#order : $max - 1 ) ] ) {
+        my $t = $txt;
+        $t =~ s/\s*\n\s*/ | /g;
+        $t = substr($t, 0, 220) . " ..." if length $t > 224;
+        push @lines, "    [+$first{$txt}] $t" . ( $n{$txt} > 1 ? "   (x$n{$txt})" : "" );
+    }
+    push @lines, "    ... and " . ( @order - $max ) . " more -- see the log" if @order > $max;
+    return ( scalar( grep { $_->{level} eq $level } @S_RUN_ISSUES ), scalar(@order), @lines );
+}
+
+sub print_run_summary {
+    my ($exit_code) = @_;
+    my @out;   # [ text, color ]
+    my $add = sub { push @out, [ $_[0], $_[1] // "" ] };
+    my $wide = "=" x 100;
+    my $samples = $R_samples // [];
+
+    $add->("");
+    $add->($wide, "bold");
+    $add->("====  $RUN_BANNER_TAG SUMMARY  #$S_RUN_NUMBER   " . timestamp_local()
+         . "   elapsed " . format_elapsed( time() - ( $rundata{timestamps}{pipeline_start}{time_value} // time() ) ), "bold");
+    $add->($wide, "bold");
+
+    # Samples and QC
+    my (%type, %qc, @not_pass, %species);
+    for my $s (@$samples) {
+        $type{ uc( $s->{type} // "?" ) }++;
+        my $q = $s->{report_issues}{summary}{status} // $s->{qc}{status} // "UNKNOWN";
+        $qc{$q}++;
+        push @not_pass, ( $s->{name} // "?" ) . " ($q)" if $q ne "PASS";
+        $species{ $s->{main_results}{taxonomy}{species} // "unknown" }++;
+    }
+    $add->(sprintf "  %-12s %d  (%s)", "Samples:", scalar(@$samples),
+           join(", ", map { "$_ $type{$_}" } sort keys %type));
+    my @qc_order = grep { $qc{$_} } ( qw(PASS WARNING CRITICAL FAIL), grep { !/^(PASS|WARNING|CRITICAL|FAIL)$/ } sort keys %qc );
+    my $qc_color = ( $qc{FAIL} || $qc{CRITICAL} ) ? "red" : $qc{WARNING} ? "yellow" : "green";
+    $add->(sprintf( "  %-12s %s", "QC:", join(", ", map { "$qc{$_} $_" } @qc_order) || "-" ), $qc_color);
+    if (@not_pass) {
+        my @show = @not_pass > 12 ? ( @not_pass[0..11], "... +" . (@not_pass - 12) . " more" ) : @not_pass;
+        $add->(sprintf "  %-12s %s", "", "not PASS: " . join(", ", @show));
+    }
+    $add->(sprintf "  %-12s %s", "Species:",
+           join(", ", map { "$_ ($species{$_})" } sort { $species{$b} <=> $species{$a} || $a cmp $b } keys %species) || "-");
+
+    # Abandoned samples
+    my @ab = grep { $_->{fatal_error} } @$samples;
+    if (@ab) {
+        $add->(sprintf( "  %-12s %d sample(s) could not be finished:", "Abandoned:", scalar @ab ), "red");
+        for my $s (@ab) {
+            my $why = join("; ", @{ $s->{fatal_error_message} // [] }) || "see the log";
+            my $step = $s->{fatal_error_runstep} ? " [$s->{fatal_error_runstep}]" : "";
+            $why = substr($why, 0, 200) . " ..." if length $why > 204;
+            $add->("    " . ( $s->{name} // "?" ) . "$step: $why", "red");
+        }
+    }
+
+    # Resume information
+    if ( $S_RUN_MODE eq "resumed" ) {
+        my $reused = 0;
+        $reused += scalar @{ $_->{results}{run_history}{reused_steps} // [] } for @$samples;
+        my $rr = $R_cfg->{general}{rerun} // "";
+        $add->(sprintf "  %-12s %s", "Resumed:", "run #$S_RUN_NUMBER in this directory; $reused result(s) reused from earlier runs"
+               . ( $rr =~ /\S/ ? "; rerun: $rr" : "" ));
+    }
+
+    # Errors and warnings
+    my ($n_err, $d_err, @err_lines) = _issue_group_lines("ERROR", 10);
+    my ($n_warn, $d_warn, @warn_lines) = _issue_group_lines("WARNING", 15);
+    $add->(sprintf( "  %-12s %s", "Errors:", $n_err ? "$n_err" . ( $d_err < $n_err ? " ($d_err different)" : "" ) : "none" ),
+           $n_err ? "red" : "green");
+    $add->($_, "red") for @err_lines;
+    $add->(sprintf( "  %-12s %s", "Warnings:", $n_warn ? "$n_warn" . ( $d_warn < $n_warn ? " ($d_warn different)" : "" ) : "none" ),
+           $n_warn ? "yellow" : "green");
+    $add->($_, "yellow") for @warn_lines;
+
+    # Species-specific tools that did not run because they are disabled
+    if (@S_TOOLS_NOT_RUN) {
+        $add->(sprintf( "  %-12s %s", "Not run:", "species-specific tools that are disabled in the configuration:" ), "yellow");
+        my %sections;
+        for my $t (@S_TOOLS_NOT_RUN) {
+            my @s = @{ $t->{samples} };
+            my $list = @s > 8 ? join(", ", @s[0..7]) . ", ... +" . (@s - 8) : join(", ", @s);
+            $add->("    [$t->{section}] " . scalar(@s) . " " . join("/", @{ $t->{species} }) . " sample(s): $list", "yellow");
+            $sections{ $t->{section} } = 1;
+        }
+        $add->("    to run them now, keeping all other results:");
+        $add->("      " . _suggest_command( "enable=" . join(",", sort keys %sections) ));
+    }
+
+    # Where to look
+    my $out = eval { abs_path( getdir("out") ) } // "";
+    if ( $out ne "" ) {
+        my $report = "$out/report/main_report.html";
+        $add->(sprintf "  %-12s %s", "Report:", $report) if -f $report;
+        $add->(sprintf "  %-12s %s", "Log:", "$out/log/log.txt   (search: \"$RUN_BANNER_TAG\")");
+    }
+
+    # Verdict
+    my $problems = $n_err || @ab || $qc{FAIL};
+    my ($verdict, $vcol) =
+        $exit_code != 0 && $exit_code != 3 ? ( "STOPPED (exit code $exit_code)", "red" )
+      : $problems                          ? ( "FINISHED WITH PROBLEMS -- check the errors / abandoned / FAIL samples above", "red" )
+      : ( $n_warn || $qc{WARNING} || $qc{CRITICAL} || @S_TOOLS_NOT_RUN )
+                                           ? ( "FINISHED WITH WARNINGS -- see above", "yellow" )
+      :                                      ( "FINISHED OK", "green" );
+    $add->("  " . ( "-" x 98 ));
+    $add->("  RESULT:  $verdict", $vcol);
+    $add->($wide, "bold");
+    $add->("");
+
+    my $plain = join("", map { "$_->[0]\n" } @out);
+    for my $l (@out) {
+        my ($txt, $col) = @$l;
+        if ( $col ne "" ) { print colorize_for_screen($col), $txt, colorize_for_screen('reset'), "\n"; }
+        else              { print "$txt\n"; }
+    }
+    print {$log_fh} $plain if $logfile_open && $log_fh;
+    if ( $out ne "" && open( my $fh, '>', "$out/log/run_summary.txt" ) ) { print {$fh} $plain; close $fh; }
+}
+
 sub initiate_logfile {
     my $logfile = getdir("out,log") . "/log.txt";
     my $bash_logfile = getdir("out,log") . "/bash_commands.log";
@@ -28322,8 +28511,13 @@ sub execute_and_log {
     my $start_time = time();
     my $status;
 
-    # Disable spinner if not interactive output
-    $run_fork = 0 if !$run_fork || !-t STDOUT;
+    # The spinner needs a terminal. The time limit does not: a caller that
+    # asked for the forked mode (runsteps) keeps it without a terminal
+    # whenever a limit applies (nohup, GUI, output redirected to a file),
+    # otherwise the limit would silently be ignored there.
+    my $show_spinner = ( $run_fork && -t STDOUT ) ? 1 : 0;
+    $run_fork = ( $run_fork && ( $show_spinner || $max_seconds ) ) ? 1 : 0;
+    my $timed_out = 0;
 
     if ($run_fork) {
         my $pid = fork();
@@ -28383,8 +28577,6 @@ sub execute_and_log {
             return $head . $tail;
         };
 
-        my $timed_out = 0;
-
         while (1) {
             my $child = waitpid($pid, WNOHANG);
             last if $child > 0;
@@ -28420,10 +28612,11 @@ sub execute_and_log {
                 last;
             }
 
-            my $elapsed_str = format_elapsed($elapsed);
-            my $line = $render_line->($msg, $spinner[$i % 4], $elapsed_str);
-
-            print "\r\e[2K", $line;
+            if ($show_spinner) {
+                my $elapsed_str = format_elapsed($elapsed);
+                my $line = $render_line->($msg, $spinner[$i % 4], $elapsed_str);
+                print "\r\e[2K", $line;
+            }
 
             $i = ($i + 1) % @spinner;
             select(undef, undef, undef, 0.2);
@@ -28440,7 +28633,7 @@ sub execute_and_log {
         my $max  = $cols - 1;
         $done = substr($done, 0, $max) if length($done) > $max;
 
-        print "\r\e[2K", $done, "\n";
+        print "\r\e[2K", $done, "\n" if $show_spinner;
 
         # If timed out, synthesize an exit status that looks like "killed by signal"
         if ($timed_out) {
@@ -28495,6 +28688,7 @@ sub execute_and_log {
         success    => ($exit_code == 0) ? 1 : 0,
         exit_code  => $exit_code,
         elapsed_s  => $elapsed,
+        timed_out  => $timed_out,
     };
 }
 #####################################################################################################
@@ -28604,6 +28798,14 @@ sub log_message {
     my $timestamp = ( is_docker() ) ? timestamp_UTC() : timestamp_local();
 
     my $output_log = "[$timestamp][+$runtime] $msg";
+
+    # Remember every error and warning for the end-of-run summary, so they
+    # are not lost far up in the terminal history.
+    if ( !$S_ISSUES_PAUSED && ( $msg =~ /^(ERROR|WARNING):/ || $msg =~ /\[PIPELINE BUG\]/ ) ) {
+        my $level = $msg =~ /^WARNING:/ ? "WARNING" : "ERROR";
+        (my $text = $msg) =~ s/\s+\z//;
+        push @S_RUN_ISSUES, { level => $level, text => $text, at => $runtime };
+    }
 
     my $output_screen = $msg;
     $output_screen =~ s/^(NOTICE:|PROGRESS:)[ \t]?//;  # Strip NOTICE: and PROGRESS: prefixes for screen
@@ -32042,10 +32244,15 @@ sub report_species_tools_not_run {
             push @{ $disabled{$name} }, $R_samples->[$i]{name} // "sample $i";
         }
     }
+    @S_TOOLS_NOT_RUN = ();
     for my $name ( sort keys %disabled ) {
         my @s = @{ $disabled{$name} };
-        log_message("NOTICE: " . scalar(@s) . " sample(s) matched [" . join(", ", @{ $runstep{$name}{species} })
-                  . "] but runstep [$name] is disabled in the configuration, so it did not run: " . join(", ", @s), "yellow");
+        my $section = get_runstep_config_section($name) // $name;
+        push @S_TOOLS_NOT_RUN, { runstep => $name, section => $section,
+                                 species => [ @{ $runstep{$name}{species} } ], samples => \@s };
+        # log file only -- shown on screen in the run summary
+        log_message("INFO: " . scalar(@s) . " sample(s) matched [" . join(", ", @{ $runstep{$name}{species} })
+                  . "] but runstep [$name] is disabled in the configuration ([$section] enabled=0), so it did not run: " . join(", ", @s));
     }
 }
 
@@ -32428,7 +32635,8 @@ sub run_data_driven_runsteps {
         note_if_reused($i, $name) unless defined $command && $command ne "";
 
         if ( defined $command && $command ne "" ) {
-            run_step(
+            my $t_start = time();
+            my $r = run_step(
                 name       => $def->{long_name},
                 samplenr   => $i,
                 message    => $def->{message},
@@ -32436,6 +32644,10 @@ sub run_data_driven_runsteps {
                 resultfile => "",
                 timeout_s  => get_runstep_timeout($name),
             );
+            if ( ref $r eq 'HASH' && $r->{timed_out} ) {
+                set_runtime_issue($i, "warning", "[$name] stopped: time limit (" . format_elapsed(get_runstep_timeout($name)) . ") reached", $name);
+                set_aside_timed_out_result($name, $i, $t_start);
+            }
 
             # result_parsing
             eval { $def->{result_parsing}->($i) };
@@ -32725,8 +32937,26 @@ sub run_step {
           elapsed_s => $result ? $result->{elapsed_s} : undef,
       );
 
+      return $result;
     }
 
+}
+
+# A step that was killed on its time limit may have left a half-written
+# result file. Move it aside (<file>.timeout) so result_parsing reports the
+# step as failed and a later --resume runs it again instead of reusing it.
+sub set_aside_timed_out_result {
+    my ($name, $i, $start_time) = @_;
+    my $tmpl = $runstep{$name}{resultfile} // "";
+    return if $tmpl eq "";
+    my $f = eval { fill_placeholders($tmpl, $i, $name) } // "";
+    return if $f eq "" || $f =~ /__[A-Z0-9-]+__/ || !-e $f;
+    return if ( ( stat $f )[9] // 0 ) < $start_time - 1;   # older than this attempt
+    unlink "$f.timeout" if -e "$f.timeout";
+    if ( rename $f, "$f.timeout" ) {
+        log_message("WARNING: [$name] " . ( $R_samples->[$i]{name} // "sample $i" )
+                  . ": time limit reached -- partial result moved aside to $f.timeout");
+    }
 }
 
 #########################################################################################################
@@ -33055,12 +33285,39 @@ sub run_parallel_runsteps {
         ? sub { (my $w = shift) =~ s/\s+\z//; push @done_lines, "WARNING (perl): $w"; }
         : $saved_warn_handler;
 
+    # Time limits: same rule as sequential mode (get_runstep_timeout). A job
+    # over its limit gets TERM to its whole process group, KILL 5 s later if
+    # still alive; it is then reaped like any other job.
+    my $enforce_time_limits = sub {
+        my $now = time();
+        for my $pid ( keys %S_par_active ) {
+            my $job = $S_par_active{$pid};
+            if ( $job->{killed_at} ) {
+                if ( !$job->{hard_killed} && $now - $job->{killed_at} >= 5 ) {
+                    kill 'KILL', -$pid;
+                    $job->{hard_killed} = 1;
+                }
+                next;
+            }
+            next unless $job->{timeout_s} && $now - $job->{start_time} >= $job->{timeout_s};
+            $job->{timed_out} = 1;
+            $job->{killed_at} = $now;
+            log_message("ERROR: Timeout after " . format_elapsed($job->{timeout_s}) . ": [$job->{runstep}] for sample ["
+                      . ( $R_samples->[ $job->{sample} ]{name} // '?' ) . "] -- killing the process", "red");
+            kill 'TERM', -$pid;
+        }
+    };
+
     while ( %samples_pending || %S_par_active ) {
+
+        # ── 0. Time limits ─────────────────────────────────────────────
+        $enforce_time_limits->();
 
         # ── 1. Reap finished children ──────────────────────────────────
         for my $pid (keys %S_par_active) {
             my $w = waitpid($pid, POSIX::WNOHANG());
             next unless $w > 0;
+            my $exit_status = $?;
 
             my $job = delete $S_par_active{$pid};
             $S_par_threads -= $job->{threads};
@@ -33071,6 +33328,22 @@ sub run_parallel_runsteps {
             my $i    = $job->{sample};
             my $name = $job->{runstep};
             my $def  = $runstep{$name};
+
+            # Exit status, reported like execute_and_log does in sequential mode.
+            my $job_status = 'success';
+            if ( $job->{timed_out} ) {
+                $job_status = 'timeout';
+                set_runtime_issue($i, "warning", "[$name] stopped: time limit (" . format_elapsed($job->{timeout_s}) . ") reached", $name);
+                set_aside_timed_out_result($name, $i, $job->{start_time});
+            }
+            elsif ( $exit_status & 127 ) {
+                $job_status = 'failed';
+                log_message("ERROR: [$name] for sample [" . ( $R_samples->[$i]{name} // '?' ) . "] died with signal " . ( $exit_status & 127 ), "red");
+            }
+            elsif ( $exit_status >> 8 ) {
+                $job_status = 'failed';
+                log_message("ERROR: [$name] for sample [" . ( $R_samples->[$i]{name} // '?' ) . "] exited with code " . ( $exit_status >> 8 ), "red");
+            }
 
             # result_parsing in the parent -- runs synchronously in the
             # reap cycle. Many result_parsing subs call log_message which
@@ -33099,7 +33372,7 @@ sub run_parallel_runsteps {
             log_message("NOTICE: $sample_name: $name done ($elapsed)") unless -t STDOUT;
 
             emit_event(type => 'runstep_finished', sample => $i, runstep => $name,
-                       status => 'success', elapsed_s => time() - $job->{start_time});
+                       status => $job_status, elapsed_s => time() - $job->{start_time});
 
             # Re-check sample completion now that this step is done.
             # A sample is complete when every runstep is either already done
@@ -33269,6 +33542,7 @@ sub run_parallel_runsteps {
                     threads    => $need_t,
                     ram_gb     => $need_r,
                     start_time => time(),
+                    timeout_s  => get_runstep_timeout($name),
                 };
                 $S_par_threads += $need_t;
                 $S_par_ram_gb  += $need_r;
@@ -33289,9 +33563,14 @@ sub run_parallel_runsteps {
             $board_lines = 0;
             $S_par_log_capture = undef;
             log_message("NOTICE: Parallel scheduler: terminate command received -- no new work dispatched", "red");
-            # Wait for active jobs to finish
-            for my $pid (keys %S_par_active) {
-                waitpid($pid, 0);
+            # Wait for active jobs to finish -- time limits still apply, so a
+            # hung tool cannot block the stop forever.
+            while (%S_par_active) {
+                $enforce_time_limits->();
+                for my $pid ( keys %S_par_active ) {
+                    delete $S_par_active{$pid} if waitpid($pid, POSIX::WNOHANG()) > 0;
+                }
+                select(undef, undef, undef, 0.5) if %S_par_active;
             }
             close_logfile();
             exit 1;
@@ -33383,10 +33662,10 @@ sub run_parallel_runsteps {
     # These were counted/stored but not shown on screen to keep the board
     # stable. Print them now so nothing is silently lost before the batch
     # phase begins. Full text is always in the log file regardless.
+    # They are already collected in @S_RUN_ISSUES and listed in the run
+    # summary at the end, so only say how many there were here.
     if (@S_par_warnings) {
-        log_message("NOTICE: " . scalar(@S_par_warnings) . " warning(s) were suppressed during parallel execution:", "yellow");
-        log_message("WARNING: $_") for @S_par_warnings;
-        log_message("NOTICE: (all warnings above are also in the log file)", "yellow");
+        log_message("NOTICE: " . scalar(@S_par_warnings) . " warning(s) during parallel execution -- listed in the run summary at the end", "yellow");
     }
 }
 

@@ -1,0 +1,95 @@
+# eurlc-wgs -- known database versions (B12).
+#
+# Format: <database><TAB><md5><TAB><file><TAB><label>
+#   database: the db_freeze.config section (kraken2, mashscreen, ...);
+#   md5:      MD5 of <file> in the database folder, or the fingerprint of
+#             the whole marker list (file = *) as shown by --verify-databases;
+#   label:    what reports and logs show for this version.
+# Local additions: <db>/known_databases.tsv, same format; it wins.
+#
+kraken2	c178de95917bab087fa6494949314ce4	hash.k2d	Kraken2, Viral, Release: 10/15/25
+kraken2	46a10e0e6935d5c070253e0d89adb927	hash.k2d	Kraken2, MinusB, Release: 10/15/25
+kraken2	e8336b184b83083e1b7ec149a0f047c2	hash.k2d	Kraken2, Standard, Release: 10/15/25
+kraken2	c67c9b4cffd0772f79fcd6a60a4d9fbe	hash.k2d	Kraken2, Standard-8, Release: 10/15/25
+kraken2	3c04f8b7059f02778da3b96d10129de1	hash.k2d	Kraken2, Standard-16, Release: 10/15/25
+kraken2	4cb019ff936b0dc92303f5e7c6beef3d	hash.k2d	Kraken2, PlusPF, Release: 10/15/25
+kraken2	db92b1954028601dcbbc63122340bfed	hash.k2d	Kraken2, PlusPF-8, Release: 10/15/25
+kraken2	01f7d25424cb55f0a39d707a665d7a64	hash.k2d	Kraken2, PlusPF-16, Release: 10/15/25
+kraken2	3a64075e761e6681537314dec8beb801	hash.k2d	Kraken2, PlusPFP, Release: 10/15/25
+kraken2	ec153c2e7b83ff42adf956b5eab6d3ba	hash.k2d	Kraken2, PlusPFP-8, Release: 10/15/25
+kraken2	760909fb3b667960939ff18b74fa01d3	hash.k2d	Kraken2, PlusPFP-16, Release: 10/15/25
+kraken2	beda141de277d59907a26c65e1411137	hash.k2d	Kraken2, core_nt Database, Release: 10/15/25
+kraken2	6aaccf6135dadc3d8d2502f4572b5b86	hash.k2d	Kraken2, GTDB v226 (genomic_files_reps), Release: 06/09/25
+kraken2	9eac716456f5ef0a2217de2c20fe3764	hash.k2d	Kraken2, Viral, Release: 07/14/25
+kraken2	69effbaee641046ae9a22890d886eda2	hash.k2d	Kraken2, MinusB, Release: 07/14/25
+kraken2	42b8c3ab20f6684e1bb7a044be386b07	hash.k2d	Kraken2, Standard, Release: 07/14/25
+kraken2	f7155684d6d21e0e7d9345dde13625e7	hash.k2d	Kraken2, Standard-8, Release: 07/14/25
+kraken2	a9dca50b3e36e08886ced94cb9d646f2	hash.k2d	Kraken2, Standard-16, Release: 07/14/25
+kraken2	68331339c9210025e969eccbad0c4aec	hash.k2d	Kraken2, PlusPF, Release: 07/14/25
+kraken2	faac6d4aa534d229b9def3d2113132cf	hash.k2d	Kraken2, PlusPF-8, Release: 07/14/25
+kraken2	dfbc4cf713b042461358516a73faa92c	hash.k2d	Kraken2, PlusPF-16, Release: 07/14/25
+kraken2	7dba1f5fb4b05fcaa2aa965e3a27a999	hash.k2d	Kraken2, PlusPFP, Release: 07/14/25
+kraken2	ce932faa7fbde623821c75c023563695	hash.k2d	Kraken2, PlusPFP-8, Release: 07/14/25
+kraken2	a296617061425534f85f4725609d7652	hash.k2d	Kraken2, PlusPFP-16, Release: 07/14/25
+kraken2	14a21fa8bc3b07641675a8865959ab5f	hash.k2d	Kraken2, core_nt Database, Release: 06/09/25
+kraken2	8432c4841823a587a57515a19e6f929b	hash.k2d	Kraken2, Viral, Release: 04/02/25
+kraken2	1ac9cd1a05f816976fbb5718a1cc2575	hash.k2d	Kraken2, MinusB, Release: 04/02/25
+kraken2	a58b97e8b44c13840c37a41616015d9c	hash.k2d	Kraken2, Standard, Release: 04/02/25
+kraken2	f585a6b7f0b19769c021ed961e2c564e	hash.k2d	Kraken2, Standard-8, Release: 04/02/25
+kraken2	122863f08f4b3eb1848587a4d27ad86f	hash.k2d	Kraken2, Standard-16, Release: 04/02/25
+kraken2	1119b32a01a2c8b5cf26052588a8a880	hash.k2d	Kraken2, PlusPF, Release: 04/02/25
+kraken2	f9f714bb1b7b6ce9e63f3e4c94874049	hash.k2d	Kraken2, PlusPF-8, Release: 04/02/25
+kraken2	f701b23f164067e28d2f05fb051563c2	hash.k2d	Kraken2, PlusPF-16, Release: 04/02/25
+kraken2	f96a3b30faa23424bc5e954008d43a7c	hash.k2d	Kraken2, PlusPFP, Release: 04/02/25
+kraken2	c88efa3948b4121d7036092d6a2b4fe1	hash.k2d	Kraken2, PlusPFP-8, Release: 04/02/25
+kraken2	b1ca65fff90e5b12745a9b41cc49211e	hash.k2d	Kraken2, PlusPFP-16, Release: 04/02/25
+kraken2	d05fb03db3bba0c3b6f663d737886ea1	hash.k2d	Kraken2, Viral, Release: 12/28/24
+kraken2	6291c7685ccf0f0a21dc59f22f7b0c73	hash.k2d	Kraken2, MinusB, Release: 12/28/24
+kraken2	f692806f6685dfd17b40d5880acfe410	hash.k2d	Kraken2, Standard, Release: 12/28/24
+kraken2	32007d02d53179b20731f1559a87c1ae	hash.k2d	Kraken2, Standard-8, Release: 12/28/24
+kraken2	32fc3196afbe2bfa5e724538df138669	hash.k2d	Kraken2, Standard-16, Release: 12/28/24
+kraken2	d35fb107ef087442b2c58544c70e3d94	hash.k2d	Kraken2, PlusPF, Release: 12/28/24
+kraken2	162cc4e4a6f3fa11959328927846f0a0	hash.k2d	Kraken2, PlusPF-8, Release: 12/28/24
+kraken2	b7516c009f253e0118e46e4d0496db23	hash.k2d	Kraken2, PlusPF-16, Release: 12/28/24
+kraken2	9e809ea4cbcb2b877efd3b7ba05d478a	hash.k2d	Kraken2, PlusPFP, Release: 12/28/24
+kraken2	41e1af8356f9732fe4f4318dc5c49338	hash.k2d	Kraken2, PlusPFP-8, Release: 12/28/24
+kraken2	fa7707d667c2a9523e89df4842d9708b	hash.k2d	Kraken2, PlusPFP-16, Release: 12/28/24
+kraken2	ae6dc705e27d4b2a6529155e22b22faa	hash.k2d	Kraken2, core_nt Database, Release: 12/28/24
+kraken2	e7185b184b5b09580417fce82152fe0a	hash.k2d	Kraken2, GTDB v220 (genomic_files_reps), Release: 12/13/24
+kraken2	0aa690f348c233ded67623b5284f2f0e	hash.k2d	Kraken2, Viral, Release: 09/04/24
+kraken2	27c5dc6835f8b9598048ad89f9ce1f40	hash.k2d	Kraken2, MinusB, Release: 09/04/24
+kraken2	b03d00e85ac61bfb006b464a7c769d94	hash.k2d	Kraken2, Standard, Release: 09/04/24
+kraken2	66898902db611477e3c415876f4be6ea	hash.k2d	Kraken2, Standard-8, Release: 09/04/24
+kraken2	39ff8a43e42b37cb991b6b46a3742a4a	hash.k2d	Kraken2, Standard-16, Release: 09/04/24
+kraken2	98a0288043516fd01a6baa7a0574fed3	hash.k2d	Kraken2, PlusPF, Release: 09/04/24
+kraken2	c101ec9642fd7a7cd0867129c1f3ced0	hash.k2d	Kraken2, PlusPF-8, Release: 09/04/24
+kraken2	8ffd5f6253b3660cde979244733567b6	hash.k2d	Kraken2, PlusPF-16, Release: 09/04/24
+kraken2	e2664af146542acd56e58069c06e53a6	hash.k2d	Kraken2, PlusPFP, Release: 09/04/24
+kraken2	a9257324fd1fe6d79e878b003d49c148	hash.k2d	Kraken2, PlusPFP-8, Release: 09/04/24
+kraken2	d47412c602f90588dad3db8e23da8ede	hash.k2d	Kraken2, PlusPFP-16, Release: 09/04/24
+kraken2	0b7ec57f761503bec7205078be6116ab	hash.k2d	Kraken2, core_nt Database, Release: 09/04/24
+kraken2	74846fdb485635b21a551ba6e434662f	hash.k2d	Kraken2, Viral, Release: 06/05/24
+kraken2	3286b11e8ce10e9660b2e67892c8c961	hash.k2d	Kraken2, MinusB, Release: 06/05/24
+kraken2	8f0e0150b8b24a8f16852522d62a98e8	hash.k2d	Kraken2, Standard, Release: 06/05/24
+kraken2	3dafdeae897c48601e092fd2e473db75	hash.k2d	Kraken2, Standard-8, Release: 06/05/24
+kraken2	99a5415c1af77ccfce8c8654e4f4e7a6	hash.k2d	Kraken2, Standard-16, Release: 06/05/24
+kraken2	111f2a331b41d286dc12b5e13cce5628	hash.k2d	Kraken2, PlusPF, Release: 06/05/24
+kraken2	d86d3756acdd53b322b6c3a17a7cec28	hash.k2d	Kraken2, PlusPF-8, Release: 06/05/24
+kraken2	414c37a689fd022bf058dd83c793cc1d	hash.k2d	Kraken2, PlusPF-16, Release: 06/05/24
+kraken2	531833915005018c09352229337d347e	hash.k2d	Kraken2, PlusPFP, Release: 06/05/24
+kraken2	25a8a6ebbce1f7a6c62f675e704e800d	hash.k2d	Kraken2, PlusPFP-8, Release: 06/05/24
+kraken2	4b401d40e0a403c135c717a5de053eef	hash.k2d	Kraken2, PlusPFP-16, Release: 06/05/24
+kraken2	4906f117a8aa7f9ea179ec1dee20f4b3	hash.k2d	Kraken2, nt Database, Release: 05/30/24
+kraken2	7be5b5d1ccc0454bf3d484ce1d9504f6	hash.k2d	Kraken2, Standard 8, Release January 2024
+kraken2	0a50f6e555af20085380e59cf8d6517c	hash.k2d	Kraken2, Standard 8, Release October 2023
+kraken2	e14b8e71b9134f28d0e8b1512ecf1934	hash.k2d	Kraken2, Standard 8, Release June 2023
+kraken2	9d57fbd9f8bcee3d646991df60ed1f66	hash.k2d	Kraken2, Standard 8, Release Mars 2023
+kraken2	ec141f512342e8af354f6830900c6c66	hash.k2d	Kraken2, Standard 8, Release December 2022
+kraken2	557e27b66b3d79edc3ed0b335e4ff212	hash.k2d	Kraken2, Standard 8, Release September 2022
+kraken2	f5732a259f79d6b64e74bbbfa49c3aa8	hash.k2d	Kraken2, Standard 8, Release June 2022
+kraken2	3ec3413b094be698ce468aad96b75d83	hash.k2d	Kraken2, Standard 8, Release May 2021
+kraken2	e9115ff36215dd563dbebacce32c82d8	hash.k2d	Kraken2, Standard 8, Release January 2021
+kraken2	c85193cd9b78aa3c354091c474381dc2	hash.k2d	Kraken2, Standard 8, Release Sept 2020
+kraken2	1836273ccaca9284a93c4522e568eca5	hash.k2d	Kraken2, minikraken2_v1, Release Mars 2020
+kraken2	22c616b9b28623d3374ff645e9fd84c0	hash.k2d	Kraken2, minikraken2_v2 (+human), Release Mars 2020
+mashscreen	494efd071010b1e23f163512f8f0eacd	refseq.genomes.k21s1000.msh	Mash RefSeq sketch, from mash.readthedocs.io (refseq.genomes.k21s1000.msh)

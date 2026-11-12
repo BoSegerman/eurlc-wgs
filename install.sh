@@ -4,7 +4,7 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # install.sh
 # Installs the eurlc-wgs pipeline: creates the main conda environment,
-# copies scripts/templates/assets/resources, then hands off to
+# copies scripts/templates/assets/help, then hands off to
 # 'eurlc-wgs --setup' which installs tool environments and databases.
 #
 # Usage:
@@ -34,7 +34,6 @@ OPTIONAL_ENV_DIR="${ENV_DIR}/optional"
 TEMPLATE_DIR="${SRC_DIR}/templates"
 ASSET_DIR="${SRC_DIR}/assets"
 HELP_FILE="${SRC_DIR}/docs/help.txt"
-RESOURCE_DIR="${SRC_DIR}/resources"
 
 MAIN_ENV="eurlc-wgs"
 MAIN_YML="${CORE_ENV_DIR}/eurlc-wgs.yml"
@@ -102,13 +101,12 @@ if [[ "${UNINSTALL}" -eq 1 ]]; then
         conda env remove -n "${env}" -y
     done
 
-    # Remove shared resources
+    # Shared resources live inside the eurlc-wgs environment and went with
+    # it; remove the copy that versions before 0.1.0 put in the conda base.
     SHARE_DIR="${CONDA_BASE_U}/share/eurlc-wgs"
     if [[ -d "${SHARE_DIR}" ]]; then
-        echo ">>> Removing shared resources: ${SHARE_DIR}"
+        echo ">>> Removing old shared resources: ${SHARE_DIR}"
         rm -rf "${SHARE_DIR}"
-    else
-        echo ">>> Shared resources not found: ${SHARE_DIR} (already removed?)"
     fi
 
     echo ">>> Uninstall complete."
@@ -149,7 +147,11 @@ if [[ "${RESOURCES_ONLY}" -eq 0 ]]; then
     fi
 
     export PYTHONWARNINGS="ignore::FutureWarning"
-    export CONDA_CHANNEL_PRIORITY=flexible
+    # Strict channel priority, as bioconda recommends: with conda-forge listed
+    # first, a package is never mixed in from a lower channel. All tool
+    # environments are solved this way too (eurlc-wgs --setup below inherits
+    # it).
+    export CONDA_CHANNEL_PRIORITY=strict
 
     echo
     echo ">>> Installing main environment: ${MAIN_ENV}"
@@ -186,11 +188,13 @@ fi
 
 CONDA_BASE_ACTUAL="$(conda info --base)"
 TARGET_BIN="${EURLC_ENV_PATH}/bin"
-TARGET_SHARE="${CONDA_BASE_ACTUAL}/share/eurlc-wgs"
+# Inside the environment, as a bioconda package installs it (B17). The
+# pipeline also still finds the old location in the conda base.
+TARGET_SHARE="${EURLC_ENV_PATH}/share/eurlc-wgs"
+OLD_SHARE="${CONDA_BASE_ACTUAL}/share/eurlc-wgs"
 TARGET_TEMPLATES="${TARGET_SHARE}/templates"
 TARGET_ASSETS="${TARGET_SHARE}/assets"
 TARGET_ENVS="${TARGET_SHARE}/envs"
-TARGET_RESOURCES="${TARGET_SHARE}/resources"
 
 echo
 echo ">>> Main environment: ${EURLC_ENV_PATH}"
@@ -200,7 +204,6 @@ mkdir -p "${TARGET_BIN}"
 mkdir -p "${TARGET_TEMPLATES}"
 mkdir -p "${TARGET_ASSETS}"
 mkdir -p "${TARGET_ENVS}"
-mkdir -p "${TARGET_RESOURCES}"
 
 # -----------------------------------------------------------------------------
 # Install executable scripts
@@ -256,13 +259,6 @@ else
     echo "WARNING: Missing assets directory: ${ASSET_DIR}"
 fi
 echo
-echo ">>> Installing resources into ${TARGET_RESOURCES}"
-if [[ -d "${RESOURCE_DIR}" ]]; then
-    cp -pr "${RESOURCE_DIR}/." "${TARGET_RESOURCES}/"
-    echo ">>> Resources installed."
-else
-    echo "WARNING: Missing resources directory: ${RESOURCE_DIR} (skipping)"
-fi
 echo
 echo ">>> Installing help file"
 if [[ -f "${HELP_FILE}" ]]; then
@@ -273,8 +269,8 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Install YML files into share (fallback for eurlc-wgs --setup)
-# Tool environments in db_dir/yml/ take priority over these (see find_env_yml).
+# Install YML files into share. They are the only source of tool versions
+# (B17); YML files in <db>/yml/ take priority over these (see find_env_yml).
 # -----------------------------------------------------------------------------
 
 echo
@@ -288,6 +284,14 @@ fi
 if [[ -d "${OPTIONAL_ENV_DIR}" ]]; then
     cp -pr "${OPTIONAL_ENV_DIR}" "${TARGET_ENVS}/"
     echo ">>> Installed optional YML files."
+fi
+
+# The copy an older install.sh put in the conda base would only be a stale
+# second set of templates and YML files.
+if [[ -d "${OLD_SHARE}" && "${OLD_SHARE}" != "${TARGET_SHARE}" ]]; then
+    echo
+    echo ">>> Removing old shared resources from the conda base: ${OLD_SHARE}"
+    rm -rf "${OLD_SHARE}"
 fi
 
 # -----------------------------------------------------------------------------
@@ -311,7 +315,9 @@ for check_file in \
     "${TARGET_TEMPLATES}/main_report.html.tt" \
     "${TARGET_TEMPLATES}/short_report.html.tt" \
     "${TARGET_TEMPLATES}/detailed_report.html.tt" \
-    "${TARGET_SHARE}/help.txt"
+    "${TARGET_SHARE}/help.txt" \
+    "${TARGET_ASSETS}/genome_sizes.tsv" \
+    "${TARGET_ENVS}/core/eurlc-wgs-fastp.yml"
 do
     if [[ ! -f "$check_file" ]]; then
         echo "WARNING: Missing installed file: $check_file"

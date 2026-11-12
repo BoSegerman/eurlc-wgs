@@ -1,350 +1,112 @@
-EURLC-WGS
-Whole genome sequencing analysis pipeline for bacterial isolate analysis
 
-Developed by:
-Bo Segerman
-Swedish Veterinary Agency (SVA), Uppsala, Sweden
+EURLC-WGS -- whole genome sequencing analysis for Campylobacter, Salmonella,
+E. coli and Listeria (Illumina reads or assemblies)
+
+USAGE
+    eurlc-wgs [datadir=<folder>] [options]
+
+    Without datadir= the current folder is analysed. Results go to
+    <data folder>/eurlc-wgs, or to exactly the folder given with outdir=.
+    Arguments are name=value or --flag; a path may also follow the name
+    (datadir /data/run192). An argument may be given only once.
+
+INPUT AND OUTPUT
+    datadir=<folder>             Folder with FASTQ (paired or single) and/or
+                                 FASTA files
+    outdir=<folder>              Write results to exactly this folder
+    database=<folder>            Database folder (default ~/eurlc-wgs_db)
+    configfile=<file>            Settings file (default <database>/eurlc-wgs.config)
+        configfile=write         write the current settings to a file and exit
+        configfile=default       ignore any settings file
+    --recursive                  Also look for input files in subfolders
+    --fastq / --fasta            Analyse only FASTQ / only FASTA input
+
+    Illumina names lose their sample number and lane in the sample name
+    (PT43_S12_L001_R1_001.fastq.gz -> PT43); one sample on several lanes is
+    merged before the analysis.
+
+AN EXISTING OUTPUT FOLDER
+    (asked by default)           overwrite, resume or stop
+    --resume                     Continue: reuse finished results, run what is
+                                 missing or failed
+    overwrite=yes | no           Overwrite without asking / stop
+    rerun=<step>[,<step>...]     In an existing folder (implies --resume): run
+                                 these steps again, and every step that depends
+                                 on them
+
+WHAT IS ANALYSED
+    enable=<tool|species>[,...]  Switch tools on, e.g. enable=sistr or
+                                 enable=Salmonella (all its typing tools)
+    disable=<tool|species>[,...] Switch tools off, e.g. disable=bakta
+    species_scope=<list>         Species the typing tools are prepared for
+    <section>.<param>=<value>    Any single setting, e.g.
+                                 fastp.arguments="--length_required 50"
+                                 spades.timeout=4h
+    <param>=<value>              A [general] setting, e.g. threads=8
+
+    --qc-screen                  Quick check of the raw reads only (Q30
+                                 coverage, species, other genus, read length);
+                                 traffic-light report in eurlc-wgs_qcscreen/
+    summarize                    Re-evaluate QC and rebuild the report of an
+                                 existing output folder (no tools are run)
+
+RUNNING
+    threads=<n>                  Threads per tool
+    parallel_mode=on             Run several samples/steps at once within
+                                 max_threads / max_ram_gb
+    --assume-yes                 Answer installation questions with yes
+                                 (never: overwriting results or a config file)
+    --verbose                    More detail in the log
+    --no-color / --color         Coloured screen output off / on
+
+    While running: write pause, resume or terminate to
+    <output>/control/cmd to pause, continue or stop the run.
+
+INSTALLATION AND MAINTENANCE
+    --setup [--optional]         Install tool environments and databases
+                                 (--optional: also the tools that are off)
+    installtool=<tool>           Install one tool's environment
+    reinstalltool=<tool>         Remove and install again
+    removetool=<tool>            Remove one tool's environment
+    infotool=<tool>              Show a tool's settings and installation
+    --freeze-databases[=<db>,..] Copy databases to frozen, versioned folders
+    --verify-databases           Check every database in full and name its
+                                 version
+    --generate-seal[=<name>]     Seal the configuration (settings, frozen
+                                 databases, tool environments, pipeline
+                                 version)
+
+cgMLST SCHEMAS
+    --list-schemas               Installed and available schemas
+    --install-schema=<name>      Install a schema from the catalog
+    --install-efsa-schemas[=<species>,...]
+                                 Install the EFSA schemas and filters
+                                 (campylobacter, ecoli, salmonella, listeria)
+    --import-schema=<folder>     Install a schema you already have
+
+INFORMATION
+    --help                       This text
+    --version                    The pipeline version
+    --versions                   The pipeline and every tool's version
+
+EXIT CODES
+    0 finished   1 error   2 nothing to analyse   3 finished, a sample was
+    abandoned   4 interrupted   5 finished, a step failed or timed out
+    6 stopped with terminate
+
+FILES IN THE OUTPUT FOLDER
+    report/main_report.html      The report
+    log/log.txt                  Full log (search "EURLC-WGS RUN")
+    log/run_summary.txt          Summary of the last run
+    log/run_status.json          Status for scripts and GUIs
+    log/events.jsonl             One line per step started/finished
 
-===============================================================================
-OVERVIEW
-===============================================================================
+EXAMPLES
+    eurlc-wgs datadir=/data/run192 threads=8
+    eurlc-wgs datadir=/data/run192 outdir=/analysis/run192 --resume
+    eurlc-wgs datadir=/data/run192 --qc-screen
+    eurlc-wgs outdir=/analysis/run192 rerun=sistr enable=sistr
 
-EURLC-WGS is a modular whole genome sequencing (WGS) analysis pipeline
-primarily intended for bacterial isolate characterization from Illumina data.
+Full documentation: docs/eurlc-wgs-user-manual.md in the source
+repository (https://github.com/BoSegerman/eurlc-wgs).
 
-The pipeline supports:
-
-  - Quality control of raw sequencing reads
-  - Adapter trimming and filtering
-  - Downsampling to target coverage
-  - Species identification
-  - Contamination assessment
-  - Genome assembly
-  - Assembly quality assessment
-  - Genome annotation  
-  - MLST and cgMLST typing
-  - AMR gene detection
-  - Interactive clustering analysis
-  - HTML and PDF report generation
-
-The pipeline is designed primarily for:
-  - Foodborne pathogen surveillance
-  - Veterinary and public health microbiology
-  - Routine isolate characterization
-  - Comparative genomics workflows
-
-Supported input types:
-  - Paired-end FASTQ
-  - Single-end FASTQ
-  - FASTA assemblies
-
-===============================================================================
-BASIC USAGE
-===============================================================================
-
-Navigate to a directory containing sequencing data  and run pipeline:
-
-    eurlc-wgs 
-
-Or specify input directory:
-
-    eurlc-wgs datadir=input_directory/
-
-Specify number of threads:
-
-    eurlc-wgs threads=8 
-
-Use recursive search:
-
-    eurlc-wgs --recursive
-
-Overwrite existing results:
-
-    eurlc-wgs --overwrite
-
-Use a specific configuration file:
-
-    eurlc-wgs configfile=my_config.cfg
-
-Use a specific database dir:
-
-    eurlc-wgs database=database_directory/
-    
-===============================================================================
-CONFIGURATION
-===============================================================================
-
-The pipeline can be configured in several ways.
-
-Configuration values may specify:
-  - enabled/disabled software modules
-  - assembler selection
-  - trimming strategy
-  - software arguments
-  - QC thresholds
-  - database paths
-  - species-specific expectations
-  - reporting behavior
-
-Configuration values can be added directly as arguments, using the form
-section.param=value, e.g.:
-
-    eurlc-wgs fastp.arguments="--length_required 50"
-
-Configuration files can be:
-
-  1. Explicitly specified:
-
-        configfile=my_config.config
-
-  2. Automatically detected from the database directory:
-
-        ~/eurlc-wgs_db/eurlc-wgs.config
-
-This allows installations to share common configuration and database resources.
-
-A default configuration file can be written to the database directory using: 
-
-  eurlc-wgs configfile=write
-
-===============================================================================
-DATABASE DIRECTORY
-===============================================================================
-
-The pipeline expects a database directory located at:
-
-    ~/eurlc-wgs_db
-
-This directory contains reference databases used by various analysis tools.
-
-Typical structure:
-
-    ~/eurlc-wgs_db/
-    ├── kraken2/
-    ├── mash/
-    ├── chewbbaca/
-    ├── bakta/
-    ├── checkm/
-    ├── resfinder/
-    └── eurlc-wgs.config
-
-Examples:
-
-  Kraken2:
-      Taxonomic classification database
-
-  Mash:
-      Reference sketch databases for species identification
-
-  chewBBACA:
-      cgMLST schemas and allele databases
-
-  Bakta:
-      Genome annotation databases
-
-  CheckM:
-      Genome completeness databases
-
-  ResFinder:
-      Resistance gene databases
-
-The pipeline can automatically test whether databases are installed correctly.
-
-===============================================================================
-OUTPUT STRUCTURE
-===============================================================================
-
-Results are written to an output directory.
-
-Typical structure:
-
-    output/
-    ├── report/
-    ├── results/
-    ├── large_files/
-    ├── log/
-    ├── data/   
-    └── EURLC-WGS-report.html
-
- EURLC-WGS-report.html   constitutes a main entry point to all results generated
-
--------------------------------------------------------------------------------
-REPORT DIRECTORY
--------------------------------------------------------------------------------
-
-The report directory contains user-friendly summaries.
-
-    report/
-    ├── main_report.html
-    ├── samples/
-    ├── clustering/
-    ├── amr/
-    ├── pdf/
-    └── assets/
-
-Main report:
-    Overall summary of all analyzed samples
-
-Sample reports:
-    Per-sample detailed reports
-
-Clustering reports:
-    Interactive cgMLST/wgMLST distance matrices
-
-AMR viewer:
-    Interactive AMR profile browser
-
-PDF:
-    PDF exports of reports
-
--------------------------------------------------------------------------------
-RESULTS DIRECTORY
--------------------------------------------------------------------------------
-
-The results directory contains software output and processed result files.
-
-Examples:
-
-    results/
-    ├── assemblies/
-    ├── amr/
-    ├── qc/
-    ├── typing/
-    └── clustering/
-
-These files are intended primarily for advanced users or downstream processing.
-
-
-
--------------------------------------------------------------------------------
-LOG DIRECTORY
--------------------------------------------------------------------------------
-
-Contains execution logs and command histories.
-
-Useful for:
-  - debugging
-  - reproducibility
-  - troubleshooting failed analyses
-
-===============================================================================
-REPORTING
-===============================================================================
-
-The pipeline generates several report types:
-
-  - Main HTML report
-  - Detailed sample reports
-  - Interactive clustering matrices
-  - Interactive AMR viewer
-  - MultiQC summaries
-  - TSV exports
-  - PDF reports
-
-Reports are intended to provide both:
-  - high-level overview
-  - detailed technical traceability
-
-===============================================================================
-SOFTWARE COMPONENTS
-===============================================================================
-
-Depending on configuration, the pipeline may use:
-
-  - fastp
-  - FastQC
-  - BBMap
-  - Jellyfish
-  - Kraken2
-  - Bracken
-  - Mash
-  - Bowtie2
-  - SPAdes
-  - Shovill
-  - SKESA
-  - Unicycler
-  - QUAST
-  - CheckM
-  - MLST
-  - FastMLST
-  - chewBBACA
-  - AMRFinderPlus
-  - ResFinder
-  - MultiQC
-  - Krona
-  - WeasyPrint
-  
-  annotation with bakta is supported but not automatically installed in this version
-
-===============================================================================
-INSTALLATION
-===============================================================================
-
-The pipeline uses Conda environments.
-
-Install:
-
-    ./install.sh
-
-Activate main environment:
-
-    conda activate eurlc-wgs
-
-The installer creates separate Conda environments for different tools to
-reduce dependency conflicts.
-
-The pipeline itself will also try to create missing environments
-
-===============================================================================
-TYPICAL WORKFLOW
-===============================================================================
-
-1. Install pipeline
-
-    ./install.sh
-
-2. Install databases
-
-    pre-formatted databases can be supplied with the installation files
-    The pipeline can also usually download missing databases by itself
-
-3. Navigate to the directory with fastq/fasta files
-
-    cd ~/mydatadir
-
-    
-4. Run analysis
-
-    eurlc-wgs 
-
-5. Open report
-
-    ~/mydatadir/eurlc-wgs/EURLC-WGS-report.html
-
-===============================================================================
-TROUBLESHOOTING
-===============================================================================
-
-Common problems:
-
-Missing databases:
-    Verify contents of ~/eurlc-wgs_db
-
-
-Non functional environments:
-  can be removed using: eurlc-wgs removetool=toolname
-
-the toolnames are found in the configfile
-===============================================================================
-CONTACT
-===============================================================================
-
-Bo Segerman
-
-Swedish Veterinary Agency (SVA)
-Uppsala, Sweden
-bo.segerman@sva.se
-
-
-
-===============================================================================

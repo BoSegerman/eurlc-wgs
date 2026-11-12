@@ -1,6 +1,9 @@
 name: eurlc-wgs-seqsero2
 channels:
+  # conda-forge before bioconda, and never the Anaconda defaults channel
+  # (licence terms, and mixing it with conda-forge breaks solves) (B18).
   - conda-forge
   - bioconda
+  - nodefaults
 dependencies:
   - seqsero2=1.3.1

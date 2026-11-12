@@ -19,7 +19,7 @@ db/
 data/
 *.config
 *.ini
-*:Zone.Identifier
+*Zone.Identifier
 
 # =========================================================
 # Conda / environments

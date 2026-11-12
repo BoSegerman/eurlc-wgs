@@ -1,7 +1,11 @@
 name: eurlc-wgs-jellyfish
 channels:
-  - bioconda
+  # conda-forge before bioconda, and never the Anaconda defaults channel
+  # (licence terms, and mixing it with conda-forge breaks solves) (B18).
   - conda-forge
-  - defaults
+  - bioconda
+  - nodefaults
 dependencies:
-  - jellyfish>=2,<3
+  # The bioconda package is kmer-jellyfish; with conda-forge first, the
+  # name 'jellyfish' resolves to an unrelated Python library on conda-forge.
+  - kmer-jellyfish=2.3.1

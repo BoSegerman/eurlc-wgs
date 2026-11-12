@@ -1,7 +1,9 @@
 name: eurlc-wgs-krakentools
 channels:
-  - bioconda
+  # conda-forge before bioconda, and never the Anaconda defaults channel
+  # (licence terms, and mixing it with conda-forge breaks solves) (B18).
   - conda-forge
-  - defaults
+  - bioconda
+  - nodefaults
 dependencies:
   - krakentools=1.2

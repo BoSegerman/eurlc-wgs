@@ -1,0 +1,35 @@
+# eurlc-wgs -- Illumina instruments, recognised from the instrument ID in the
+# read headers (@<instrument>:<run>:<flowcell>:<lane>:...).
+#
+# Format: <kind><TAB><match><TAB><name>
+#   prefix  <start of the instrument ID>  <instrument model>   longest prefix wins
+#   id      <exact instrument ID>         <nickname>           e.g. "id M01137 Lab A MiSeq"
+#
+# Put your own instruments (their nicknames) in <db>/known_instruments.tsv,
+# same format; its lines win over these. Prefixes are not documented by
+# Illumina in one place; these follow the serial numbers seen in practice
+# (fastp, Biostars, Illumina run IDs). Unsure ones are marked.
+#
+prefix	FS	iSeq 100
+prefix	MN	MiniSeq
+prefix	M	MiSeq
+prefix	HWI-M	MiSeq
+prefix	SH	MiSeq i100 Series
+prefix	NB	NextSeq 500/550
+prefix	NS	NextSeq 500/550
+prefix	N	NextSeq 500/550
+prefix	VH	NextSeq 1000/2000
+prefix	VL	NextSeq 1000/2000
+prefix	V	NextSeq 1000/2000
+prefix	A	NovaSeq 6000
+prefix	NA	NovaSeq 6000
+prefix	LH	NovaSeq X / X Plus
+prefix	HWUSI	Genome Analyzer IIx
+prefix	HWI-D	HiSeq 2000/2500
+prefix	HWI-ST	HiSeq 2000/2500
+prefix	SN	HiSeq 2000/2500
+prefix	D	HiSeq 2500
+prefix	J	HiSeq 3000
+prefix	K	HiSeq 3000/4000
+prefix	E	HiSeq X
+prefix	ST-E	HiSeq X

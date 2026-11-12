@@ -1,7 +1,10 @@
 name: eurlc-wgs-lissero
 channels:
+  # conda-forge before bioconda, and never the Anaconda defaults channel
+  # (licence terms, and mixing it with conda-forge breaks solves) (B18).
   - conda-forge
   - bioconda
+  - nodefaults
 dependencies:
   - lissero=0.4.9
   # lissero 0.4.9 imports pkg_resources, which setuptools removed in v81

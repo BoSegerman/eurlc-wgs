@@ -16951,13 +16951,15 @@ $runstep{$runstep_name} = {
 $runstep{$runstep_name}{test} = sub { return 2; };   # no tool or database to check
 $runstep{$runstep_name}{preprocessing} = \&preprocess_cleanup;
 
+# All work is done here, in the parent: the batch scheduler calls
+# result_parsing only after a step that ran a command, and cleanup has none
+# (before, postprocess_cleanup was never called and nothing was removed).
 sub preprocess_cleanup {
     my $runstep_name = "cleanup";
     log_message("INFO: Starting $runstep_name step");
-    return "";   # no external command -- all work is done in postprocess
+    postprocess_cleanup();
+    return "";
 }
-
-$runstep{$runstep_name}{result_parsing} = \&postprocess_cleanup;
 
 sub postprocess_cleanup {
     my $cfg = $R_cfg->{cleanup} // {};

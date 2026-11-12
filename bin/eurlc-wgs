@@ -1096,6 +1096,14 @@ my %QC_MEASURE_DEF = (
         path     => [qw(assembly contigs)],
         label    => 'Assembly number of contigs',
     },
+    # Contigs of at least 500 bp: the count the main-assembly choice uses,
+    # and the one to set limits on -- the plain count includes every short
+    # fragment an assembler writes (SPAdes many, SKESA few).
+    assembly_contigs_500 => {
+        category => 'assembly',
+        path     => [qw(assembly contigs_500)],
+        label    => 'Assembly number of contigs (500 bp or longer)',
+    },
     assembly_gc => {
         category => 'assembly',
         path     => [qw(assembly gc)],
@@ -1769,30 +1777,38 @@ $rundata{config}{defaults} = {
             fatal_q30_mindepth   => 30,
             gc         => 30,
             crossreactive_species => "Campylobacter coli",
-            warning_assembly_size => "<1500000 >2100000",
+            # Assembly size: WARNING = the narrower, CRITICAL = the wider of
+            # (the EURL recommendation, the range holding >99 % of the GenBank
+            # assemblies of the species); FAIL = NCBI's limits. From the SVA
+            # survey of GenBank assemblies (November 2026).
+            warning_assembly_size => "<1560000 >1980000",
             critical_assembly_size => "<1400000 >2300000",
-            fail_assembly_size => "<1350000 >2600000",         
+            fail_assembly_size => "<1370000 >2600000",
             warning_typing_cgmlst_call_rate   => "<95",
             critical_typing_cgmlst_call_rate   => "<90",      
             fail_typing_cgmlst_call_rate   => "<85",                    
         },
         "Campylobacter coli" => {
-            genomesize => 1700000,
+            genomesize => 1750000,
             maxdepth   => 100,
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
             gc         => 30,
             crossreactive_species => "Campylobacter jejuni",
-            warning_assembly_size => "<1500000 >2100000",
+            # Assembly size: WARNING = the narrower, CRITICAL = the wider of
+            # (the EURL recommendation, the range holding >99 % of the GenBank
+            # assemblies of the species); FAIL = NCBI's limits. From the SVA
+            # survey of GenBank assemblies (November 2026).
+            warning_assembly_size => "<1560000 >2060000",
             critical_assembly_size => "<1400000 >2300000",
-            fail_assembly_size => "<1350000 >2600000",         
+            fail_assembly_size => "<1370000 >2600000",
             warning_typing_cgmlst_call_rate   => "<95",
             critical_typing_cgmlst_call_rate   => "<90",      
             fail_typing_cgmlst_call_rate   => "<85",                     
                       
         },
         "Escherichia coli" => {
-            genomesize => 5000000,
+            genomesize => 5150000,
             maxdepth   => 100,
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
@@ -1800,13 +1816,42 @@ $rundata{config}{defaults} = {
             # Kraken assigns part of any E. coli to Shigella (and vice versa):
             # not counted as contamination.
             crossreactive_genus => "Shigella",
+            # Assembly size from the SVA survey of GenBank assemblies
+            # (November 2026): WARNING = the range holding >99 % of the
+            # GenBank assemblies, FAIL = NCBI's limits. The EURL
+            # recommendation gives only a lower limit, 4.0 Mb, the same as
+            # NCBI's, so there is no CRITICAL level.
+            warning_assembly_size => "<4420000 >5810000",
+            fail_assembly_size    => "<4000000 >6300000",
         },
         "Salmonella enterica" => {
-            genomesize => 5000000,
+            genomesize => 4800000,
             maxdepth   => 100,
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
             gc         => 52,   # was 30 (copied from Campylobacter); S. enterica ~52.1 %
+            # Starting points for testing (November 2026). The EURL-Salmonella
+            # recommendations (N50 > 30 000, <= 300 contigs, 4.4-5.8 Mb,
+            # cgMLST call rate >= 95 %) are the CRITICAL limits: a sample
+            # outside them does not meet the recommendation. WARNING is
+            # tighter (a typical good assembly), FAIL looser (results
+            # probably unusable).
+            # Assembly size from the SVA survey of GenBank assemblies:
+            # WARNING = >99 % of GenBank, CRITICAL = EURL, FAIL = NCBI limits.
+            warning_assembly_size            => "<4470000 >5370000",
+            critical_assembly_size           => "<4400000 >5800000",
+            fail_assembly_size               => "<4100000 >6000000",
+            warning_assembly_n50             => "<50000",
+            critical_assembly_n50            => "<30000",
+            fail_assembly_n50                => "<15000",
+            warning_assembly_contigs_500     => ">150",
+            critical_assembly_contigs_500    => ">300",
+            fail_assembly_contigs_500        => ">500",
+            warning_assembly_gc              => "<51.5 >53",
+            fail_assembly_gc                 => "<50 >54.5",
+            warning_typing_cgmlst_call_rate  => "<98",
+            critical_typing_cgmlst_call_rate => "<95",
+            fail_typing_cgmlst_call_rate     => "<90",
         },
         "Listeria monocytogenes" => {
             genomesize => 3000000,
@@ -1814,6 +1859,13 @@ $rundata{config}{defaults} = {
             gc         => 38,   # was missing (fell back to 0); L. monocytogenes ~38 %
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
+            # Assembly size: WARNING = the narrower, CRITICAL = the wider of
+            # (the EURL recommendation 2.8-3.2 Mb, the range holding >99 % of the GenBank
+            # assemblies of the species); FAIL = NCBI's limits. From the SVA
+            # survey of GenBank assemblies (November 2026).
+            warning_assembly_size  => "<2820000 >3200000",
+            critical_assembly_size => "<2800000 >3390000",
+            fail_assembly_size     => "<2500000 >3600000",
         },
         default => {
             genomesize => "auto",

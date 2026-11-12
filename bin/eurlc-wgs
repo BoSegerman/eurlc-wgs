@@ -5343,12 +5343,18 @@ sub estimate_genomesize {
     
     my $genomesize = get_config_value_for_species($prespeciescheck_result, 'genomesize', "auto");
     
+    # genomesize = kmer: always estimate from the reads (jellyfish), also
+    # when the species is in the genome size list -- to check the k-mer
+    # estimate, or for a species whose typical size does not fit.
+    my $force_kmer = ( $genomesize // "" ) =~ /^\s*kmer\s*$/i ? 1 : 0;
+    $genomesize = "auto" if $force_kmer;
     $genomesize  = normalize_genomesize($genomesize);
 
     # Not in the configuration: typical size from the genome size list
     # (db/genome_sizes.tsv first, then the bundled list) before falling back
     # to the k-mer estimate.
-    if ( ( !defined $genomesize || $genomesize eq "" || $genomesize =~ /^(0|auto)$/i )
+    if ( !$force_kmer
+         && ( !defined $genomesize || $genomesize eq "" || $genomesize =~ /^(0|auto)$/i )
          && defined $prespeciescheck_result && $prespeciescheck_result !~ /^(n\/a|)$/i ) {
         my ($size, $source) = lookup_typical_genome_size($prespeciescheck_result);
         if ($size) {
@@ -5653,7 +5659,7 @@ sub run_jellyfish {
     }
 
     ensure_dir($jellyfish_path);
-    log_message("NOTICE: $basename: estimating genome size from k-mer counts (jellyfish) -- no genome size configured for its species");
+    log_message("NOTICE: $basename: estimating genome size from k-mer counts (jellyfish)");
     
     my $count_cmd = "conda run -n $R_cfg->{jellyfish}->{env} --no-capture-output bash -c \"$input_cmd | jellyfish count /dev/fd/0 -t $R_cfg->{general}->{threads} -s 100M -o $jf_file -m 21\"";
 

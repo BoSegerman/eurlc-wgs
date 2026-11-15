@@ -36,6 +36,7 @@ use File::Spec;
 use File::Basename qw(dirname basename fileparse);
 use File::Path qw(make_path remove_tree);
 use File::Copy qw(move copy);
+use File::Compare ();   # cleanup_assembler_workdir: scaffolds vs contigs
 use Fcntl qw(:flock);   # LOCK_EX/LOCK_SH for the chewBBACA schema lock
 use Time::HiRes qw(sleep time);   # NOTE: overrides core time() with high-resolution version
 use POSIX qw(strftime setpgid :sys_wait_h);
@@ -406,9 +407,6 @@ my %data_key = (
     # define_shovill_runstep() together with their runsteps.
     skesa_assembled => {
         check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{skesa}{total_length} ? 1 : 0; },
-    },
-    unicycler_assembled => {
-        check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{unicycler}{total_length} ? 1 : 0; },
     },
     main_assembly_present => {
         # NOTE: new_sample_struct initialises main_results.assembly.method
@@ -1080,6 +1078,11 @@ my %QC_MEASURE_DEF = (
         path     => [qw(contamination genus_level)],
         label    => 'Genus contamination level',
     },
+    contamination_mixed_windows => {
+        category => 'contamination',
+        path     => [qw(contamination mixed_windows)],
+        label    => 'Intra-species mixture (1-kb windows with mixed positions)',
+    },
 
     assembly_size => {
         category => 'assembly',
@@ -1128,7 +1131,7 @@ my @measures = sort keys %QC_MEASURE_DEF;
     
 # Tiebreak order for the 'assembler' group (equal score -> earlier wins).
 # Group members not listed here sort after these, alphabetically.
-my @ASSEMBLER_TIEBREAK = qw(spades skesa shovill_spades shovill_skesa unicycler);
+my @ASSEMBLER_TIEBREAK = qw(spades skesa shovill_spades shovill_skesa);
    
 ## default config name
 $rundata{config}{source} = "built-in defaults"; 
@@ -1328,6 +1331,19 @@ $rundata{config}{defaults} = {
         #   but are large (comparable to raw input). They can also be used to
         #   reconstruct FASTQ reads via `samtools fastq`. Default: keep.
         bam                => 0,
+        #
+        # assembler_workfiles: an assembler's working files (SPAdes k-mer
+        #   folders, intermediate graphs, copies of the contigs, ...), removed
+        #   as soon as the assembly has been copied to alternative_assemblies/
+        #   -- not at the end of the run. Kept: the logs, the final graph (see
+        #   assembly_graphs) and SPAdes scaffolds.fasta when it differs from
+        #   contigs.fasta. A failed assembly is left as it is. Default: remove.
+        assembler_workfiles => 1,
+        #
+        # assembly_graphs: the assembler's final graph (.gfa, for Bandage).
+        #   gzip = keep it compressed, keep = keep it as it is, remove = do
+        #   not keep it (SKESA then skips gfa_connector). Default: gzip.
+        assembly_graphs    => "gzip",
     },
     md5 => {
             # Implemented via Digest::MD5 (core Perl) -- no external tool,
@@ -1419,6 +1435,20 @@ $rundata{config}{defaults} = {
             { name => "bcftools", },
         ],
     }, 
+    # Intra-species mixture metric of the remap step (see parse_pileup_minor_af_metrics).
+    remap_mixture => {
+        min_minor_reads            => 4,
+        min_minor_reads_per_strand => 1,
+        min_minor_af               => 0.05,
+        min_depth_ratio            => 0.5,
+        max_depth_ratio            => 1.5,
+        min_contig_length          => 2000,
+        contig_end_margin          => 150,
+        indel_fraction             => 0.2,
+        indel_distance             => 5,
+        neighbour_distance         => 10,
+        window_size                => 1000,
+    },
     kraken2 => {
             version_check => "loose",
             required => 1,
@@ -1521,15 +1551,6 @@ $rundata{config}{defaults} = {
             env       => "eurlc-wgs-skesa",
             yml       => "core/eurlc-wgs-skesa.yml",
             package_name  => "skesa",
-    },
-    unicycler => {
-            version_check => "loose",
-            required => 0,
-            enabled   => 0,
-            arguments => "",
-            env       => "eurlc-wgs-unicycler",
-            yml       => "optional/eurlc-wgs-unicycler.yml",
-            package_name  => "unicycler",
     },
     checkm => {
             version_check => "loose",
@@ -2494,6 +2515,9 @@ if (-f $rundata{config}{path}) {
                 # section (which it isn't).
                 log_message("WARNING: [$section] looks like a chewbbaca_schema/species section but is missing its embedded name (expected [chewbbaca_schema_<name>] or [species__<name>]) -- ignoring", "red");
             }
+            elsif ( lc($section) eq 'unicycler' ) {
+                log_message("NOTICE: [unicycler] in the config file: Unicycler is no longer part of the pipeline -- section ignored");
+            }
             elsif ( ref $R_cfg->{$section} ne 'HASH' ) {
                 # A section the pipeline does not have (B5), e.g. a typo like
                 # [spadess]. One warning for the whole section, and nothing
@@ -3019,12 +3043,37 @@ foreach my $key ( sort keys %args ) {
             }
         }
     }
+    # A Shovill variant (shovill_spades, shovill_skesa) runs only when the
+    # [shovill] tool is on too: enable=shovill_skesa switches it on as well,
+    # unless disable=shovill is given.
+    if ( grep { /^shovill_/ && $want{$_} } keys %want ) {
+        if ( !exists $want{shovill} ) {
+            $want{shovill} = 1;
+            log_message("NOTICE: enable=" . join(",", sort grep { /^shovill_/ && $want{$_} } keys %want) . ": also switches on [shovill]");
+        }
+    }
     for my $section ( sort keys %want ) {
         $R_cfg->{$section}{enabled} = $want{$section};
         log_message("NOTICE: Overriding from launch-arguments: $section.enabled=$want{$section}");
         $rundata{config}{overrides} .= "$section.enabled=$want{$section}\n";
     }
     resolve_auto_enabled();
+
+    # Shovill master switch and variants that do not agree: say so, instead
+    # of silently running nothing (e.g. shovill_skesa.enabled=1 in the config
+    # file, shovill.enabled=0).
+    my @variants = sort grep { /^shovill_/ && ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled} } keys %$R_cfg;
+    my @var_on   = grep { !is_disabled( $R_cfg->{$_}{enabled} ) } @variants;
+    my $master   = !is_disabled( $R_cfg->{shovill}{enabled} // 0 );
+    my @named = grep { exists $want{$_} || exists $args{"$_.enabled"} } @var_on;   # asked for on this run
+    if ( !$master && @named ) {
+        log_message("WARNING: " . join(", ", @named) . " switched on, but shovill.enabled=0 -- Shovill is not run."
+                  . " Use enable=" . join(",", @named) . " (switches on both), or add shovill.enabled=1", "yellow");
+    }
+    if ( $master && !@var_on ) {
+        log_message("WARNING: shovill.enabled=1 but no variant is on (" . join(", ", map { "$_.enabled=0" } @variants)
+                  . ") -- Shovill is not run. Use e.g. enable=shovill_spades", "yellow");
+    }
 }
 
 # Companion files given on the command line (B9): db_freeze_config=,
@@ -5037,13 +5086,20 @@ sub validate_settings {
     }
     # main_assembly (general and per species): a criterion or an assembler
     my @criteria   = qw(fewest_contigs fewest_contigs500 best_n50);
-    my @assemblers = grep { ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled} } qw(spades skesa shovill shovill_spades shovill_skesa unicycler);
-    my @ma = ( [ "main_assembly", $g->{main_assembly} ] );
-    push @ma, map { [ "species $_ main_assembly", $R_cfg->{species}{$_}{main_assembly} ] }
+    my @assemblers = grep { ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled} } qw(spades skesa shovill shovill_spades shovill_skesa);
+    my @ma = ( [ "main_assembly", $g->{main_assembly}, $g ] );
+    push @ma, map { [ "species $_ main_assembly", $R_cfg->{species}{$_}{main_assembly}, $R_cfg->{species}{$_} ] }
               grep { ref $R_cfg->{species}{$_} eq 'HASH' && defined $R_cfg->{species}{$_}{main_assembly} } sort keys %{ $R_cfg->{species} // {} };
     for my $m (@ma) {
-        my ($label, $v) = @$m;
+        my ($label, $v, $h) = @$m;
         next unless defined $v && $v ne "";
+        # Unicycler was removed (no longer maintained): old configs keep working
+        if ( lc $v eq "unicycler" ) {
+            log_message("WARNING: $label=unicycler: Unicycler is no longer part of the pipeline -- using the automatic choice instead", "yellow");
+            if ( $h == $g ) { $h->{main_assembly} = "fewest_contigs500"; }
+            else            { delete $h->{main_assembly}; }   # species: falls back to general
+            next;
+        }
         push @problems, "$label=[$v] must be one of: " . join(", ", 'fewest_contigs', 'fewest_contigs500', 'best_N50', @assemblers)
             unless grep { $_ eq lc $v } @criteria, @assemblers;
     }
@@ -8823,7 +8879,7 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        -2 '__R2TD__' 
        -t __THREADS__ 
        $R_cfg->{spades}->{arguments} 
-       -o __OUTDIR__/__BASE__ >> __DIR-LOG__/spades_logs.txt 
+       -o __OUTDIR__/__BASE__ > /dev/null 
        __HIDE-STDERR__
     __NEWCOMMAND__   
     cp __OUTDIR__/__BASE__/contigs.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.spades.fasta
@@ -8834,7 +8890,7 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
        -s '__SETD__'  
        -t __THREADS__ 
        $R_cfg->{spades}->{arguments} 
-       -o __OUTDIR__/__BASE__ >> __DIR-LOG__/spades_logs.txt 
+       -o __OUTDIR__/__BASE__ > /dev/null 
        __HIDE-STDERR__
     __NEWCOMMAND__   
     cp __OUTDIR__/__BASE__/contigs.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.spades.fasta
@@ -8926,6 +8982,8 @@ sub postprocess_spades {
     log_message("NOTICE: N50: $n50", "green");    
     log_message("NOTICE: gc_content: $gc", "green");
     if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
+
+    cleanup_assembler_workdir($samplenr, $runstep_name);
    
     return 1; # success
 }
@@ -9050,9 +9108,123 @@ CMD
         log_message("NOTICE: gc_content: "     . ($assemblystats->{gc_content}                // "n/a"), "green");
         my $cov = $assemblystats->{total_coverage} // 0;
         log_message("NOTICE: Total coverage: $cov", "green") if $cov > 0;
+        cleanup_assembler_workdir($samplenr, $name);
         return 1;
     };
 }
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## cleanup_assembler_workdir($samplenr, $runstep_name)
+##
+## Removes an assembler's working folder content once the assembly has been
+## copied out to its resultfile (alternative_assemblies/<base>.<asm>.fasta),
+## which is all the rest of the pipeline reads. Kept:
+##   - the assembler's own log files (version, command, warnings)
+##   - the final graph (.gfa), gzipped / as is / not at all
+##     (cleanup.assembly_graphs = gzip | keep | remove)
+##   - SPAdes scaffolds.fasta, only when it differs from contigs.fasta
+## Switched off with cleanup.assembler_workfiles=0.
+##
+## Called from the assemblers' result_parsing, so it also runs on --resume
+## (and tidies folders from older runs); it is idempotent. A failed or
+## timed-out assembly has no resultfile (moved aside) and is left untouched
+## for troubleshooting. Only names inside <output_dir>/<base>/ are touched.
+sub cleanup_assembler_workdir {
+    my ($samplenr, $runstep_name) = @_;
+    my $cfg = $R_cfg->{cleanup} // {};
+    return 0 if is_disabled( $cfg->{assembler_workfiles} // 1 );
+
+    my $def = $runstep{$runstep_name} or return 0;
+    my $resultfile = fill_placeholders( $def->{resultfile} // "", $samplenr, $runstep_name );
+    return 0 unless $resultfile ne "" && -s $resultfile;
+
+    my $base = fill_placeholders( "__BASE__", $samplenr, $runstep_name );
+    return 0 if !defined $base || $base eq "" || $base =~ m{/|^\.};
+    my $workdir = fill_placeholders( ( $def->{output_dir} // "" ) . "/__BASE__", $samplenr, $runstep_name );
+    return 0 unless -d $workdir && $workdir =~ m{/\Q$base\E$};
+
+    # what each assembler leaves behind that is worth keeping
+    my %spec = (
+        spades         => { keep  => [qw(spades.log params.txt warnings.log)],
+                            graph => [ 'assembly_graph_with_scaffolds.gfa' ] },
+        skesa          => { keep  => [],
+                            graph => [ "$base.gfa", "$base.csv" ] },   # both from gfa_connector
+        # Shovill: the graph is named after the inner assembler
+        # (spades.gfa; SKESA makes none). shovill.corrections lists the
+        # Pilon corrections (often empty). Removed: contigs.fa (copied out)
+        # and the unfiltered <inner>.fasta.
+        shovill_spades => { keep  => [qw(shovill.log shovill.corrections)],
+                            graph => [ 'spades.gfa', 'contigs.gfa' ] },
+        shovill_skesa  => { keep  => [qw(shovill.log shovill.corrections)],
+                            graph => [ 'skesa.gfa', 'contigs.gfa' ] },
+    );
+    my $s = $spec{$runstep_name} or return 0;
+
+    my $mode = lc( $cfg->{assembly_graphs} // "gzip" );
+    $mode = "keep"   if $mode =~ /^(0|no|off|false)$/;
+    $mode = "gzip"   if $mode =~ /^(1|yes|on|true)$/;
+    unless ( $mode =~ /^(gzip|keep|remove)$/ ) {
+        log_message("WARNING: cleanup.assembly_graphs=[$mode] is not gzip, keep or remove -- using gzip");
+        $mode = "gzip";
+    }
+
+    my %keep = map { $_ => 1 } @{ $s->{keep} };
+
+    # SPAdes: scaffolds.fasta only when it says something contigs.fasta does not
+    if ( $runstep_name eq 'spades' && -f "$workdir/scaffolds.fasta" ) {
+        if ( -f "$workdir/contigs.fasta"
+             && File::Compare::compare( "$workdir/scaffolds.fasta", "$workdir/contigs.fasta" ) == 0 ) {
+            # identical: nothing to keep
+        } elsif ( -f "$workdir/contigs.fasta" ) {
+            $keep{'scaffolds.fasta'} = 1;
+            log_message("INFO: [$runstep_name] " . $R_samples->[$samplenr]{name} . ": scaffolds.fasta differs from contigs.fasta -- kept");
+        } else {
+            $keep{'scaffolds.fasta'} = 1;   # contigs already gone: an earlier cleanup kept it
+        }
+    }
+
+    for my $g ( @{ $s->{graph} } ) {
+        my $f = "$workdir/$g";
+        if ( $mode eq "keep" ) {
+            $keep{$g} = 1;
+            $keep{"$g.gz"} = 1;              # gzipped by an earlier run: leave it
+        }
+        elsif ( $mode eq "gzip" ) {
+            if ( -f $f ) {
+                require IO::Compress::Gzip;
+                if ( IO::Compress::Gzip::gzip( $f => "$f.gz.part", Minimal => 1 ) && rename( "$f.gz.part", "$f.gz" ) ) {
+                    unlink $f;
+                } else {
+                    unlink "$f.gz.part";
+                    log_message("WARNING: [$runstep_name] could not gzip [$f] -- kept uncompressed");
+                    $keep{$g} = 1;
+                }
+            }
+            $keep{"$g.gz"} = 1;
+        }
+        # remove: neither kept
+    }
+
+    my ( $n, $bytes ) = ( 0, 0 );
+    opendir( my $dh, $workdir ) or return 0;
+    my @entries = grep { $_ ne '.' && $_ ne '..' } readdir $dh;
+    closedir $dh;
+    for my $e (@entries) {
+        next if $keep{$e};
+        my $p = "$workdir/$e";
+        if ( -d $p && !-l $p ) {
+            remove_tree( $p, { result => \my $gone } );
+            $n += scalar @{ $gone // [] };
+        } else {
+            $bytes += ( -s $p ) // 0;
+            $n++ if unlink $p;
+        }
+    }
+    log_message("INFO: [$runstep_name] " . $R_samples->[$samplenr]{name}
+              . ": removed $n working file(s)/folder(s) from $workdir (cleanup.assembler_workfiles)") if $n;
+    return 1;
+}
+
 
 define_shovill_runstep('shovill_spades', 'spades');
 define_shovill_runstep('shovill_skesa',  'skesa');
@@ -9158,6 +9330,13 @@ sub preprocess_skesa {
     my $command    = $runstep{$runstep_name}{cmd_template}{$sample_type};  
     my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile},$samplenr);    
 
+    # No graph wanted (cleanup.assembly_graphs=remove): skip gfa_connector,
+    # which only makes the graph and costs another pass over the reads.
+    if ( defined $command && lc( $R_cfg->{cleanup}{assembly_graphs} // "gzip" ) eq "remove"
+         && !is_disabled( $R_cfg->{cleanup}{assembler_workfiles} // 1 ) ) {
+        $command =~ s/conda run -n \S+ --no-capture-output gfa_connector .*?__HIDE-OUTPUT__\s*;\s*//;
+    }
+
     if($sample_type eq "FASTA"){
       return "";
     }
@@ -9229,173 +9408,11 @@ sub postprocess_skesa {
     log_message("NOTICE: gc_content: $gc", "green");
     if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
     
+    cleanup_assembler_workdir($samplenr, "skesa");
     return 1; # success
 }
 
 
-
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-## runstep unicycler 
-
-$runstep_name = "unicycler";
-
-$runstep{$runstep_name} = {
-      # Assemblies of larger genomes / long reads can take well over the
-      # general timeout; this is only a safety net against a hung run.
-      timeout    => "120m",
-      # Resources for parallel scheduler (§ parallel_mode=on)
-      resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 8 },
-
-      message    => "Running Unicycler...",
-      long_name  => "Unicycler",
-      output_dir => "__DIR-ALTERNATIVE-ASSEMBLIES__/Unicycler",
-      rerun_paths => [ "__DIR-ALTERNATIVE-ASSEMBLIES__/Unicycler/__BASE__" ],   # rerun=: also remove the work dir
-      resultfile => "__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.unicycler.fasta",
-      resultfiles_status => "NA",
-
-      group      => 'assembler',
-      requires   => [ 'trimmed_downsampled_fastq' ],
-      produces   => [ 'unicycler_assembled' ],
-      applies_if => sub {
-          my ($i) = @_;
-          return 0 if $R_samples->[$i]{type} eq 'FASTA';
-          return $R_cfg->{unicycler}{enabled} ? 1 : 0;
-      },
-};
-
-# TEMPLATES---------------------------------
-
-
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
-    mkdir -p __OUTDIR__/__BASE__
-    __NEWCOMMAND__
-    conda run -n $R_cfg->{unicycler}->{env} --no-capture-output unicycler 
-       -1 '__R1TD__' 
-       -2 '__R2TD__' 
-       --thread __THREADS__ 
-       -o __OUTDIR__/__BASE__ 
-       $R_cfg->{unicycler}->{arguments} 
-       __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    cp __OUTDIR__/__BASE__/assembly.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.unicycler.fasta
-CMD
-
-$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
-    mkdir -p __OUTDIR__/__BASE__
-    __NEWCOMMAND__
-    conda run -n $R_cfg->{unicycler}->{env} --no-capture-output unicycler 
-       -s '__SETD__' 
-       --thread __THREADS__ 
-       -o __OUTDIR__/__BASE__ 
-       $R_cfg->{unicycler}->{arguments} 
-       __HIDE-OUTPUT__
-    __NEWCOMMAND__   
-    cp __OUTDIR__/__BASE__/assembly.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.unicycler.fasta
-CMD
-
-$runstep{$runstep_name}{cmd_template}{FASTA} = "";
-
-# TEST---------------------------------
-$runstep{$runstep_name}{test} = \&test_unicycler;
-
-sub test_unicycler {
-
-   return check_conda_tool("unicycler");
-
-}
-
-# PRE---------------------------------
-
-$runstep{$runstep_name}{preprocessing} = \&preprocess_unicycler;
-
-sub preprocess_unicycler {
-
-    my ($samplenr) = @_;
-
-    my $runstep_name = "unicycler";    
-    my $sample_name = $R_samples->[$samplenr]{name};  
-    my $sample_type = $R_samples->[$samplenr]{type};     
-    
-    my $command    = $runstep{$runstep_name}{cmd_template}{$sample_type};    
-    my $resultfile = fill_placeholders($runstep{$runstep_name}{resultfile},$samplenr);  
-
-    if($sample_type eq "FASTA"){
-      return "";
-    }
-    
-    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
-
-   if($R_cfg->{general}{main_assembly} eq "unicycler"){
-      if(-f $resultfile &&  -f fill_placeholders("__DIR-ASSEMBLIES__/__BASE__.fasta",$samplenr) ){
-        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name  already exists. Skipping");
-        postprocess_unicycler($samplenr);
-        return "";
-      }  
-    }else{
-      if(-f $resultfile ){
-        log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name  already exists. Skipping");
-        postprocess_unicycler($samplenr);
-        return "";
-      }  
-    }
-    
-    
-
-    
-    log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
-          
-    # runstep specific replacements
-    
-     
-    #format command
-    $command  = fill_placeholders($command, $samplenr, $runstep_name); 
-    
-    #create output dir
-    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir},$samplenr));
-    
-    return $command; # success
-    
-}
-# POST---------------------------------
-
-$runstep{$runstep_name}{result_parsing} = \&postprocess_unicycler;
-
-sub postprocess_unicycler {
-    my ($samplenr) = @_;
-
-    my $runstep_name = "unicycler";
-    my $sample_name = $R_samples->[$samplenr]{name};  
-    my $sample_type = $R_samples->[$samplenr]{type}; 
-
-    my $resultfile = fill_placeholders("__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.unicycler.fasta",$samplenr,$runstep_name);  
-
-
-
-    my $assemblystats = analyze_assembly_stats($resultfile);
-    
-
-
-    $R_samples->[$samplenr]{results}{$runstep_name} = $assemblystats;
-    
-    my $len        = $assemblystats->{total_length}               // "n/a";
-    my $contigs    = $assemblystats->{nr_contigs}                // "n/a";
-    my $contigs500 = $assemblystats->{nr_contigs_largerthan_500} // "n/a";
-    my $n50        = $assemblystats->{n50}                       // "n/a";
-    my $gc         = $assemblystats->{gc_content}                // "n/a";
-    my $cov        = $assemblystats->{total_coverage}            // 0;
-        
-    log_message("NOTICE: Total length: $len", "green");
-    log_message("NOTICE: Contigs: $contigs", "green");
-    log_message("NOTICE: Contigs (500+): $contigs500", "green");
-    log_message("NOTICE: N50: $n50", "green");    
-    log_message("NOTICE: gc_content: $gc", "green");
-    if(($assemblystats->{total_coverage} // 0) > 0){  log_message("NOTICE: Total coverage: $cov", "green"); }
-    
-    return 1; # success
-}
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -10150,6 +10167,17 @@ sub postprocess_remap {
             log_message("WARNING: Cached remap QC JSON is invalid for sample $sample_name. Re-parsing source files.", "yellow");
             $result_ref = undef;
         }
+        elsif (($result_ref->{mixture}{method_version} // 1) < REMAP_MIXTURE_METHOD_VERSION()) {
+            # The cache was written before the mixture metric changed. It can be brought
+            # up to date without mapping again as long as the pileup is still on disk.
+            if (-s "$output_dir/$sample_name.pileup.gz") {
+                log_message("NOTICE: Remap QC for sample $sample_name was made with an earlier mixture method -- parsing the pileup again");
+                $result_ref = undef;
+            }
+            else {
+                log_message("NOTICE: Remap QC for sample $sample_name was made with an earlier mixture method and the pileup is gone -- the new mixture values are not available (rerun=remap to get them)");
+            }
+        }
     }
 
     if (!$result_ref) {
@@ -10170,6 +10198,16 @@ sub postprocess_remap {
     my $picked = $result_ref->{mapping}{samtools_stats_sn_picked} // {};
     my $cov    = $result_ref->{coverage} // {};
     my $mix    = $result_ref->{mixture} // {};
+
+    # The mixture metric, where QC thresholds and the reports look for it.
+    if (defined $mix->{mixed_windows}) {
+        $R_samples->[$samplenr]{main_results}{contamination}{mixed_windows}        = $mix->{mixed_windows};
+        $R_samples->[$samplenr]{main_results}{contamination}{mixed_windows_pct}    = $mix->{mixed_windows_pct};
+        $R_samples->[$samplenr]{main_results}{contamination}{mixed_sites}          = $mix->{mixed_sites};
+        $R_samples->[$samplenr]{main_results}{contamination}{mixed_sites_isolated} = $mix->{mixed_sites_isolated};
+        $R_samples->[$samplenr]{main_results}{contamination}{mixed_minoraf_median} = $mix->{mixed_minoraf_median};
+        $R_samples->[$samplenr]{main_results}{contamination}{mixed_method}         = "remap, method $mix->{method_version}";
+    }
 
     my $fmt = sub {
         my ($value, $suffix) = @_;
@@ -10226,6 +10264,11 @@ sub postprocess_remap {
         "positions (>=20X) with minor allele fraction >=20%",
         $fmt->($mix->{"sites_minoraf_ge_0_20_dp20"})
     );
+    print_tabular_results("Mixture: 1-kb windows with mixed positions",
+        $fmt->($mix->{mixed_windows}) . (defined $mix->{mixed_windows_total} ? " of $mix->{mixed_windows_total}" : ""));
+    print_tabular_results("Mixture: mixed positions after filters",  $fmt->($mix->{mixed_sites}));
+    print_tabular_results("Mixture: of which isolated (none within 1 kb)", $fmt->($mix->{mixed_sites_isolated}));
+    print_tabular_results("Mixture: median minor allele fraction",   $fmt->($mix->{mixed_minoraf_median}));
 
 
 
@@ -10913,6 +10956,66 @@ sub depth_stats_per_contig_from_file {
 }
 
 
+###############################################################################
+# Intra-species mixture metric from the pileup (method_version 2)
+#
+# Background: counting every position with minor allele fraction >= 5 % gave
+# 27-589 "mixed" positions in clean Campylobacter samples (validation set D1),
+# mostly positions carried by 1-3 reads, positions next to indels, and a few
+# dense clusters in repeated genes. A close contaminant (34 cgMLST alleles
+# apart) never rose above that background, even at 20 %.
+#
+# What is done instead:
+#   1. A position is a candidate only if the SECOND most common base (among
+#      A/C/G/T; deletions and N are not counted) is supported by enough reads,
+#      on both strands, at a high enough fraction.
+#   2. Positions with unusual depth, at contig ends, on short contigs, at or
+#      next to indels, or with another candidate a few bases away are set aside.
+#   3. What remains is counted as 1-kb WINDOWS with at least one such position.
+#      A cluster of 40 positions in one repeated gene then counts once, while a
+#      contaminating strain, whose differences are spread over the genome, hits
+#      many windows.
+#
+# The numbers reported by the earlier method (sites_minoraf_* etc.) are still
+# computed, unchanged, so old and new can be compared on the same run.
+#
+# Every setting is in the [remap_mixture] config section.
+###############################################################################
+
+# Raise when the method changes: a cached result with a lower number is parsed again.
+sub REMAP_MIXTURE_METHOD_VERSION { return 2; }
+
+sub remap_mixture_params {
+    my %default = (
+        min_minor_reads            => 4,      # reads supporting the second base
+        min_minor_reads_per_strand => 1,      # ... of which at least this many on each strand (0 = off)
+        min_minor_af               => 0.05,   # second base / (A+C+G+T)
+        min_depth_ratio            => 0.5,    # pileup depth / median depth of the contig
+        max_depth_ratio            => 1.5,
+        min_contig_length          => 2000,
+        contig_end_margin          => 150,    # positions this close to a contig end are not used
+        indel_fraction             => 0.2,    # a position where this share of reads has an indel or deletion ...
+        indel_distance             => 5,      # ... sets aside candidates within this many bases (0 = off)
+        neighbour_distance         => 10,     # candidates this close to each other are set aside (0 = off)
+        window_size                => 1000,
+    );
+    my $cfg = (ref($R_cfg) eq 'HASH' && ref($R_cfg->{remap_mixture}) eq 'HASH') ? $R_cfg->{remap_mixture} : {};
+    my %p;
+    for my $key (sort keys %default) {
+        my $value = $cfg->{$key};
+        if (defined $value && $value =~ /^\s*(\d+(?:\.\d+)?)\s*$/) {
+            $p{$key} = $1 + 0;
+        }
+        else {
+            log_message("WARNING: [remap_mixture] $key=[$value] is not a number -- using the default ($default{$key})", "yellow")
+                if defined $value && $value ne "";
+            $p{$key} = $default{$key};
+        }
+    }
+    $p{window_size} = $default{window_size} if $p{window_size} < 1;
+    return \%p;
+}
+
 sub parse_pileup_minor_af_metrics {
     my (%opt) = @_;
 
@@ -10921,6 +11024,7 @@ sub parse_pileup_minor_af_metrics {
     my $out_tsv = $opt{out_tsv};
     my $contig_depth_ref = $opt{contig_depth_ref} // {};
     my $contig_lengths_ref = $opt{contig_lengths_ref} // {};
+    my $P = $opt{params} // remap_mixture_params();
 
     if (!defined $pileup || $pileup eq "") {
         log_message("WARNING: parse_pileup_minor_af_metrics: missing pileup path", "yellow");
@@ -10949,25 +11053,22 @@ sub parse_pileup_minor_af_metrics {
         };
     }
 
-    my $tfh;
-    if (defined $out_tsv && $out_tsv ne "") {
-        open($tfh, ">", $out_tsv) or do {
-            log_message("WARNING: Cannot write mixed-position TSV [$out_tsv]: $!", "yellow");
-            $tfh = undef;
-        };
-
-        if ($tfh) {
-            print {$tfh} join("\t",
-                qw(contig contig_length position ref_base depth median_depth depth_over_median major_base major_base_count disagree_count minor_af filtered)
-            ), "\n";
-        }
-    }
-
+    # ---- earlier method: totals -------------------------------------------
     my $callable = 0;
     my $bin_5_10  = 0;
     my $bin_10_20 = 0;
     my $bin_ge_20 = 0;
     my @minor_afs;
+
+    # ---- new method: what is collected while reading ------------------------
+    # A row is kept for a position that the earlier method reported (so the TSV
+    # still contains everything it used to), or where the second base has at
+    # least 2 reads and 2 %. That is wider than the filters below on purpose:
+    # the TSV can then be used to try other settings without the pileup.
+    my @rows;               # one hash per kept position, in file order
+    my %indel_position;     # {contig}{position} = 1 where many reads have an indel/deletion
+
+    my @bases_order = qw(A C G T);
 
     while (my $ln = <$fh>) {
         chomp($ln);
@@ -10976,68 +11077,57 @@ sub parse_pileup_minor_af_metrics {
         my ($chr, $pos, $ref, $dp, $bases, $quals) = split(/\t/, $ln);
         next unless defined $dp && $dp =~ /^\d+$/;
         next unless defined $ref && defined $bases;
-
         next if $dp < $min_dp;
+
         $callable++;
 
-        my %cnt = (A => 0, C => 0, G => 0, T => 0);
-        my $i    = 0;
-        my $len  = length($bases);
-        my $refU = uc($ref);
+        # Read-start markers are "^" plus one mapping-quality character, which can
+        # itself be "+" or "-": they must go before indels are looked for.
+        $bases =~ s/\^.//g if index($bases, '^') >= 0;
 
-        while ($i < $len) {
-            my $c = substr($bases, $i, 1);
-
-            if ($c eq '^') {
-                $i += 2;
-                next;
+        # Indels are written after the base they follow: +2AG, -1t. Count them and cut them out.
+        my $indel_starts = 0;
+        if (index($bases, '+') >= 0 || index($bases, '-') >= 0) {
+            my $clean = '';
+            my $from  = 0;
+            while ($bases =~ /[+-](\d+)/g) {
+                my $start = $-[0];
+                my $skip  = $+[0] + $1;
+                $clean .= substr($bases, $from, $start - $from);
+                $from = $skip > length($bases) ? length($bases) : $skip;
+                pos($bases) = $from;
+                $indel_starts++;
             }
-            if ($c eq '$') {
-                $i++;
-                next;
-            }
-            if ($c eq '+' || $c eq '-') {
-                $i++;
-                my $num = '';
-                while ($i < $len) {
-                    my $d = substr($bases, $i, 1);
-                    last unless $d =~ /\d/;
-                    $num .= $d;
-                    $i++;
-                }
-                my $n = $num ne '' ? int($num) : 0;
-                $i += $n;
-                next;
-            }
-            if ($c eq '*') {
-                $i++;
-                next;
-            }
-            if ($c eq '.' || $c eq ',') {
-                $cnt{$refU}++ if exists $cnt{$refU};
-                $i++;
-                next;
-            }
-
-            my $b = uc($c);
-            if (exists $cnt{$b}) {
-                $cnt{$b}++;
-            }
-            $i++;
+            $clean .= substr($bases, $from);
+            $bases = $clean;
         }
+
+        my $refU = uc($ref);
+        my $ref_fwd = ($bases =~ tr/.//);
+        my $ref_rev = ($bases =~ tr/,//);
+        my %fwd = (A => ($bases =~ tr/A//), C => ($bases =~ tr/C//), G => ($bases =~ tr/G//), T => ($bases =~ tr/T//));
+        my %rev = (A => ($bases =~ tr/a//), C => ($bases =~ tr/c//), G => ($bases =~ tr/g//), T => ($bases =~ tr/t//));
+        if (exists $fwd{$refU}) {
+            $fwd{$refU} += $ref_fwd;
+            $rev{$refU} += $ref_rev;
+        }
+        my $del_count = ($bases =~ tr/*#//);      # the read has a deletion at this position
+        my $n_count   = ($bases =~ tr/Nn//);
+
+        my %cnt = map { $_ => $fwd{$_} + $rev{$_} } @bases_order;
 
         my $major_base = "N";
         my $major_count = 0;
-        for my $b (qw(A C G T)) {
+        for my $b (@bases_order) {
             if ($cnt{$b} > $major_count) {
                 $major_count = $cnt{$b};
                 $major_base  = $b;
             }
         }
 
+        # ---- earlier method: everything that is not the major base, over the pileup depth
         my $disagree_count = $dp - $major_count;
         my $minor_af = $dp > 0 ? ($disagree_count / $dp) : 0;
-
         push @minor_afs, $minor_af;
 
         my $bin_hit = 0;
@@ -11054,38 +11144,179 @@ sub parse_pileup_minor_af_metrics {
             $bin_hit = 1;
         }
 
-        if ($bin_hit && $tfh) {
-            my $contig_len   = $contig_lengths_ref->{$chr} // "n/a";
-            my $median_depth = $contig_depth_ref->{$chr}{median_depth} // "n/a";
-
-            my $depth_over_median = "n/a";
-            if (defined $median_depth && $median_depth =~ /^\d+(?:\.\d+)?$/ && $median_depth > 0) {
-                $depth_over_median = sprintf("%.6f", $dp / $median_depth);
+        # ---- new method: the second most common base, over A+C+G+T
+        my $minor_base = "N";
+        my $minor_count = 0;
+        for my $b (@bases_order) {
+            next if $b eq $major_base;
+            if ($cnt{$b} > $minor_count) {
+                $minor_count = $cnt{$b};
+                $minor_base  = $b;
             }
-
-            my $filtered = 0;   # placeholder for future filtering logic
-
-            print {$tfh} join("\t",
-                $chr,
-                $contig_len,
-                $pos,
-                $ref,
-                $dp,
-                $median_depth,
-                $depth_over_median,
-                $major_base,
-                $major_count,
-                $disagree_count,
-                sprintf("%.6f", $minor_af),
-                $filtered
-            ), "\n";
         }
+        my $acgt_depth = $cnt{A} + $cnt{C} + $cnt{G} + $cnt{T};
+        my $minor_af_acgt = $acgt_depth > 0 ? ($minor_count / $acgt_depth) : 0;
+
+        if ($P->{indel_distance} > 0 && ($indel_starts + $del_count) >= 3
+            && ($indel_starts + $del_count) / $dp >= $P->{indel_fraction}) {
+            $indel_position{$chr}{$pos} = 1;
+        }
+
+        next unless $bin_hit || ($minor_count >= 2 && $minor_af_acgt >= 0.02);
+
+        push @rows, {
+            chr => $chr, pos => $pos, ref => $ref, dp => $dp,
+            major_base => $major_base, major_count => $major_count,
+            disagree_count => $disagree_count, minor_af => $minor_af,
+            minor_base => $minor_base, minor_count => $minor_count,
+            minor_fwd => ($minor_base eq "N" ? 0 : $fwd{$minor_base}),
+            minor_rev => ($minor_base eq "N" ? 0 : $rev{$minor_base}),
+            acgt_depth => $acgt_depth, minor_af_acgt => $minor_af_acgt,
+            del_count => $del_count, indel_starts => $indel_starts, n_count => $n_count,
+        };
     }
 
     close($fh);
-    close($tfh) if $tfh;
+
+    # ---- new method: filters ------------------------------------------------
+    # Each row gets the FIRST reason it is set aside for, or PASS. The order is
+    # from "not a candidate at all" to "a candidate, but in a doubtful place".
+    my %filter_count;
+    my %passing_by_contig;      # {contig} = [ rows that passed everything so far ]
+
+    for my $row (@rows) {
+        my $chr = $row->{chr};
+        my $contig_len   = $contig_lengths_ref->{$chr};
+        my $median_depth = $contig_depth_ref->{$chr}{median_depth};
+
+        $row->{contig_len}   = $contig_len   // "n/a";
+        $row->{median_depth} = $median_depth // "n/a";
+        my $ratio;
+        if (defined $median_depth && $median_depth =~ /^\d+(?:\.\d+)?$/ && $median_depth > 0) {
+            $ratio = $row->{dp} / $median_depth;
+        }
+        $row->{depth_over_median} = defined $ratio ? sprintf("%.6f", $ratio) : "n/a";
+
+        my $reason = "PASS";
+        if ($row->{minor_count} < $P->{min_minor_reads}) {
+            $reason = "few_reads";
+        }
+        elsif ($row->{minor_af_acgt} < $P->{min_minor_af}) {
+            $reason = "low_af";
+        }
+        elsif ($row->{minor_fwd} < $P->{min_minor_reads_per_strand} || $row->{minor_rev} < $P->{min_minor_reads_per_strand}) {
+            $reason = "one_strand";
+        }
+        elsif (!defined $ratio || $ratio < $P->{min_depth_ratio} || $ratio > $P->{max_depth_ratio}) {
+            $reason = "depth";
+        }
+        elsif (!defined $contig_len || $contig_len !~ /^\d+$/ || $contig_len < $P->{min_contig_length}) {
+            $reason = "short_contig";
+        }
+        elsif ($row->{pos} <= $P->{contig_end_margin} || $row->{pos} > $contig_len - $P->{contig_end_margin}) {
+            $reason = "contig_end";
+        }
+        elsif ($P->{indel_distance} > 0 && exists $indel_position{$chr}) {
+            for my $near ($row->{pos} - $P->{indel_distance} .. $row->{pos} + $P->{indel_distance}) {
+                if ($indel_position{$chr}{$near}) {
+                    $reason = "indel";
+                    last;
+                }
+            }
+        }
+        $row->{filter} = $reason;
+        push @{ $passing_by_contig{$chr} }, $row if $reason eq "PASS";
+    }
+
+    # Candidates a few bases from each other: the pattern of a misaligned read end
+    # or a small rearrangement, not of independent base differences.
+    if ($P->{neighbour_distance} > 0) {
+        for my $chr (keys %passing_by_contig) {
+            my @sorted = sort { $a->{pos} <=> $b->{pos} } @{ $passing_by_contig{$chr} };
+            for my $k (0 .. $#sorted) {
+                my $close = 0;
+                $close = 1 if $k > 0        && $sorted[$k]{pos} - $sorted[$k - 1]{pos} <= $P->{neighbour_distance};
+                $close = 1 if $k < $#sorted && $sorted[$k + 1]{pos} - $sorted[$k]{pos} <= $P->{neighbour_distance};
+                $sorted[$k]{neighbour} = $close;
+            }
+            for my $row (@sorted) {
+                $row->{filter} = "neighbour" if delete $row->{neighbour};
+            }
+            $passing_by_contig{$chr} = [ grep { $_->{filter} eq "PASS" } @sorted ];
+        }
+    }
+
+    # ---- new method: the numbers --------------------------------------------
+    my $window = $P->{window_size};
+    my (%window_hit, @pass_afs);
+    my $sites_pass = 0;
+    my $sites_isolated = 0;
+
+    for my $chr (keys %passing_by_contig) {
+        my @sorted = sort { $a->{pos} <=> $b->{pos} } @{ $passing_by_contig{$chr} };
+        for my $k (0 .. $#sorted) {
+            $sites_pass++;
+            $window_hit{ $chr . "\t" . int($sorted[$k]{pos} / $window) } = 1;
+            push @pass_afs, $sorted[$k]{minor_af_acgt};
+            my $alone = 1;
+            $alone = 0 if $k > 0        && $sorted[$k]{pos} - $sorted[$k - 1]{pos} <= $window;
+            $alone = 0 if $k < $#sorted && $sorted[$k + 1]{pos} - $sorted[$k]{pos} <= $window;
+            $sites_isolated++ if $alone;
+        }
+    }
+    $filter_count{ $_->{filter} }++ for @rows;
+
+    # How many windows there are to hit: on the contigs that are long enough to be used.
+    my $windows_total = 0;
+    for my $chr (keys %$contig_lengths_ref) {
+        my $len = $contig_lengths_ref->{$chr};
+        next unless defined $len && $len =~ /^\d+$/ && $len >= $P->{min_contig_length};
+        $windows_total += int($len / $window) + 1;
+    }
+
+    # ---- the table of positions ---------------------------------------------
+    if (defined $out_tsv && $out_tsv ne "") {
+        if (open(my $tfh, ">", $out_tsv)) {
+            print {$tfh} join("\t",
+                qw(contig contig_length position ref_base depth median_depth depth_over_median major_base major_base_count disagree_count minor_af filtered),
+                qw(minor_base minor_count minor_fwd minor_rev acgt_depth minor_af_acgt del_count indel_starts n_count filter)
+            ), "\n";
+            for my $row (@rows) {
+                print {$tfh} join("\t",
+                    $row->{chr},
+                    $row->{contig_len},
+                    $row->{pos},
+                    $row->{ref},
+                    $row->{dp},
+                    $row->{median_depth},
+                    $row->{depth_over_median},
+                    $row->{major_base},
+                    $row->{major_count},
+                    $row->{disagree_count},
+                    sprintf("%.6f", $row->{minor_af}),
+                    ($row->{filter} eq "PASS" ? 0 : 1),
+                    $row->{minor_base},
+                    $row->{minor_count},
+                    $row->{minor_fwd},
+                    $row->{minor_rev},
+                    $row->{acgt_depth},
+                    sprintf("%.6f", $row->{minor_af_acgt}),
+                    $row->{del_count},
+                    $row->{indel_starts},
+                    $row->{n_count},
+                    $row->{filter},
+                ), "\n";
+            }
+            close($tfh);
+        }
+        else {
+            log_message("WARNING: Cannot write mixed-position TSV [$out_tsv]: $!", "yellow");
+        }
+    }
 
     my %out;
+
+    # ---- earlier method (unchanged) -------------------------------------------
     $out{"callable_sites_dp_ge_$min_dp"} = $callable;
 
     $out{"sites_minoraf_0_05_to_0_10_dp$min_dp"} = $bin_5_10;
@@ -11107,8 +11338,27 @@ sub parse_pileup_minor_af_metrics {
         $out{"minoraf_p95_dp$min_dp"}    = undef;
     }
 
+    # ---- new method ---------------------------------------------------------
+    $out{method_version}        = REMAP_MIXTURE_METHOD_VERSION();
+    $out{mixed_windows}         = scalar(keys %window_hit);     # the number to judge a sample by
+    $out{mixed_windows_total}   = $windows_total;
+    $out{mixed_windows_pct}     = $windows_total ? sprintf("%.2f", 100 * scalar(keys %window_hit) / $windows_total) : undef;
+    $out{mixed_sites}           = $sites_pass;
+    $out{mixed_sites_isolated}  = $sites_isolated;
+    if (@pass_afs) {
+        @pass_afs = sort { $a <=> $b } @pass_afs;
+        $out{mixed_minoraf_median} = sprintf("%.4f", $pass_afs[int(@pass_afs / 2)]);
+    }
+    else {
+        $out{mixed_minoraf_median} = undef;
+    }
+    $out{mixed_candidates}      = scalar(@rows);
+    $out{mixed_filter_counts}   = \%filter_count;
+    $out{mixed_params}          = { %$P };
+
     return \%out;
 }
+
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -17415,7 +17665,7 @@ our @PER_SAMPLE_RUNSTEPS = qw(
     fastp_rawdata check_for_no_trimming find_species_kraken2 downsampling_bbmap
     check_for_no_downsampling fastq_stats_trimmed fastp_trimmed_data
     fastqc_trimmed_data check_for_fasta mash_screen Kraken2
-    spades skesa shovill_spades shovill_skesa unicycler select_main_assembly
+    spades skesa shovill_spades shovill_skesa select_main_assembly
     quast remap mlst fastmlst select_main_mlst
     amrfinderplus resfinder_fastq resfinder_fasta select_main_amr_results
     sistr seqsero2 ectyper lissero select_main_serotype
@@ -19624,12 +19874,14 @@ sub writedefaultconfigfile {
             if ($section eq "cleanup") {
                 print $fh "[cleanup]\n";
                 print $fh "; Controls which large intermediate files are removed when the pipeline finishes.\n";
-                print $fh "; 1 = remove  |  0 = keep\n";
+                print $fh "; 1 = remove  |  0 = keep  (assembly_graphs: gzip | keep | remove)\n";
                 my %cleanup_comments = (
                     trimmed_fastq     => "fastp/trimmomatic output -- not needed after assembly",
                     downsampled_fastq => "coverage-capped reads (seqtk/bbmap/rasusa) -- not needed after assembly",
                     jellyfish_db      => "binary .jf k-mer database -- histogram is always kept regardless",
                     bam               => "remapping BAM + BAI -- useful for IGV; can reconstruct FASTQ via samtools fastq",
+                    assembler_workfiles => "assembler working files, removed right after each assembly (logs, final graph and differing SPAdes scaffolds are kept)",
+                    assembly_graphs   => "final assembly graph (.gfa): gzip | keep | remove",
                 );
                 for my $param (sort keys %{ $R_cfg->{cleanup} }) {
                     my $val = $R_cfg->{cleanup}{$param} // 0;
@@ -27091,7 +27343,6 @@ sub get_detailed_report_runstep_order {
             skesa
             shovill_spades
             shovill_skesa
-            unicycler
             select_main_assembly
             quast
             remap
@@ -31456,11 +31707,31 @@ sub _cmd_setup {
     if ($n_missing > 0 || $n_db_missing > 0) {
         log_message("NOTICE:   - Some environments or databases were skipped. Re-run --setup to install them.");
     }
+    # cgMLST schemas are installed separately: name the EFSA ones that are
+    # missing for the species in scope, as a ready command.
+    {
+        my %efsa = ( campylobacter => [ "CAMPISO-PubMLST-8",    "Campylobacter" ],
+                     ecoli         => [ "chewie_ns_ecoli",      "Escherichia coli" ],
+                     salmonella    => [ "chewie_ns_salmonella", "Salmonella" ],
+                     listeria      => [ "chewie_ns_listeria",   "Listeria" ] );
+        my $schemas = ( peekdir("db") // "" ) . "/chewbbaca/schemas";
+        my $scope   = [ grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $R_cfg->{general}{species_scope} // "" ) ];
+        my @missing = grep {
+            !-d "$schemas/$efsa{$_}[0]"
+            && ( !@$scope || grep( { lc $_ eq 'all' } @$scope ) || species_lists_overlap( $scope, [ $efsa{$_}[1] ] ) )
+        } sort keys %efsa;
+        if (@missing) {
+            log_message("NOTICE:   - Install the cgMLST schemas (EFSA):");
+            log_message("NOTICE:       eurlc-wgs --install-efsa-schemas"
+                      . ( @missing == keys %efsa ? "" : "=" . join( ",", @missing ) ));
+            log_message("NOTICE:     (--list-schemas shows all available schemas)");
+        }
+    }
     if (!-f ($seal_path // "")) {
         log_message("NOTICE:   - Run --freeze-databases to lock database versions.");
         log_message("NOTICE:   - Run --generate-seal=\"<name>\" after validation to create a seal.");
     }
-    log_message("NOTICE:   - Run eurlc-wgs --version to verify the installation.");
+    log_message("NOTICE:   - Run eurlc-wgs --versions to see every tool's version.");
     log_message("NOTICE: ─────────────────────────────────────────────────");
     return $n_failures;
 }

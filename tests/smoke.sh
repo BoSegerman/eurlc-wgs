@@ -133,6 +133,11 @@ check "threshold without operator: warning" grep -q "cannot be read as a thresho
 check "written file reads back without parse warnings" bash -c "! grep -q 'could not parse' '$T/c2.out'"
 cp "$T/cfg.bak" "$CFG"
 
+run "$T/c3.out" datadir="$D" outdir="$T/out_c3" --assume-yes disable=chewbbaca enable=shovill_skesa
+check "enable=shovill_skesa also switches on [shovill]" grep -q "Overriding from launch-arguments: shovill.enabled=1" "$T/c3.out"
+run "$T/c4.out" datadir="$D" outdir="$T/out_c4" --assume-yes disable=chewbbaca shovill_skesa.enabled=1
+check "shovill_skesa.enabled=1 without shovill: warning" grep -q "shovill_skesa switched on, but shovill.enabled=0" "$T/c4.out"
+
 # --- 5. samples, lanes, output folder --------------------------------------
 echo "Samples and output folder"
 OUT="$T/out"
@@ -177,6 +182,17 @@ check "  ... and reports no new input files" bash -c "! grep -q 'are not part of
 mkdir -p "$T/out_logs/log"; echo x > "$T/out_logs/log/log.txt"
 run "$T/s4.out" datadir="$D" outdir="$T/out_logs" --assume-yes disable=chewbbaca
 check "output folder with only logs: started anew without asking" grep -q "holds only logs" "$T/s4.out"
+
+# --- scripts/eurlc-wgs-inspect (read-only, on the output folder above) ------
+INSPECT="$(dirname "$0")/../scripts/eurlc-wgs-inspect"
+if command -v python3 > /dev/null && [[ -f "$INSPECT" ]]; then
+    check "inspect inventory runs and writes a manifest" \
+          bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m.tsv' > '$T/inv.out' && grep -q '^path	size' '$T/m.tsv'"
+    check "inspect extract makes a package" \
+          bash -c "python3 '$INSPECT' extract '$OUT' --all-samples --anonymize -o '$T/pkg' > /dev/null && tar tzf '$T/pkg.tar.gz' | grep -q MANIFEST.tsv"
+    check "  ... and leaves the output folder unchanged" \
+          bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m2.tsv' > /dev/null && cmp -s <(cut -f1,2,9 '$T/m.tsv') <(cut -f1,2,9 '$T/m2.tsv')"
+fi
 
 # --- result ----------------------------------------------------------------
 echo

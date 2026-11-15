@@ -1,0 +1,900 @@
+#!/usr/bin/env python3
+# eurlc-wgs-inspect — look at eurlc-wgs output folders without changing them.
+#
+#   inventory  what is in an output folder, what takes the space, what could
+#              be removed or stored more compactly, duplicates; writes a
+#              manifest (TSV) with sizes and optionally MD5 checksums
+#   extract    a small .tar.gz with the tools' own result files, logs and
+#              report tables for chosen samples (no reads, no BAM)
+#
+# Standard library only (Python >= 3.7). Reads the output folder, never
+# writes to it.
+#
+# Part of EURLC-WGS. GPL-3.0-or-later.
+
+import argparse
+import datetime
+import difflib
+import fnmatch
+import gzip
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+import tarfile
+import urllib.parse
+import zlib
+from collections import defaultdict
+
+VERSION = "0.1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def human(n):
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1000 or unit == "TB":
+            if unit == "B":
+                return "%d B" % n
+            return "%.1f %s" % (n, unit)
+        n /= 1000.0
+
+
+def die(msg, code=2):
+    sys.stderr.write("eurlc-wgs-inspect: %s\n" % msg)
+    sys.exit(code)
+
+
+def warn(msg):
+    sys.stderr.write("WARNING: %s\n" % msg)
+
+
+def md5_file(path, bufsize=4 * 1024 * 1024):
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        while True:
+            b = fh.read(bufsize)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def md5_bytes(b):
+    return hashlib.md5(b).hexdigest()
+
+
+def file_type(name):
+    """'.bam', '.tsv', '.fasta', '.tsv.gz', '(none)' …"""
+    low = name.lower()
+    gz = ""
+    if low.endswith(".gz"):
+        gz = ".gz"
+        low = low[:-3]
+    base, ext = os.path.splitext(low)
+    if not ext:
+        return "(none)" + gz if gz else "(none)"
+    return ext + gz
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reading an output folder (or a `find -printf '%s %p\n'` listing of one)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Tree:
+    """All files of one output folder: rel path -> {size, mtime}."""
+
+    def __init__(self):
+        self.root = None          # real folder, or None for a listing
+        self.label = ""
+        self.files = {}           # rel -> dict(size=, mtime=)
+        self.samples = []         # sample names (longest first for matching)
+        self._sample_re = None
+
+    @property
+    def is_listing(self):
+        return self.root is None
+
+    # ── loading ──────────────────────────────────────────────────────────────
+    @classmethod
+    def from_folder(cls, path):
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            die("not a folder: %s" % path)
+        # Accept the data folder too: <datadir>/eurlc-wgs is the default out.
+        if not looks_like_outdir(path) and looks_like_outdir(os.path.join(path, "eurlc-wgs")):
+            path = os.path.join(path, "eurlc-wgs")
+        if not looks_like_outdir(path):
+            warn("[%s] does not look like an eurlc-wgs output folder (no log/ or results/); "
+                 "continuing anyway" % path)
+        t = cls()
+        t.root = path
+        t.label = path
+        for dirpath, dirnames, filenames in os.walk(path):
+            dirnames.sort()
+            for fn in filenames:
+                full = os.path.join(dirpath, fn)
+                try:
+                    st = os.lstat(full)
+                except OSError as e:
+                    warn("cannot stat %s: %s" % (full, e))
+                    continue
+                if os.path.islink(full):
+                    continue      # a symlink takes no space of its own
+                rel = os.path.relpath(full, path).replace(os.sep, "/")
+                t.files[rel] = {"size": st.st_size, "mtime": int(st.st_mtime)}
+        t._find_samples()
+        return t
+
+    @classmethod
+    def from_listing(cls, listing):
+        """Lines '<size> <path>' as written by find . -type f -printf '%s %p\\n'."""
+        raw = []
+        with open(listing, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                m = re.match(r"^\s*(\d+)\s+(.+)$", line)
+                if not m:
+                    continue
+                p = m.group(2)
+                if p.startswith("./"):
+                    p = p[2:]
+                raw.append((int(m.group(1)), p))
+        if not raw:
+            die("no '<size> <path>' lines in %s" % listing)
+        # Where is the output folder inside the listing? The prefix in front
+        # of log/run_status.json (or log/log.txt, or results/).
+        prefix = None
+        for marker in ("log/run_status.json", "log/log.txt", "log/run_summary.txt"):
+            for _, p in raw:
+                if p == marker or p.endswith("/" + marker):
+                    prefix = p[: len(p) - len(marker)]
+                    break
+            if prefix is not None:
+                break
+        if prefix is None:
+            prefix = ""
+        t = cls()
+        t.label = "%s (listing%s)" % (listing, (", folder " + prefix.rstrip("/")) if prefix else "")
+        for size, p in raw:
+            if prefix and not p.startswith(prefix):
+                continue
+            t.files[p[len(prefix):]] = {"size": size, "mtime": 0}
+        t._find_samples()
+        return t
+
+    # ── samples ──────────────────────────────────────────────────────────────
+    def _find_samples(self):
+        names = set()
+        if self.root:
+            man = os.path.join(self.root, "log", "sample_manifest.tsv")
+            if os.path.isfile(man):
+                with open(man, encoding="utf-8", errors="replace") as fh:
+                    for i, line in enumerate(fh):
+                        cols = line.rstrip("\n").split("\t")
+                        if i == 0 and cols and cols[0] == "sample_name":
+                            continue
+                        if cols and cols[0]:
+                            names.add(cols[0])
+        for rel in self.files:
+            for rx in (r"^results/assemblies/([^/]+)\.fasta$",
+                       r"^report/samples/(.+?)(?:_detailed)?_report\.html$",
+                       r"^log/(.+)-results\.json$"):
+                m = re.match(rx, rel)
+                if m:
+                    names.add(m.group(1))
+        self.samples = sorted(names, key=lambda s: (-len(s), s))
+        if self.samples:
+            alt = "|".join(re.escape(s) for s in self.samples)
+            self._sample_re = re.compile(r"(?:^|[/._-])(%s)(?=$|[/._-])" % alt)
+
+    def sample_of(self, rel):
+        if not self._sample_re:
+            return ""
+        m = self._sample_re.search(rel)
+        return m.group(1) if m else ""
+
+    def group_of(self, rel):
+        """The folder a file belongs to, cut where the sample folder starts:
+        results/assemblies/alternative_assemblies/Spades/S1/K55/x -> …/Spades"""
+        parts = rel.split("/")[:-1]
+        out = []
+        for c in parts:
+            if self._sample_re and self._sample_re.search("/" + c):
+                break
+            if re.match(r"^K\d+$", c):
+                break
+            out.append(c)
+            if len(out) >= 4:
+                break
+        return "/".join(out) if out else "."
+
+    def abspath(self, rel):
+        return os.path.join(self.root, rel)
+
+
+def looks_like_outdir(p):
+    return os.path.isdir(os.path.join(p, "log")) or os.path.isdir(os.path.join(p, "results"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What could go: one row per kind of file. First match wins.
+#   code, regex on the relative path, what it is / what to do
+# These are candidates to look at, not a delete list.
+# ─────────────────────────────────────────────────────────────────────────────
+
+HINTS = [
+    ("reads",
+     r"(^|/)large_files/|\.(fastq|fq)(\.gz)?$",
+     "reads (trimmed / downsampled / merged); removed by cleanup.* (on by default)"),
+    ("bam",
+     r"/remapping/[^/]+/[^/]+\.sorted\.bam(\.bai)?$",
+     "BAM from the re-mapping; only read by samtools in the same step. "
+     "Removed by cleanup.bam=1"),
+    ("remap-intermediate",
+     r"/remapping/[^/]+/[^/]+\.(depth\.tsv|pileup\.gz)$",
+     "samtools depth / mpileup output; parsed into remap_qc.json + mixed_positions.tsv "
+     "and not read again (resume uses remap_qc.json). Could be removed, or depth.tsv "
+     "gzipped (pipeline change)"),
+    ("assembly-copy",
+     r"/remapping/[^/]+/[^/]+\.fasta(\.fai)?$"
+     r"|^results/assemblies/by_species/"
+     r"|/alternative_assemblies/Spades/[^/]+/(contigs|scaffolds)\.fasta$"
+     r"|/alternative_assemblies/Skesa/[^/]+/[^/]+\.fasta$"
+     r"|/chewbbaca/.*/rawdata/[^/]+/input/",
+     "copy of an assembly that is also in results/assemblies/ "
+     "(or alternative_assemblies/<sample>.<assembler>.fasta)"),
+    ("spades-work",
+     r"/alternative_assemblies/Spades/[^/]+/(K\d+/|pipeline_state/|misc/|tmp/|corrected/"
+     r"|before_rr\.fasta$|assembly_graph[^/]*\.(fastg|gfa)$|[^/]+\.paths$"
+     r"|dataset\.info$|input_dataset\.yaml$|run_spades\.(sh|yaml)$|first_pe_contigs\.fasta$)",
+     "SPAdes working files (k-mer folders, graphs, paths); only contigs.fasta, "
+     "spades.log and params.txt are used afterwards"),
+    ("other-assembler-work",
+     r"/alternative_assemblies/(Skesa|Shovill|Unicycler)/[^/]+/.*\.(gfa|fastg)$",
+     "assembly graph from SKESA/Shovill/Unicycler; not used afterwards"),
+    ("blast-tmp",
+     r"_blast/tmp/",
+     "BLAST XML from ResFinder / VirulenceFinder (tmp folder); results are in the "
+     "tool's json/txt"),
+    ("quast-extras",
+     r"/quast/.*(icarus|/basic_stats/|report\.(html|pdf|tex)$|transposed_report\.(tex|txt)$)",
+     "QUAST viewers, plots and duplicate report formats; report.tsv is what is read"),
+    ("multiqc-data",
+     r"/multiqc_data/(multiqc_data\.json|llms-full\.txt|multiqc\.parquet|multiqc_fastp\.txt)$",
+     "large MultiQC data files; the MultiQC HTML report does not need them"),
+    ("chewbbaca-extras",
+     r"/chewbbaca/.*/rawdata/[^/]+/(chewbbaca_results/(cds_coordinates|results_contigsInfo"
+     r"|loci_summary_stats)\.tsv$|hashed_results/results_alleles_sha256\.tsv$)",
+     "chewBBACA per-sample side files; the allele profiles are kept elsewhere"),
+    ("krona",
+     r"\.krona_input$|_krona_input$",
+     "Krona input text; the Krona HTML is made from it"),
+    ("marker",
+     r"/\.locks/|\.regeneration_complete$|/pipeline_state/",
+     "empty marker files"),
+]
+_HINTS_RX = [(c, re.compile(rx), a) for c, rx, a in HINTS]
+HINT_ADVICE = {c: a for c, _, a in HINTS}
+
+
+def hint_of(rel):
+    for code, rx, _ in _HINTS_RX:
+        if rx.search("/" + rel):
+            return code
+    return ""
+
+
+TEXT_TYPES = {".tsv", ".txt", ".json", ".jsonl", ".log", ".csv", ".fasta", ".fa", ".fna",
+              ".fsa", ".gfa", ".fastg", ".xml", ".html", ".tex", ".seq", ".paths", ".info",
+              ".yaml", ".stats", ".coverage", ".idxstats", ".flagstats", ".report",
+              ".bracken", ".results", ".explicit", ".fai", ".lib_data", ".off", ".sh"}
+
+
+def gzip_estimate(path, size, sample=4 * 1024 * 1024):
+    """Bytes gzip would save, estimated from the first <sample> bytes."""
+    try:
+        with open(path, "rb") as fh:
+            b = fh.read(sample)
+    except OSError:
+        return 0
+    if not b or b"\0" in b[:65536]:
+        return 0
+    c = zlib.compress(b, 6)
+    ratio = len(c) / float(len(b))
+    return int(size * (1 - ratio))
+
+
+def report_links(tree):
+    """Files the HTML reports link to (they must stay)."""
+    linked = set()
+    rx = re.compile(r"""(?:href|src)\s*=\s*["']([^"'#?]+)""", re.I)
+    for rel in tree.files:
+        if not rel.endswith(".html"):
+            continue
+        if not (rel.startswith("report/") or "/" not in rel):
+            continue
+        try:
+            with open(tree.abspath(rel), encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        base = os.path.dirname(rel)
+        for url in rx.findall(text):
+            if re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I):
+                continue
+            target = os.path.normpath(os.path.join(base, urllib.parse.unquote(url))).replace(os.sep, "/")
+            if target in tree.files:
+                linked.add(target)
+    return linked
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# inventory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_previous_manifest(path):
+    prev = {}
+    with open(path, encoding="utf-8") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        idx = {h: i for i, h in enumerate(header)}
+        if not {"path", "size", "mtime", "md5"} <= set(idx):
+            warn("%s has no path/size/mtime/md5 columns; not reused" % path)
+            return prev
+        for line in fh:
+            c = line.rstrip("\n").split("\t")
+            if len(c) < len(header):
+                continue
+            if c[idx["md5"]]:
+                prev[c[idx["path"]]] = (c[idx["size"]], c[idx["mtime"]], c[idx["md5"]])
+    return prev
+
+
+def cmd_inventory(a):
+    if a.from_listing:
+        tree = Tree.from_listing(a.from_listing)
+        if a.md5:
+            warn("--md5 needs the folder itself; ignored with --from-listing")
+            a.md5 = False
+    else:
+        if not a.outdir:
+            die("inventory needs an output folder (or --from-listing FILE)")
+        tree = Tree.from_folder(a.outdir)
+
+    rows = []
+    for rel in sorted(tree.files):
+        f = tree.files[rel]
+        rows.append({
+            "path": rel, "size": f["size"], "mtime": f["mtime"],
+            "group": tree.group_of(rel), "sample": tree.sample_of(rel),
+            "type": file_type(os.path.basename(rel)), "hint": hint_of(rel),
+            "md5": "", "gzip_saving": 0, "linked": "",
+        })
+    total = sum(r["size"] for r in rows)
+
+    # ── report links: never suggest removing those ──────────────────────────
+    if not tree.is_listing:
+        linked = report_links(tree)
+        for r in rows:
+            if r["path"] in linked:
+                r["linked"] = "yes"
+
+    # ── checksums ───────────────────────────────────────────────────────────
+    prev = read_previous_manifest(a.previous) if a.previous else {}
+    by_size = defaultdict(list)
+    for r in rows:
+        by_size[r["size"]].append(r)
+    if not tree.is_listing:
+        need = []
+        for r in rows:
+            if a.md5:
+                need.append(r)
+            elif r["size"] >= a.dup_min and len(by_size[r["size"]]) > 1:
+                need.append(r)          # possible duplicate: confirm by checksum
+        nbytes = sum(r["size"] for r in need)
+        if nbytes > 2e9:
+            sys.stderr.write("Computing MD5 of %d files (%s) …\n" % (len(need), human(nbytes)))
+        for r in need:
+            p = prev.get(r["path"])
+            if p and p[0] == str(r["size"]) and p[1] == str(r["mtime"]):
+                r["md5"] = p[2]
+                continue
+            try:
+                r["md5"] = md5_file(tree.abspath(r["path"]))
+            except OSError as e:
+                warn("cannot read %s: %s" % (r["path"], e))
+
+    # ── gzip estimate for big uncompressed text ─────────────────────────────
+    if not tree.is_listing and not a.no_gzip_estimate:
+        for r in rows:
+            if r["size"] >= a.gzip_min and r["type"] in TEXT_TYPES:
+                r["gzip_saving"] = gzip_estimate(tree.abspath(r["path"]), r["size"])
+
+    # ── manifest ────────────────────────────────────────────────────────────
+    if a.manifest:
+        cols = ["path", "size", "mtime", "group", "sample", "type", "hint", "linked",
+                "md5", "gzip_saving"]
+        with open(a.manifest, "w", encoding="utf-8") as fh:
+            fh.write("\t".join(cols) + "\n")
+            for r in rows:
+                fh.write("\t".join(str(r[c]) for c in cols) + "\n")
+
+    # ── summary ─────────────────────────────────────────────────────────────
+    out = sys.stdout
+    w = out.write
+    pct = lambda n: (100.0 * n / total) if total else 0.0
+
+    def table(title, agg, limit=None, keyname=""):
+        w("\n== %s\n" % title)
+        items = sorted(agg.items(), key=lambda kv: -kv[1][0])
+        if limit:
+            rest = items[limit:]
+            items = items[:limit]
+        else:
+            rest = []
+        w("%10s %6s %7s  %s\n" % ("size", "%", "files", keyname))
+        for k, (s, n) in items:
+            w("%10s %5.1f%% %7d  %s\n" % (human(s), pct(s), n, k or "(none)"))
+        if rest:
+            s = sum(v[0] for _, v in rest)
+            n = sum(v[1] for _, v in rest)
+            w("%10s %5.1f%% %7d  (%d more)\n" % (human(s), pct(s), n, len(rest)))
+
+    def agg_by(key):
+        d = defaultdict(lambda: [0, 0])
+        for r in rows:
+            k = key(r)
+            d[k][0] += r["size"]
+            d[k][1] += 1
+        return d
+
+    w("eurlc-wgs-inspect %s — inventory of %s\n" % (VERSION, tree.label))
+    w("Files: %d   Total: %s   Samples: %d\n" % (len(rows), human(total), len(tree.samples)))
+    if tree.samples:
+        w("Samples: %s\n" % ", ".join(sorted(tree.samples)))
+
+    table("By top folder", agg_by(lambda r: "/".join(r["path"].split("/")[:2])
+                                   if r["path"].startswith("results/") else r["path"].split("/")[0]
+                                   if "/" in r["path"] else "(top level)"), keyname="folder")
+    table("By step folder (sample folders folded in)", agg_by(lambda r: r["group"]),
+          limit=a.top, keyname="folder")
+    table("By file type", agg_by(lambda r: r["type"]), limit=a.top, keyname="type")
+
+    samp = agg_by(lambda r: r["sample"] or "(shared, not per sample)")
+    table("By sample", samp, keyname="sample")
+    per = [v[0] for k, v in samp.items() if not k.startswith("(")]
+    if per:
+        per.sort()
+        w("Per sample: median %s, max %s\n" % (human(per[len(per) // 2]), human(per[-1])))
+
+    w("\n== Largest files\n")
+    for r in sorted(rows, key=lambda r: -r["size"])[: a.top]:
+        w("%10s  %s%s\n" % (human(r["size"]), r["path"], ("  [" + r["hint"] + "]") if r["hint"] else ""))
+
+    # candidates
+    cand = defaultdict(lambda: [0, 0, 0])   # code -> size, files, linked files
+    for r in rows:
+        if not r["hint"]:
+            continue
+        c = cand[r["hint"]]
+        if r["linked"]:
+            c[2] += 1
+            continue
+        c[0] += r["size"]
+        c[1] += 1
+    w("\n== Candidates for removal or compact storage (look before deleting)\n")
+    if not cand:
+        w("  none found\n")
+    else:
+        w("%10s %6s %7s  %s\n" % ("size", "%", "files", "kind"))
+        csum = 0
+        for code, (s, n, nl) in sorted(cand.items(), key=lambda kv: -kv[1][0]):
+            csum += s
+            w("%10s %5.1f%% %7d  %s\n" % (human(s), pct(s), n, code))
+            w("%27s%s\n" % ("", HINT_ADVICE[code]))
+            if nl:
+                w("%27s(%d file(s) of this kind are linked from the report and not counted)\n" % ("", nl))
+        w("%10s %5.1f%%          all candidates together\n" % (human(csum), pct(csum)))
+        if tree.is_listing:
+            w("  (from a listing: report links are not checked)\n")
+
+    # duplicates
+    w("\n== Duplicate files\n")
+    groups = defaultdict(list)
+    if tree.is_listing:
+        for r in rows:
+            if r["size"] >= max(a.dup_min, 100000):
+                groups[(r["size"], "")].append(r)
+        note = "same size (from a listing, so not confirmed by checksum)"
+    else:
+        for r in rows:
+            if r["md5"] and r["size"] >= a.dup_min:
+                groups[(r["size"], r["md5"])].append(r)
+        note = "identical content (MD5)"
+    dups = [g for g in groups.values() if len(g) > 1]
+    if not dups:
+        w("  none ≥ %s\n" % human(a.dup_min))
+    else:
+        wasted = sum(g[0]["size"] * (len(g) - 1) for g in dups)
+        w("  %d groups of %s, %s in the extra copies\n" % (len(dups), note, human(wasted)))
+        # fold groups that are the same pattern for every sample
+        pat = defaultdict(lambda: [0, 0, None])
+        for g in dups:
+            key = tuple(sorted(generic_path(r["path"], r["sample"]) for r in g))
+            p = pat[key]
+            p[0] += g[0]["size"] * (len(g) - 1)
+            p[1] += 1
+            p[2] = p[2] or g
+        for key, (s, n, g) in sorted(pat.items(), key=lambda kv: -kv[1][0])[: a.top]:
+            w("%10s  %d× %s:\n" % (human(s), n, "group" if n == 1 else "groups (one per sample)"))
+            for gp in key:
+                w("%12s%s\n" % ("", gp))
+
+    # gzip
+    if not tree.is_listing and not a.no_gzip_estimate:
+        gz = defaultdict(lambda: [0, 0, 0])
+        for r in rows:
+            if r["gzip_saving"]:
+                k = generic_path(r["path"], r["sample"])
+                k = re.sub(r"/[^/]+$", "/*" + (r["type"] if r["type"] != "(none)" else ""), k)
+                gz[k][0] += r["gzip_saving"]
+                gz[k][1] += 1
+                gz[k][2] += r["size"]
+        w("\n== Uncompressed text ≥ %s: estimated saving with gzip\n" % human(a.gzip_min))
+        if not gz:
+            w("  none\n")
+        else:
+            tot = sum(v[0] for v in gz.values())
+            w("  %s could be saved in total\n" % human(tot))
+            for k, (s, n, sz) in sorted(gz.items(), key=lambda kv: -kv[1][0])[: a.top]:
+                w("%10s of %9s %5d files  %s\n" % (human(s), human(sz), n, k))
+
+    if a.manifest:
+        w("\nManifest: %s (%d rows)\n" % (a.manifest, len(rows)))
+    return 0
+
+
+def generic_path(rel, sample):
+    """Replace the sample name in a path with <S> so per-sample patterns fold."""
+    if sample:
+        rel = re.sub(r"(?:(?<=^)|(?<=[/._-]))%s(?=$|[/._-])" % re.escape(sample), "<S>", rel)
+    rel = re.sub(r"/K\d+/", "/K*/", rel)
+    rel = re.sub(r"/by_species/[^/]+/", "/by_species/*/", rel)
+    return rel
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# extract
+# ─────────────────────────────────────────────────────────────────────────────
+
+# What goes in the package (relative paths, regex). Files of samples that
+# were not chosen are left out; shared files (no sample in the path) go in.
+EXTRACT_INCLUDE = [
+    # logs and run data
+    r"^log/(run_summary\.txt|run_status\.json|events\.jsonl|sample_manifest\.tsv"
+    r"|versions_summary\.txt|cleanup\.json|log\.txt|stderr\.txt|stdout\.txt|bash_commands\.log"
+    r"|filelist_fast[aq]\.txt|input_dir\.txt)$",
+    r"^log/versioning_explicit/",
+    r"^log/[^/]+-results\.json$",
+    r"^data/rundata\.json$",
+    r"^(config_seal\.ini|eurlc-wgs\.config|db_freeze\.config|conda_manifest\.ini)$",
+    r"^log/[^/]+\.(ini|config)$",
+    # report tables and pages (no assets, no PDF)
+    r"^report/[^/]+\.html$",
+    r"^report/samples/[^/]+\.html$",
+    r"^report/(tsv|tables)/",
+    r"^report/clustering/",
+    r"^report/amr/",
+    r"^qcscreen_status\.json$",
+    # stage 1
+    r"/Fastp_rawdata/[^/]+\.json$",
+    r"/fastq_prescan/",
+    r"/species_determination_kraken2/",
+    r"/Downsampling/",
+    r"/md5/",
+    r"/multiqc_data/(multiqc_general_stats|multiqc_sources|multiqc_software_versions"
+    r"|multiqc_quast|quast_table|multiqc_kraken)\.txt$",
+    # stage 2
+    r"/stage2_trimmeddata/Kraken2/[^/]+\.(bracken|kraken2\.txt|kraken2_bracken_[a-z]+\.txt)$",
+    r"/fastq_stats/",
+    r"/mash_screen/",
+    r"/jellyfish/[^/]+\.(histo|txt|json|tsv)$",
+    # stage 3
+    r"/quast/(alternative_assemblies/)?[^/]+/(report\.tsv|transposed_report\.tsv|report\.txt|quast\.log)$",
+    r"/remapping/[^/]+/[^/]+\.(remap_qc\.json|coverage|flagstats|idxstats|stats|mixed_positions\.tsv)$",
+    r"/alternative_assemblies/Spades/[^/]+/(spades\.log|params\.txt)$",
+    r"/alternative_assemblies/(Skesa|Shovill|Unicycler)/[^/]+/[^/]+\.(csv|log|txt)$",
+    r"/assembly_selection/",
+    # typing and AMR (everything except BLAST tmp)
+    r"^results/typing/",
+    r"^results/amr/",
+    # cgMLST
+    r"/chewbbaca/[^/]+/[^/]+/per_batch/",
+    r"/chewbbaca/[^/]+/[^/]+/per_sample/(json|tsv)/",
+    r"/chewbbaca/.*/rawdata/[^/]+/chewbbaca_results/(results_alleles|results_statistics"
+    r"|paralogous_counts|paralogous_loci|logging_info|invalid_cds)\.(tsv|txt)$",
+    r"/chewbbaca/.*/rawdata/[^/]+/hashed_results/(results_alleles_crc32\.tsv|hashing_report\.json)$",
+    r"^results/clustering/allele_tables/[^/]+_all\.tsv$",
+    r"^results/clustering/distance_matrices/",
+    r"^results/clustering/[^/]+\.(tsv|txt|json)$",
+]
+EXTRACT_EXCLUDE = [
+    r"_blast/tmp/",
+    r"\.(bam|bai|fastq|fq|fastq\.gz|fq\.gz|pileup\.gz|parquet|png|pdf)$",
+    r"(^|/)large_files/",
+    r"/\.locks/",
+]
+ASSEMBLY_INCLUDE = r"^results/assemblies/[^/]+\.fasta$"
+
+_INC = [re.compile(x) for x in EXTRACT_INCLUDE]
+_EXC = [re.compile(x) for x in EXTRACT_EXCLUDE]
+_ASM = re.compile(ASSEMBLY_INCLUDE)
+
+
+def wanted(rel, with_assemblies):
+    p = "/" + rel if not rel.startswith("/") else rel
+    if any(rx.search(p) or rx.search(rel) for rx in _EXC):
+        return False
+    if with_assemblies and _ASM.search(rel):
+        return True
+    return any(rx.search(rel) or rx.search(p) for rx in _INC)
+
+
+class Anonymizer:
+    def __init__(self, tree):
+        names = sorted(tree.samples)            # stable numbering
+        width = max(2, len(str(len(names))))
+        self.map = {n: "S%0*d" % (width, i + 1) for i, n in enumerate(names)}
+        alt = "|".join(re.escape(n) for n in sorted(names, key=lambda s: -len(s)))
+        self.rx = re.compile(r"(?<![A-Za-z0-9])(%s)(?![A-Za-z0-9])" % alt) if names else None
+        # Paths that may hold user or lab names
+        self.paths = []
+        if tree.root:
+            self.paths.append((tree.root, "<OUTDIR>"))
+            for f in ("log/input_dir.txt",):
+                p = os.path.join(tree.root, f)
+                if os.path.isfile(p):
+                    with open(p, encoding="utf-8", errors="replace") as fh:
+                        d = fh.read().strip()
+                    if d:
+                        self.paths.append((d.rstrip("/"), "<DATADIR>"))
+            # folders of the raw files (lane files may lie elsewhere)
+            man = os.path.join(tree.root, "log", "sample_manifest.tsv")
+            if os.path.isfile(man):
+                dirs = set()
+                with open(man, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        for col in line.rstrip("\n").split("\t")[2:]:
+                            for f in col.split(" + "):
+                                if f.startswith("/"):
+                                    dirs.add(os.path.dirname(f).rstrip("/"))
+                for d in dirs:
+                    if d and d != "/" and (d, "<DATADIR>") not in self.paths:
+                        self.paths.append((d, "<DATADIR>"))
+        self.paths.sort(key=lambda kv: -len(kv[0]))
+        self.home_rx = re.compile(r"(/home/|/Users/|/mnt/[a-z]/Users/)[^/\s\"'<>]+")
+
+    def text(self, s):
+        for p, rep in self.paths:
+            s = s.replace(p, rep)
+        s = self.home_rx.sub(lambda m: m.group(1) + "USER", s)
+        if self.rx:
+            s = self.rx.sub(lambda m: self.map[m.group(1)], s)
+        return s
+
+    def path(self, rel):
+        if not self.rx:
+            return rel
+        return self.rx.sub(lambda m: self.map[m.group(1)], rel)
+
+
+def filter_rundata(data, keep):
+    """Keep only the chosen samples in rundata.json (if it has the usual shape)."""
+    if isinstance(data, dict) and isinstance(data.get("samples"), list):
+        before = len(data["samples"])
+        data["samples"] = [s for s in data["samples"]
+                           if isinstance(s, dict) and (s.get("name") in keep or s.get("base") in keep)]
+        return data, before, len(data["samples"])
+    return data, None, None
+
+
+def cmd_extract(a):
+    tree = Tree.from_folder(a.outdir)
+    if not tree.samples:
+        warn("no samples found (log/sample_manifest.tsv, results/assemblies/*.fasta)")
+
+    # which samples
+    if a.samples:
+        chosen = []
+        for tok in [t.strip() for t in a.samples.split(",") if t.strip()]:
+            hit = [s for s in tree.samples if fnmatch.fnmatchcase(s, tok)] if any(
+                ch in tok for ch in "*?[") else ([tok] if tok in tree.samples else [])
+            if not hit:
+                close = difflib.get_close_matches(tok, tree.samples, n=3)
+                die("unknown sample [%s]%s" % (tok, ("; did you mean: " + ", ".join(close)) if close else ""))
+            chosen.extend(h for h in hit if h not in chosen)
+    elif a.all_samples:
+        chosen = list(tree.samples)
+    else:
+        die("say which samples: --samples S1,S2 (wildcards allowed) or --all-samples.\n"
+            "Samples in this folder: %s" % ", ".join(sorted(tree.samples)))
+    keep = set(chosen)
+
+    out = a.output
+    if not (out.endswith(".tar.gz") or out.endswith(".tgz")):
+        out += ".tar.gz"
+    top = re.sub(r"\.(tar\.gz|tgz)$", "", os.path.basename(out))
+    if os.path.abspath(out).startswith(tree.root + os.sep):
+        die("the package must not be written inside the output folder")
+
+    anon = Anonymizer(tree) if a.anonymize else None
+    max_file = int(a.max_file_mb * 1e6)
+
+    picked, skipped = [], []
+    for rel in sorted(tree.files):
+        s = tree.sample_of(rel)
+        if s and s not in keep:
+            continue
+        if not wanted(rel, a.with_assemblies):
+            continue
+        size = tree.files[rel]["size"]
+        if size > max_file and not rel.startswith("data/rundata.json"):
+            skipped.append((rel, size, "larger than --max-file-mb"))
+            continue
+        picked.append(rel)
+
+    manifest_rows = []
+    total_in = 0
+    with tarfile.open(out, "w:gz", compresslevel=9) as tar:
+        for rel in picked:
+            src = tree.abspath(rel)
+            try:
+                with open(src, "rb") as fh:
+                    data = fh.read()
+            except OSError as e:
+                skipped.append((rel, tree.files[rel]["size"], "unreadable: %s" % e))
+                continue
+            note = ""
+            if rel == "data/rundata.json" and not a.all_samples:
+                try:
+                    obj = json.loads(data.decode("utf-8"))
+                    obj, before, after = filter_rundata(obj, keep)
+                    if before is not None:
+                        data = json.dumps(obj, indent=1, ensure_ascii=False).encode("utf-8")
+                        note = "filtered to %d of %d samples" % (after, before)
+                except (ValueError, UnicodeDecodeError) as e:
+                    note = "not filtered (%s)" % e.__class__.__name__
+                if len(data) > max_file * 5:
+                    skipped.append((rel, len(data), "rundata.json still too large after filtering"))
+                    continue
+            orig_md5 = md5_file(src) if not note else md5_bytes(open(src, "rb").read())
+            arc = rel
+            if anon:
+                arc = anon.path(rel)
+                try:
+                    txt = data.decode("utf-8")
+                    new = anon.text(txt)
+                    if new != txt:
+                        data = new.encode("utf-8")
+                        note = (note + "; " if note else "") + "anonymized"
+                except UnicodeDecodeError:
+                    note = (note + "; " if note else "") + "binary, not anonymized"
+            ti = tarfile.TarInfo(name=top + "/" + arc)
+            ti.size = len(data)
+            ti.mtime = tree.files[rel]["mtime"]
+            ti.mode = 0o644
+            tar.addfile(ti, io.BytesIO(data))
+            total_in += len(data)
+            manifest_rows.append((arc, tree.files[rel]["size"], orig_md5, note))
+
+        # the package's own description
+        info = io.StringIO()
+        info.write("eurlc-wgs-inspect %s extract\n" % VERSION)
+        info.write("created: %s\n" % datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+        info.write("source: %s\n" % ("<OUTDIR>" if anon else tree.root))
+        info.write("samples: %s\n" % ", ".join(anon.map[s] if anon else s for s in chosen))
+        info.write("anonymized: %s\n" % ("yes" if anon else "no"))
+        info.write("files: %d, %s uncompressed\n" % (len(manifest_rows), human(total_in)))
+        info.write("\nNot included: reads, BAM, pileup, large intermediates, PDFs, images, "
+                   "report assets%s.\n" % ("" if a.with_assemblies else ", assemblies"))
+        info.write("MANIFEST.tsv: md5 and size are of the original file in the output folder.\n")
+        if skipped:
+            info.write("\nSkipped:\n")
+            for rel, size, why in skipped:
+                info.write("  %s  %s  %s\n" % (anon.path(rel) if anon else rel, human(size), why))
+        _add_text(tar, top + "/EXTRACT_INFO.txt", info.getvalue())
+        m = io.StringIO()
+        m.write("path\tsize\tmd5\tnote\n")
+        for row in manifest_rows:
+            m.write("%s\t%d\t%s\t%s\n" % row)
+        _add_text(tar, top + "/MANIFEST.tsv", m.getvalue())
+
+    if anon:
+        mp = re.sub(r"\.(tar\.gz|tgz)$", "", out) + ".samplemap.tsv"
+        with open(mp, "w", encoding="utf-8") as fh:
+            fh.write("code\tsample\n")
+            for n, c in sorted(anon.map.items(), key=lambda kv: kv[1]):
+                fh.write("%s\t%s\n" % (c, n))
+
+    sz = os.path.getsize(out)
+    print("Wrote %s: %d files, %s uncompressed, %s packed" % (out, len(manifest_rows), human(total_in), human(sz)))
+    print("Samples: %s" % ", ".join(("%s (= %s)" % (anon.map[s], s)) if anon else s for s in chosen))
+    if anon:
+        print("Sample key (keep it, do not send it): %s" % mp)
+        print("Sample names, the output and data folder paths and home folder names were replaced; "
+              "check EXTRACT_INFO.txt and look through the package before sending it on.")
+    if skipped:
+        print("Skipped %d file(s), see EXTRACT_INFO.txt" % len(skipped))
+    return 0
+
+
+def _add_text(tar, name, text):
+    b = text.encode("utf-8")
+    ti = tarfile.TarInfo(name=name)
+    ti.size = len(b)
+    ti.mtime = int(datetime.datetime.now().timestamp())
+    ti.mode = 0o644
+    tar.addfile(ti, io.BytesIO(b))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        prog="eurlc-wgs-inspect",
+        description="Look at eurlc-wgs output folders (read-only).",
+        epilog="Examples:\n"
+               "  eurlc-wgs-inspect inventory /data/run192/eurlc-wgs\n"
+               "  eurlc-wgs-inspect inventory /data/run192/eurlc-wgs --md5 --manifest run192.manifest.tsv\n"
+               "  eurlc-wgs-inspect inventory --from-listing listing.txt\n"
+               "  eurlc-wgs-inspect extract /data/run192/eurlc-wgs --samples 23SCA11,PT43-10 -o run192_review\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
+    sub = p.add_subparsers(dest="cmd")
+
+    i = sub.add_parser("inventory", help="what is in an output folder and what takes the space",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    i.add_argument("outdir", nargs="?", help="eurlc-wgs output folder (or the data folder that holds eurlc-wgs/)")
+    i.add_argument("--from-listing", metavar="FILE",
+                   help="read a listing made with: find . -type f -printf '%%s %%p\\n' (no checksums then)")
+    i.add_argument("--md5", action="store_true", help="checksum every file (else only possible duplicates)")
+    i.add_argument("--manifest", metavar="FILE", help="write one row per file to this TSV")
+    i.add_argument("--previous", metavar="FILE",
+                   help="earlier manifest: reuse its MD5 where size and time are unchanged")
+    i.add_argument("--top", type=int, default=25, help="rows in the top lists")
+    i.add_argument("--dup-min", type=int, default=10000, help="smallest file (bytes) checked for duplicates")
+    i.add_argument("--gzip-min", type=int, default=1000000, help="smallest text file (bytes) for the gzip estimate")
+    i.add_argument("--no-gzip-estimate", action="store_true", help="skip the gzip estimate")
+
+    e = sub.add_parser("extract", help="small package of raw result files for chosen samples",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    e.add_argument("outdir", help="eurlc-wgs output folder")
+    e.add_argument("-o", "--output", required=True, help="package name (.tar.gz is added)")
+    g = e.add_mutually_exclusive_group()
+    g.add_argument("--samples", help="comma-separated sample names; wildcards allowed (\"PT43-*\")")
+    g.add_argument("--all-samples", action="store_true", help="every sample")
+    e.add_argument("--with-assemblies", action="store_true", help="include results/assemblies/<sample>.fasta")
+    e.add_argument("--anonymize", action="store_true",
+                   help="replace sample names (S01, S02 …) and folder paths; the key is written next to the package")
+    e.add_argument("--max-file-mb", type=float, default=20, help="leave out files larger than this")
+
+    a = p.parse_args(argv)
+    if a.cmd == "inventory":
+        return cmd_inventory(a)
+    if a.cmd == "extract":
+        return cmd_extract(a)
+    p.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)

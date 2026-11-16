@@ -132,6 +132,7 @@ our %S_CGMLST_NO_SCHEMA = ();            # species => [sample names] without an 
 our @S_DATA_ROOTS_OLD = ();              # data folders recorded by earlier runs (log/input_dir.txt), oldest first
 our %S_RELOCATED = ();                   # recorded raw file path => where it was found now (moved analysis)
 our %S_RAW_MISSING = ();                 # sample base => [recorded raw paths not found now]
+our %S_VALIDATION = ();                  # result of the validation against a dataset (run_dataset_validation)
 our %S_CLEANUP_REMOVED = ();
 our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
 our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
@@ -1212,6 +1213,14 @@ $rundata{config}{defaults} = {
     general => {
         threads    => 4,
 
+        # validate: compare the results with a validation dataset
+        # (EURL-Campylobacter D1/D2/D3, or any dataset with an
+        # <ID>_validation_profile.yml and expected-results table).
+        #   auto = when the data folder, or the folder above it, holds such a
+        #          profile (default); off = never; <folder> = that dataset.
+        # Writes report/validation/; see docs/eurlc-validate.md.
+        validate   => "auto",
+
         # Companion config files. Relative paths are resolved against the
         # DATABASE directory (falling back to the config file's directory
         # only when no database directory is set); absolute paths are used
@@ -1355,14 +1364,25 @@ $rundata{config}{defaults} = {
         #   folders, intermediate graphs, copies of the contigs, ...), removed
         #   as soon as the assembly has been copied to alternative_assemblies/
         #   -- not at the end of the run. Kept: the logs, the final graph (see
-        #   assembly_graphs) and SPAdes scaffolds.fasta when it differs from
-        #   contigs.fasta. A failed assembly is left as it is. Default: remove.
+        #   assembly_graphs) and, with spades_scaffolds, SPAdes scaffolds.fasta.
+        #   A failed assembly is left as it is. Default: remove.
         assembler_workfiles => 1,
         #
         # assembly_graphs: the assembler's final graph (.gfa, for Bandage).
         #   gzip = keep it compressed, keep = keep it as it is, remove = do
         #   not keep it (SKESA then skips gfa_connector). Default: gzip.
         assembly_graphs    => "gzip",
+        #
+        # spades_scaffolds: SPAdes scaffolds.fasta (contigs joined across
+        #   gaps with N; the pipeline uses contigs.fasta). Only kept when it
+        #   differs from contigs.fasta: remove (default), gzip or keep.
+        spades_scaffolds   => "remove",
+        #
+        # blast_tmp: the BLAST XML that ResFinder, VirulenceFinder and
+        #   PlasmidFinder leave in <tool>_blast/tmp/ (up to ~15 MB per sample
+        #   for E. coli); their results are in the tools' own json/txt.
+        #   Default: remove.
+        blast_tmp          => 1,
     },
     md5 => {
             # Implemented via Digest::MD5 (core Perl) -- no external tool,
@@ -9249,17 +9269,33 @@ sub cleanup_assembler_workdir {
 
     my %keep = map { $_ => 1 } @{ $s->{keep} };
 
-    # SPAdes: scaffolds.fasta only when it says something contigs.fasta does not
-    if ( $runstep_name eq 'spades' && -f "$workdir/scaffolds.fasta" ) {
-        if ( -f "$workdir/contigs.fasta"
-             && File::Compare::compare( "$workdir/scaffolds.fasta", "$workdir/contigs.fasta" ) == 0 ) {
-            # identical: nothing to keep
-        } elsif ( -f "$workdir/contigs.fasta" ) {
-            $keep{'scaffolds.fasta'} = 1;
-            log_message("INFO: [$runstep_name] " . $R_samples->[$samplenr]{name} . ": scaffolds.fasta differs from contigs.fasta -- kept");
-        } else {
-            $keep{'scaffolds.fasta'} = 1;   # contigs already gone: an earlier cleanup kept it
+    # SPAdes scaffolds.fasta: never when it is the same as contigs.fasta;
+    # otherwise as cleanup.spades_scaffolds says (remove / gzip / keep).
+    # Folders tidied by an earlier version may hold a plain or gzipped one.
+    if ( $runstep_name eq 'spades' ) {
+        my $smode = lc( $cfg->{spades_scaffolds} // "remove" );
+        $smode = "remove" if $smode =~ /^(1|yes|on|true)$/;   # 1 = remove, as the other cleanup keys
+        $smode = "keep"   if $smode =~ /^(0|no|off|false)$/;
+        unless ( $smode =~ /^(remove|gzip|keep)$/ ) {
+            log_message("WARNING: cleanup.spades_scaffolds=[$smode] is not remove, gzip or keep -- using remove");
+            $smode = "remove";
         }
+        my $sf = "$workdir/scaffolds.fasta";
+        my $same = -f $sf && -f "$workdir/contigs.fasta"
+                && File::Compare::compare( $sf, "$workdir/contigs.fasta" ) == 0;
+        if ( -f $sf && !$same && $smode eq "keep" ) {
+            $keep{'scaffolds.fasta'} = 1;
+        }
+        elsif ( -f $sf && !$same && $smode eq "gzip" ) {
+            require IO::Compress::Gzip;
+            if ( IO::Compress::Gzip::gzip( $sf => "$sf.gz.part", Minimal => 1 ) && rename( "$sf.gz.part", "$sf.gz" ) ) {
+                unlink $sf;
+            } else {
+                unlink "$sf.gz.part";
+                $keep{'scaffolds.fasta'} = 1;
+            }
+        }
+        $keep{'scaffolds.fasta.gz'} = 1 if $smode ne "remove";
     }
 
     for my $g ( @{ $s->{graph} } ) {
@@ -10088,6 +10124,8 @@ $runstep{$runstep_name} = {
       # streaming way count as done by remap_earlier_way_done().
       resultfile => "__DIR-QC3__/remapping/__BASE__/__BASE__.pileup_summary.json",
       rerun_paths => [ "__DIR-QC3__/remapping/__BASE__" ],   # rerun=remap: the whole folder, cache too
+      # plan_read_regeneration: a folder made before the streaming way is done
+      done_otherwise => sub { remap_earlier_way_done($_[0]) },
       cachefile  => "__DIR-QC3__/remapping/__BASE__/__BASE__.remap_qc.json",
       mixed_sites_tsv  => "__DIR-QC3__/remapping/__BASE__/__BASE__.mixed_positions.tsv",      
       resultfiles_status => "NA",
@@ -17999,14 +18037,20 @@ sub postprocess_cleanup {
     }
 
     # ── BAM / BAI ────────────────────────────────────────────────────────────
-    if ($cfg->{bam} // 0) {
+    if ($cfg->{bam} // 1) {
         my $remap_base = fill_placeholders("__DIR-QC3__/remapping", "", $runstep_name);
         if (defined $remap_base && -d $remap_base) {
             my $removed = 0;
             for my $sample (@$R_samples) {
-                my $base = $sample->{base} // "";
+                # the file names use the sample's base name, which is its
+                # name (samples have no separate "base" key -- reading one
+                # made this loop skip every sample, so no BAM was removed)
+                my $base = $sample->{name} // "";
                 next unless $base;
-                for my $ext (qw(.sorted.bam .sorted.bam.bai)) {
+                # with the BAM goes the copy of the assembly it was mapped to
+                # (the remap step removes both itself since November 2026;
+                # this tidies folders made before that)
+                for my $ext (qw(.sorted.bam .sorted.bam.bai .fasta .fasta.fai)) {
                     my $f = "$remap_base/$base/$base$ext";
                     next unless -f $f;
                     if (unlink $f) { $removed++ }
@@ -18019,13 +18063,26 @@ sub postprocess_cleanup {
         log_message("INFO: Cleanup: keeping BAM files (cleanup.bam = 0)");
     }
 
+    # ── BLAST tmp of ResFinder / VirulenceFinder / PlasmidFinder ─────────────
+    if ($cfg->{blast_tmp} // 1) {
+        my ($n, $bytes) = (0, 0);
+        my $res = getdir("out") . "/results";
+        for my $tmp ( glob("$res/*/*/*/*_blast/tmp $res/*/*/*_blast/tmp") ) {
+            next unless -d $tmp && $tmp =~ m{_blast/tmp$};
+            for my $f ( glob("$tmp/*") ) { $bytes += ( -s $f ) // 0 if -f $f; }
+            remove_tree($tmp, { result => \my $gone });
+            $n++;
+        }
+        log_message(sprintf("INFO: Cleanup: removed %d BLAST tmp folder(s) (%.1f MB)", $n, $bytes / 1e6)) if $n;
+    }
+
     # What is gone now (this run's removals plus any earlier ones that were
     # not re-created), for plan_read_regeneration on a later --resume.
     my %removed = %S_CLEANUP_REMOVED;
     $removed{trimmed_fastq}     = 1 if $cfg->{trimmed_fastq}     // 1;
     $removed{downsampled_fastq} = 1 if $cfg->{downsampled_fastq} // 1;
     $removed{merged_fastq}      = 1 if ( $cfg->{merged_fastq} // 1 ) && grep { $_->{paths}{lane_sources} } @$R_samples;
-    $removed{bam}               = 1 if $cfg->{bam}               // 0;
+    $removed{bam}               = 1 if $cfg->{bam}               // 1;
     write_json_file( { removed => [ sort keys %removed ], time => timestamp_UTC() },
                      getdir("out,log") . "/cleanup.json" ) if %removed;
 
@@ -18080,10 +18137,13 @@ sub plan_read_regeneration {
             next if $rf eq "";
             my $f = eval { fill_placeholders($rf, $i, $name) } // "";
             next if $f eq "" || $f =~ /__[A-Z0-9-]+__/ || -e $f;
+            # done in an earlier form (e.g. remap before the streaming way,
+            # whose result file was the BAM): no reads needed
+            next if $def->{done_otherwise} && eval { $def->{done_otherwise}->($i) };
             $need{$_} //= $name for @keys;
         }
         next unless %need;
-        if ( my $miss = $S_RAW_MISSING{ $R_samples->[$i]{base} // $R_samples->[$i]{name} } ) {
+        if ( my $miss = $S_RAW_MISSING{ $R_samples->[$i]{name} // "" } ) {
             my $why = join(", ", map { "$_ (for $need{$_})" } sort keys %need);
             log_message("WARNING: Sample " . ( $R_samples->[$i]{name} // $i ) . ": its reads are needed again ($why), "
                       . "but the raw data is not found [$miss->[0]] -- those steps will fail. Give datadir= for the folder that holds the data.", "red");
@@ -20588,6 +20648,8 @@ sub writedefaultconfigfile {
                     bam               => "remapping BAM + BAI -- useful for IGV; can reconstruct FASTQ via samtools fastq",
                     assembler_workfiles => "assembler working files, removed right after each assembly (logs, final graph and differing SPAdes scaffolds are kept)",
                     assembly_graphs   => "final assembly graph (.gfa): gzip | keep | remove",
+                    spades_scaffolds  => "SPAdes scaffolds.fasta when it differs from contigs.fasta: remove | gzip | keep",
+                    blast_tmp         => "BLAST XML in <tool>_blast/tmp/ of ResFinder, VirulenceFinder, PlasmidFinder",
                 );
                 for my $param (sort keys %{ $R_cfg->{cleanup} }) {
                     my $val = $R_cfg->{cleanup}{$param} // 0;
@@ -21498,7 +21560,12 @@ sub summarize_results(){
   generate_amr_profile_viewer();
   
   generate_clustering_html_reports();
-  
+
+  # the pipeline-neutral results table, and the validation when a
+  # validation dataset is found
+  my $observed = write_observed_results_table();
+  run_dataset_validation($observed);
+
   print_main_html_report();
   
   write_report_entrypoints();
@@ -21602,7 +21669,7 @@ sub print_main_html_report {
 
     my $amr_table = main_report_section_amr();
 
-    my $config_seal_html = get_config_seal_html_for_report() . get_resume_html_for_report();
+    my $config_seal_html = get_config_seal_html_for_report() . get_resume_html_for_report() . get_validation_html_for_report();
 
     # Inject seal banner CSS and the banner itself into the report HTML.
     # We do this via post-processing rather than relying on the template
@@ -24229,8 +24296,39 @@ sub evaluate_sample_qc {
     }
 
     sync_qc_from_report_issues($samplenr);
+    set_reportable($samplenr);
 
     return 1;
+}
+
+## Can the sample's results be reported? (EURL convention, also used by the
+## validation against EURL datasets.) PASS and WARNING: yes -- WARNING with a
+## note; CRITICAL and FAIL: no; an abandoned sample, or one where a step
+## failed: no. Whether the species is inside a validation's target species
+## is decided by the validation, not here.
+sub set_reportable {
+    my ($samplenr) = @_;
+    my $s = $R_samples->[$samplenr] or return;
+    my $status = uc( $s->{qc}{status} // "" );
+    my ( $value, $reason, $note ) = ( "yes", "", "" );
+    my $first = sub { my ($lvl) = @_; my $l = $s->{qc}{issues}{$lvl} // []; return @$l ? $l->[0] : ""; };
+    if ( $s->{fatal_error} ) {
+        my $m = $s->{fatal_error_message};
+        $m = join("; ", @$m) if ref $m eq 'ARRAY';
+        ( $value, $reason ) = ( "no", "abandoned" . ( defined $m && $m ne "" ? ": $m" : "" ) );
+    }
+    elsif ( $status eq "FAIL" || $status eq "CRITICAL" ) {
+        my $i = $first->( lc $status );
+        ( $value, $reason ) = ( "no", "QC $status" . ( $i ne "" ? ": $i" : "" ) );
+    }
+    elsif ( @{ $s->{failed_steps} // [] } ) {
+        ( $value, $reason ) = ( "no", "step(s) failed: " . join(", ", @{ $s->{failed_steps} }) );
+    }
+    elsif ( $status eq "WARNING" ) {
+        my $i = $first->("warning");
+        $note = "reportable with a QC WARNING" . ( $i ne "" ? ": $i" : "" );
+    }
+    $s->{main_results}{reportable} = { value => $value, reason => $reason, note => $note };
 }
 
 
@@ -30410,6 +30508,12 @@ sub print_run_summary {
         $add->("    (or add the species to species_scope in the configuration to always include it)");
     }
 
+    # validation against a validation dataset
+    if (%S_VALIDATION) {
+        $add->(sprintf( "  %-12s %s: %s", "Validation:", $S_VALIDATION{dataset}, $S_VALIDATION{verdict} ),
+               $S_VALIDATION{all_agree} ? "green" : "yellow");
+    }
+
     # cgMLST not run: no schema installed for a species that has one
     if (%S_CGMLST_NO_SCHEMA) {
         $add->(sprintf( "  %-12s %s", "No cgMLST:", "no schema installed for these species:" ), "yellow");
@@ -32083,7 +32187,7 @@ sub seal_relevant_overrides {
         overwrite rerun recursive verbose fastq fasta assume_yes test_software
         timeout cache_max_age_days cleanup trimmed_fastq downsampled_fastq
         archive_results chewbbaca_write_md5 machine_aliases
-        seal db_freeze_config conda_manifest frozen_dbs_root
+        seal db_freeze_config conda_manifest frozen_dbs_root validate
     );
     my @relevant;
     for my $line ( split /\n/, $rundata{config}{overrides} // "" ) {
@@ -36186,6 +36290,185 @@ sub check_moved_inputs {
                   . "First missing file: $S_RAW_MISSING{$s[0]}[0] -- give datadir= for the folder that holds the data.", "yellow");
         $rundata{provenance}{run}{raw_missing} = { map { $_ => $S_RAW_MISSING{$_} } @s };
     }
+}
+
+###################################################################################################
+## Validation against a validation dataset (EURL-Campylobacter D1/D2/D3, ...)
+##
+## Every run writes report/tables/eurlc_observed_results.tsv: one row per
+## sample in the pipeline-neutral format of scripts/eurlc-validate
+## (docs/eurlc-validate.md). When a validation profile is found (validate=auto:
+## in the data folder or the folder above it; or validate=<folder>),
+## eurlc-validate compares it with the dataset's expected results, the cgMLST
+## distance matrices (at each schema's cluster threshold) and the MD5 sums of
+## the raw files; the result goes to report/validation/ and into the report.
+
+## QC measures -> the QC issue words of the validation datasets.
+sub validation_issue_codes {
+    my ($s) = @_;
+    my %codes;
+    my $qc  = $s->{qc_checks}       // {};
+    my $exp = $s->{qc_expectations} // {};
+    my %word = (
+        contamination_species_level => 'contamination', contamination_genus_level => 'contamination',
+        contamination_mixed_windows => 'contamination',
+        assembly_contigs_500 => 'high_contig_count', assembly_contigs => 'high_contig_count',
+        assembly_n50 => 'low_n50', assembly_gc => 'gc_outside_range',
+        typing_cgmlst_call_rate => 'low_cgmlst_call_rate', typing_cgmlst_paralogous => 'cgmlst_paralogous_loci',
+        taxonomy_species_score => 'low_species_score',
+    );
+    for my $m ( keys %$qc ) {
+        my $c = $qc->{$m};
+        next unless ref $c eq 'HASH' && ( $c->{status} // "" ) =~ /^(WARNING|CRITICAL|FAIL)$/;
+        if    ( $word{$m} )            { $codes{ $word{$m} } = 1; }
+        elsif ( $m =~ /^coverage_/ )   { $codes{low_coverage} = 1; }
+        elsif ( $m =~ /^qscore_/ )     { $codes{low_read_quality} = 1; }
+        elsif ( $m eq 'assembly_size' ) {
+            $codes{assembly_size_outside_range} = 1;
+            # above or below the limits hit?
+            my $v = $c->{observed};
+            if ( defined $v && $v =~ /^[\d.]+$/ ) {
+                my $t = $exp->{$m}{thresholds} // {};
+                for my $lvl (qw(warning critical fail)) {
+                    my $raw = ( $t->{$lvl} // {} )->{raw} // "";
+                    $codes{large_assembly} = 1 if grep { $v > $_ } ( $raw =~ />\s*([\d.]+)/g );
+                    $codes{small_assembly} = 1 if grep { $v < $_ } ( $raw =~ /<\s*([\d.]+)/g );
+                }
+            }
+        }
+    }
+    if ( $s->{fatal_error} ) {
+        my $m = $s->{fatal_error_message};
+        $m = join(" ", @$m) if ref $m eq 'ARRAY';
+        $codes{low_coverage} = 1 if ( $m // "" ) =~ /depth|coverage/i;
+    }
+    my $st = $s->{main_results}{mlst}{st} // "";
+    $codes{no_st_determined} = 1 if ( $s->{type} // "" ) ne "" && ( $st eq "" || $st =~ /^(n\/a|-|\?|NA|None|novel)$/i );
+    return join(";", sort keys %codes);
+}
+
+## report/tables/eurlc_observed_results.tsv (format: docs/eurlc-validate.md)
+sub write_observed_results_table {
+    my $dir  = getdir("out,report,tables");
+    my $file = "$dir/eurlc_observed_results.tsv";
+    my @cols = qw(sample_id species st mlst_alleles qc_status qc_issues cgmlst_called_percent cgmlst_scheme
+                  reportable reportable_reason abandoned);
+    open( my $fh, '>', $file ) or do { log_message("WARNING: cannot write [$file]: $!"); return; };
+    print {$fh} join("\t", @cols), "\n";
+    for my $s (@$R_samples) {
+        my $mr = $s->{main_results} // {};
+        my $fm = $s->{results}{fastmlst}{main} // $s->{results}{mlst}{main} // {};
+        my @genes = @{ $fm->{allele_names} // [ sort map { /^allele_(.+)$/ ? $1 : () } keys %$fm ] };
+        my $alleles = join(";", map { "$_(" . ( $fm->{"allele_$_"} // "?" ) . ")" } grep { defined $fm->{"allele_$_"} } @genes);
+        my $rep = $mr->{reportable} // {};
+        my $cr = $mr->{typing}{cgmlst_call_rate};
+        my %v = (
+            sample_id             => $s->{name},
+            species               => $mr->{taxonomy}{species} // "",
+            st                    => $mr->{mlst}{st} // "",
+            mlst_alleles          => $alleles,
+            qc_status             => $s->{qc}{status} // "",
+            qc_issues             => validation_issue_codes($s),
+            cgmlst_called_percent => ( defined $cr && $cr ne "n/a" ) ? $cr : "",
+            cgmlst_scheme         => $mr->{typing}{cgmlst_call_rate_schema} // "",
+            reportable            => $rep->{value} // "",
+            reportable_reason     => join("; ", grep { defined $_ && $_ ne "" } $rep->{reason}, $rep->{note}),
+            abandoned             => $s->{fatal_error} ? "yes" : "no",
+        );
+        print {$fh} join("\t", map { my $x = $v{$_} // ""; $x =~ s/[\t\n]/ /g; $x } @cols), "\n";
+    }
+    close $fh;
+    return $file;
+}
+
+## The folder of the validation dataset to use, or "" (validate=auto|off|<folder>).
+sub find_validation_dataset {
+    my $v = $R_cfg->{general}{validate} // "auto";
+    return "" if $v =~ /^(off|no|0|false)$/i;
+    my @cand = $v =~ /^(auto|yes|1|on|true)$/i
+        ? do { my $in = eval { abs_path( getdir("in") ) } // getdir("in"); ( $in, dirname($in) ) }
+        : ($v);
+    for my $d (@cand) {
+        next unless -d $d;
+        my @p = glob("$d/*_validation_profile.yml $d/*_validation_profile.yaml");
+        if ( @p > 1 ) {
+            log_message("WARNING: Validation: more than one validation profile in [$d] -- not validated (give validate=<folder>)", "yellow");
+            return "";
+        }
+        return $d if @p == 1;
+    }
+    log_message("WARNING: Validation: no *_validation_profile.yml in [$v]", "yellow") if $v !~ /^(auto|yes|1|on|true)$/i;
+    return "";
+}
+
+## Runs eurlc-validate when a dataset is found; fills %S_VALIDATION.
+sub run_dataset_validation {
+    my ($observed) = @_;
+    %S_VALIDATION = ();
+    my $ds = find_validation_dataset();
+    return unless $ds ne "" && defined $observed && -s $observed;
+
+    my $self = eval { abs_path($0) } // $0;
+    my ($validator) = grep { -f $_ } ( dirname($self) . "/eurlc-validate", dirname($self) . "/../scripts/eurlc-validate" );
+    $validator //= `command -v eurlc-validate 2>/dev/null`;
+    chomp $validator if defined $validator;
+    unless ( defined $validator && $validator ne "" && -f $validator ) {
+        log_message("WARNING: Validation dataset found in [$ds], but eurlc-validate is not installed -- not validated", "yellow");
+        return;
+    }
+    my $out = getdir("out,report") . "/validation";
+    File::Path::make_path($out);
+
+    # raw-file MD5 sums, for the check against the dataset's file manifest
+    my $md5 = "$out/fastq_md5.txt";
+    if ( open( my $o, '>', $md5 ) ) {
+        for my $f ( glob( getdir("out") . "/results/qc/stage1_rawdata/md5/*.txt" ) ) {
+            open( my $i, '<', $f ) or next;
+            print {$o} $_ while <$i>;
+            close $i;
+        }
+        close $o;
+    }
+    # distance matrices, each at its schema's cluster threshold
+    my @dist;
+    my $mdir = getdir("out") . "/results/clustering/distance_matrices";
+    for my $f ( sort glob("$mdir/*_distance_all.tsv") ) {
+        my ($schema) = grep { basename($f) =~ /_\Q$_\E_distance_all\.tsv$/ } sort { length($b) <=> length($a) } keys %{ $R_cfg_schemas // {} };
+        my $thr = get_clustering_default_threshold( { schema => $schema // "" } );
+        push @dist, "--distances", "$f:$thr";
+    }
+    my $label = "EURLC-WGS $PIPELINE_VERSION" . ( ref $S_SEAL_RESULT eq 'HASH' && $S_SEAL_RESULT->{status}
+                ? ", " . $S_SEAL_RESULT->{status} . ( $S_SEAL_RESULT->{name} ? " ($S_SEAL_RESULT->{name})" : "" ) : ", UNSEALED" );
+    my @cmd = ( "python3", $validator, "--dataset", $ds, "--observed", $observed, @dist,
+                ( -s $md5 ? ( "--fastq-md5", $md5 ) : () ), "--out", $out, "--label", $label );
+    log_message("NOTICE: Validation: dataset found in [$ds] -- comparing the results with its expected results");
+    my $txt = "";
+    if ( open( my $p, '-|', @cmd ) ) { local $/; $txt = <$p> // ""; close $p; }
+    my $rc = $? >> 8;
+    log_message("INFO: Validation output:\n$txt");
+    my $j = eval { read_json_file("$out/validation.json") } // {};
+    my $verdict = $j->{meta}{verdict} // ( $rc == 0 ? "ALL REQUIRED CHECKS AGREE" : "validation could not be completed" );
+    %S_VALIDATION = (
+        dataset => $j->{meta}{dataset} // basename($ds), folder => $ds, verdict => $verdict,
+        all_agree => ( $rc == 0 ? 1 : 0 ), report => "$out/validation_report.html",
+    );
+    $rundata{validation} = { %S_VALIDATION };
+    log_message( ( $rc == 0 ? "NOTICE" : "WARNING" ) . ": Validation against $S_VALIDATION{dataset}: $verdict -- report/validation/validation_report.html",
+                 $rc == 0 ? "green" : "yellow" );
+}
+
+## Banner for the main report when a validation was run.
+sub get_validation_html_for_report {
+    return "" unless %S_VALIDATION;
+    my $cls = $S_VALIDATION{all_agree} ? "seal-verified" : "seal-warning";
+    my $txt = "Validation against " . encode_entities( $S_VALIDATION{dataset} // "" ) . ": <b>"
+            . encode_entities( $S_VALIDATION{verdict} // "" ) . "</b>";
+    return <<"HTML";
+<div class="seal-banner $cls">
+  <span class="seal-icon">&#10003;</span>
+  <span class="seal-label">$txt<br><small style='opacity:0.75'><a href="validation/validation_report.html">Validation report</a> (per sample and check; also validation_results.tsv)</small></span>
+</div>
+HTML
 }
 
 # Banner for the main HTML report (resumed runs only).

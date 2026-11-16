@@ -237,6 +237,12 @@ else
     echo "WARNING: Missing scripts/hash_results_alleles.py"
 fi
 
+if [[ -f "${SRC_DIR}/scripts/eurlc-validate" ]]; then
+    cp -p "${SRC_DIR}/scripts/eurlc-validate" "${TARGET_BIN}/eurlc-validate"
+    chmod +x "${TARGET_BIN}/eurlc-validate"
+    echo ">>> Installed: eurlc-validate"
+fi
+
 if [[ -f "${SRC_DIR}/scripts/eurlc-wgs-inspect" ]]; then
     cp -p "${SRC_DIR}/scripts/eurlc-wgs-inspect" "${TARGET_BIN}/eurlc-wgs-inspect"
     chmod +x "${TARGET_BIN}/eurlc-wgs-inspect"

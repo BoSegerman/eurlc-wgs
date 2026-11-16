@@ -175,7 +175,11 @@ check "existing output folder + --assume-yes, no decision: exit 1" test "$RC" -e
 mkdir -p "$OUT/large_files/fastq/trimmed" "$OUT/large_files/fastq/trimmed_downsampled"
 fq "$OUT/large_files/fastq/trimmed/dummy.t_R1.fastq.gz" 2
 fq "$OUT/large_files/fastq/trimmed_downsampled/dummy.td_R1.fastq.gz" 2
+RM="$OUT/results/qc/stage3_assemblies/remapping/A"; mkdir -p "$RM"
+echo bam > "$RM/A.sorted.bam"; echo bai > "$RM/A.sorted.bam.bai"; echo ">c" > "$RM/A.fasta"
 run "$T/s3.out" outdir="$OUT" --resume --assume-yes disable=chewbbaca
+check "cleanup removes the BAM and the assembly copy in the remapping folder (cleanup.bam=1)" \
+      bash -c "[[ ! -e '$RM/A.sorted.bam' && ! -e '$RM/A.sorted.bam.bai' && ! -e '$RM/A.fasta' ]]"
 check "cleanup removes trimmed and downsampled reads" \
       bash -c "[[ ! -e '$OUT/large_files/fastq/trimmed/dummy.t_R1.fastq.gz' && ! -e '$OUT/large_files/fastq/trimmed_downsampled/dummy.td_R1.fastq.gz' ]]"
 check "  ... and records it in log/cleanup.json" grep -q trimmed_fastq "$OUT/log/cleanup.json"
@@ -219,6 +223,25 @@ if [[ -d "$REPO/tests/data/remap" ]]; then
           bash -c "perl '$SCRIPT' --remap-check '$REPO/tests/data/remap' > '$T/remapcheck.out' 2>&1"
     check "remap: --remap-summary=depth writes a summary" \
           bash -c "perl '$SCRIPT' --remap-summary=depth --out '$T/ds.json' < '$REPO/tests/data/remap/smoke/eurlc-wgs/results/qc/stage3_assemblies/remapping/T1/T1.depth.tsv' && grep -q format_version '$T/ds.json'"
+fi
+
+# --- validation against a validation dataset ---------------------------------
+VAL="$REPO/scripts/eurlc-validate"; VD="$REPO/tests/data/validation"
+if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
+    check "eurlc-validate: matching results agree (exit 0)" \
+          python3 "$VAL" --dataset "$VD" --observed "$VD/observed_ok.tsv" --distances "$VD/distances.tsv:10" --out "$T/val_ok"
+    check "eurlc-validate: a missed contamination disagrees (exit 1)" \
+          bash -c "! python3 '$VAL' --dataset '$VD' --observed '$VD/observed_bad.tsv' --distances '$VD/distances.tsv:10' --out '$T/val_bad' > /dev/null"
+    # the pipeline finds a dataset in its data folder and validates
+    VDATA="$T/valdata"; mkdir -p "$VDATA"
+    cp "$D/A_S1_L001_R1_001.fastq.gz" "$D/A_S1_L001_R2_001.fastq.gz" "$VDATA/"
+    cp "$VD/T1_validation_profile.yml" "$VDATA/"
+    printf 'sample_id\texpected_species\texpected_species_is_target\texpected_st\texpected_mlst_alleles\texpected_qc_status\talternative_qc_status\texpected_qc_issue\texpected_cgmlst_min_called_percent\texpected_cluster\texpected_max_pairwise_distance_within_cluster\texpected_reportable\texpected_non_reportable_reason\nA\tCampylobacter jejuni\tyes\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tyes\tn/a\n' > "$VDATA/T1_expected_results.tsv"
+    run "$T/v1.out" datadir="$VDATA" --assume-yes disable=chewbbaca
+    check "pipeline writes report/tables/eurlc_observed_results.tsv" \
+          bash -c "head -1 '$VDATA/eurlc-wgs/report/tables/eurlc_observed_results.tsv' | grep -q '^sample_id	species	st'"
+    check "pipeline finds the validation dataset and validates" test -s "$VDATA/eurlc-wgs/report/validation/validation.json"
+    check "  ... and says so in the run summary" grep -q "Validation:" "$T/v1.out"
 fi
 
 # --- scripts/eurlc-wgs-inspect (read-only, on the output folder above) ------

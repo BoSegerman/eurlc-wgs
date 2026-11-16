@@ -27869,7 +27869,7 @@ Kraken2 => {
             { label => "idxstats: idxstats_total_mapped", path => [ "mapping", "idxstats_total_mapped"] },
             { label => "idxstats: idxstats_total_unmapped", path => [ "mapping", "idxstats_total_unmapped"] },    
             
-            { label => "coverage: idxstats_total_unmapped", path => [  "coverage", "idxstats_total_ref_len"] },     
+            { label => "coverage: idxstats_total_ref_len", path => [  "coverage", "idxstats_total_ref_len"] },     
             { label => "coverage: genome_len_from_coverage", path => [  "coverage", "genome_len_from_coverage"] },    
             { label => "coverage: covered_bases_1x", path => [  "coverage", "covered_bases_1x"] },  
             { label => "coverage: breadth_1x_pct", path => [  "coverage", "breadth_1x_pct"] },  
@@ -27883,20 +27883,11 @@ Kraken2 => {
             { label => "coverage: depth_q3", path => [  "coverage", "depth_q3"] },  
             { label => "coverage: depth_iqr", path => [  "coverage", "depth_iqr"] },  
             { label => "coverage: depth_iqr_over_median", path => [  "coverage", "depth_iqr_over_median"] },  
-            { label => "coverage: breadth_1x_pct", path => [  "coverage", "breadth_1x_pct"] },  
             { label => "coverage: breadth_10x_pct", path => [  "coverage", "breadth_10x_pct"] },  
             { label => "coverage: breadth_20x_pct", path => [  "coverage", "breadth_20x_pct"] },  
             { label => "coverage: breadth_30x_pct", path => [  "coverage", "breadth_30x_pct"] },  
             
-            { label => "mixture: callable_sites_dp_ge_20", path => [ "mixture", "callable_sites_dp_ge_20"] },  
-            { label => "mixture: sites_minoraf_0_05_to_0_10_dp20", path => [  "mixture", "sites_minoraf_0_05_to_0_10_dp20"] },  
-            { label => "mixture: sites_minoraf_0_10_to_0_20_dp20", path => [  "mixture", "sites_minoraf_0_10_to_0_20_dp20"] },  
-            { label => "mixture: sites_minoraf_ge_0_20_dp20", path => [  "mixture", "sites_minoraf_ge_0_20_dp20"] },  
-            { label => "mixture: rate_minoraf_0_05_to_0_10_dp20", path => [  "mixture", "rate_minoraf_0_05_to_0_10_dp20"] },  
-            { label => "mixture: rate_minoraf_0_10_to_0_20_dp20", path => [  "mixture", "rate_minoraf_0_10_to_0_20_dp20"] },  
-            { label => "mixture: rate_minoraf_ge_0_20_dp20", path => [  "mixture", "rate_minoraf_ge_0_20_dp20"] },
-            { label => "mixture: minoraf_median_dp20", path => [  "mixture", "minoraf_median_dp20"] },
-            { label => "mixture: minoraf_p95_dp20", path => [  "mixture", "minoraf_p95_dp20"] },
+            # the mixture measure has its own section (detailed_report_section_mixture)
 
               
         ],
@@ -28262,6 +28253,107 @@ sub detailed_report_link_icon {
 }
 
 
+## Same-species mixture (the remap step's mixture measure, method 2) in the
+## detailed sample report. The measure the sample is judged by, the
+## 1-kb windows with mixed positions, comes first and is marked; what it is
+## built from follows; the earlier method's values last, for comparison.
+sub detailed_report_section_mixture {
+    my ($sample) = @_;
+    return "" if !defined $sample || ref($sample) ne "HASH";
+    my $M = ( $sample->{results}{remap} // {} )->{mixture};
+    return "" unless ref $M eq 'HASH' && %$M;
+
+    my $qc     = ( $sample->{qc_checks} // {} )->{contamination_mixed_windows} // {};
+    my $status = uc( $qc->{status} // "" );
+    my %lvl    = ( PASS => "ok", WARNING => "warning", CRITICAL => "critical", FAIL => "fail" );
+    my $t      = ( ( $sample->{qc_expectations} // {} )->{contamination_mixed_windows} // {} )->{thresholds} // {};
+    my @set    = map { my $r = ( $t->{$_} // {} )->{raw}; ( defined $r && $r ne "" ) ? "$_ $r" : () } qw(warning critical fail);
+    # no dot without a threshold: green would suggest the value was judged
+    my $dot    = ( @set && $lvl{$status} ) ? warning_level_to_dot_html( $lvl{$status} ) : "";
+    my $num    = sub { my $v = shift; return "n/a" unless defined $v && $v ne ""; ( my $x = "$v" ) =~ s/\B(?=(\d{3})+(?!\d))/ /g; $x };
+    my $pct    = sub { my $v = shift; return "n/a" unless defined $v && $v =~ /^[\d.]+$/; sprintf( "%.1f %%", 100 * $v ) };
+    my $head   = sub { "<tr><td colspan=\"2\" style=\"font-weight:600;background:rgba(127,127,127,0.12)\">" . encode_entities(shift) . "</td></tr>\n" };
+    my $note   = sub { "<tr><td colspan=\"2\" style=\"font-size:0.9em;opacity:0.8\">" . shift() . "</td></tr>\n" };
+
+    my $html = "<h2>Same-species mixture (from the remapping) $dot</h2>\n";
+    $html .= "<table class=\"summary-table detailed-report-table\">\n<tbody>\n";
+
+    if ( !defined $M->{mixed_windows} ) {
+        $html .= detailed_report_row( "Mixture measure", mixture_report_text($sample) );
+        $html .= "</tbody>\n</table>\n";
+        return $html;
+    }
+
+    # the measure
+    my $windows = $num->( $M->{mixed_windows} )
+                . ( defined $M->{mixed_windows_total} ? " of " . $num->( $M->{mixed_windows_total} ) : "" )
+                . ( defined $M->{mixed_windows_pct} && $M->{mixed_windows_pct} ne "" ? " ($M->{mixed_windows_pct} %)" : "" );
+    my $thr = @set ? "QC: " . ( $status || "n/a" ) . " (thresholds: " . join( ", ", @set ) . ")"
+                : "QC: no threshold set for this species, so the measure does not affect the QC status";
+    $html .= "<tr><td class=\"rowheading\"><b>1-kb windows with mixed positions</b><br>"
+           . "<small style=\"opacity:0.75\">&#9733; the measure the sample is judged by</small></td>"
+           . "<td><b>" . encode_entities($windows) . "</b><br><small>" . encode_entities($thr) . "</small></td></tr>\n";
+    $html .= $note->( "Clean <i>C. jejuni</i> isolates at about 100&times; usually have 0&ndash;10 windows, a few up to 30. "
+                    . "Above 30: possible mixture of two strains; look at the assembly size, number of contigs and cgMLST call rate, "
+                    . "and consider re-isolating. Hundreds: a second, clearly different strain at a few per cent or more. "
+                    . "A strain below about 5 % of the reads, or one nearly identical to the main strain, does not show: "
+                    . "a low number is not proof of a pure culture. Other species and depths need their own limits." );
+
+    # what it is built from
+    $html .= $head->("What the measure is built from");
+    my $depth = ( $sample->{results}{remap}{coverage} // {} )->{depth_mean};
+    $html .= detailed_report_row( "Mean depth of the remapping",
+        ( defined $depth && $depth =~ /^[\d.]+$/ ? sprintf( "%.0fx", $depth ) : "n/a" ) . " (the guide above assumes about 100x; fewer reads find fewer mixed positions)" );
+    $html .= detailed_report_row( "Mixed positions (passed every filter)", $num->( $M->{mixed_sites} ) );
+    $html .= detailed_report_row( "- of which isolated (no other within 1 kb)", $num->( $M->{mixed_sites_isolated} ) );
+    $html .= detailed_report_row( "Median minor allele fraction of these positions",
+        $pct->( $M->{mixed_minoraf_median} ) . " (roughly the share of the second strain, when there is one)" );
+    my $fc = $M->{mixed_filter_counts};
+    if ( ref $fc eq 'HASH' && %$fc ) {
+        my %why = ( few_reads => "too few minor reads", low_af => "minor fraction too low", one_strand => "minor allele on one strand only",
+                    depth => "depth unlike the contig's", short_contig => "short contig", contig_end => "near a contig end",
+                    indel => "near an indel", neighbour => "another candidate within a few bases" );
+        my @parts = map { ( $why{$_} // $_ ) . " " . $num->( $fc->{$_} ) }
+                    sort { ( $fc->{$b} // 0 ) <=> ( $fc->{$a} // 0 ) } grep { $_ ne "PASS" && $fc->{$_} } keys %$fc;
+        $html .= detailed_report_row( "Candidate positions", $num->( $M->{mixed_candidates} ) . ", of which " . $num->( $fc->{PASS} // 0 ) . " passed" );
+        $html .= detailed_report_row( "Set aside because", join( "; ", @parts ) ) if @parts;
+    }
+    my $P = $M->{mixed_params};
+    if ( ref $P eq 'HASH' && %$P ) {
+        my %p = %$P;
+        $p{min_minor_af} = 100 * $p{min_minor_af} . " %" if defined $p{min_minor_af} && $p{min_minor_af} =~ /^[\d.]+$/;
+        my $txt = sprintf( "method %s; %s-bp windows; minor allele >= %s of the reads, >= %s reads, >= %s per strand; "
+                         . "depth %s-%s x the contig's median; contigs >= %s bp, >= %s bp from the ends; "
+                         . "no indel within %s bp; no other candidate within %s bp",
+                           map { $_ // "?" } $M->{method_version}, @p{qw(window_size min_minor_af min_minor_reads min_minor_reads_per_strand
+                           min_depth_ratio max_depth_ratio min_contig_length contig_end_margin indel_distance neighbour_distance)} );
+        $html .= detailed_report_row( "Method and settings ([remap_mixture])", $txt );
+    }
+    my $tsv = ( $sample->{results}{remap}{files} // {} )->{mixed_sites_tsv};
+    if ( defined $tsv && $tsv ne "" && -f $tsv ) {
+        my $href = encode_entities( link_from_sample_report_to_outpath( path_relative_to_outdir($tsv) ) );
+        $html .= detailed_report_raw_row( "Every candidate position", qq{<a href="$href">} . detailed_report_link_icon("tsv") . " mixed_positions.tsv</a>" );
+    }
+
+    # the earlier method
+    $html .= $head->("Earlier method (before November 2026) - for comparison only, not used for QC");
+    my $cs = $M->{callable_sites_dp_ge_20};
+    $html .= detailed_report_row( "Positions with depth >= 20", $num->($cs) );
+    for ( [ "0_05_to_0_10", "5-10 %" ], [ "0_10_to_0_20", "10-20 %" ], [ "ge_0_20", ">= 20 %" ] ) {
+        my ( $k, $lab ) = @$_;
+        my $n = $M->{"sites_minoraf_${k}_dp20"};
+        my $r = $M->{"rate_minoraf_${k}_dp20"};
+        next unless defined $n;
+        $html .= detailed_report_row( "Positions with minor allele fraction $lab",
+            $num->($n) . ( defined $r && $r =~ /^[\d.]+$/ ? sprintf( " (%.3f %% of the positions)", 100 * $r ) : "" ) );
+    }
+    $html .= detailed_report_row( "Minor allele fraction, median / 95th percentile",
+        $pct->( $M->{minoraf_median_dp20} ) . " / " . $pct->( $M->{minoraf_p95_dp20} ) );
+
+    $html .= "</tbody>\n</table>\n";
+    return $html;
+}
+
 sub detailed_report_section_chewbbaca {
     my ($sample) = @_;
 
@@ -28560,6 +28652,14 @@ sub detailed_report_build_sample_report {
         # list places it.
         if ($runstep_name eq 'chewbbaca') {
             $html .= detailed_report_section_chewbbaca($sample);
+            next;
+        }
+
+        # the same-species mixture measure, right after the remapping it
+        # comes from, in its own section (category contamination)
+        if ($runstep_name eq 'remap' && exists $R_report_def->{remap} && exists $sample->{results}{remap}) {
+            $html .= detailed_report_runstep_section($sample, 'remap', $R_report_def->{remap});
+            $html .= detailed_report_section_mixture($sample);
             next;
         }
 

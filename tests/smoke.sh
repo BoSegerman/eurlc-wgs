@@ -183,6 +183,31 @@ check "  ... and the merged lane files (default)" bash -c "[[ ! -e '$M' ]]"
 check "resume finds the data folder from the output folder" bash -c "! grep -q 'Cannot resume' '$T/s3.out'"
 check "  ... and reports no new input files" bash -c "! grep -q 'are not part of this output directory' '$T/s3.out'"
 
+# --- a moved / copied analysis (data folder with eurlc-wgs/ inside) --------
+MV1="$T/move_a"; mkdir -p "$MV1"
+cp "$D/A_S1_L001_R1_001.fastq.gz" "$D/A_S1_L001_R2_001.fastq.gz" "$MV1/"
+run "$T/m1.out" datadir="$MV1" --assume-yes disable=chewbbaca
+cp "$MV1/eurlc-wgs/log/filelist_fastq.txt" "$T/filelist.orig"
+mv "$MV1" "$T/move_b"; MV2="$T/move_b"
+run "$T/m2.out" outdir="$MV2/eurlc-wgs" --resume --assume-yes disable=chewbbaca
+check "moved analysis: resume reads the raw data at the new place" grep -q "raw data read from \[$MV2\]" "$T/m2.out"
+if [[ -s "$MV2/eurlc-wgs/results/qc/stage1_rawdata/md5/md5-A.txt" ]]; then
+    check "  ... after checking the recorded MD5 sums" grep -q "2 file(s) MD5-verified" "$T/m2.out"
+fi
+check "  ... and does not take the moved files for new ones" bash -c "! grep -q 'are not part of this output directory' '$T/m2.out'"
+check "  ... the recorded file list is not changed" cmp -s "$T/filelist.orig" "$MV2/eurlc-wgs/log/filelist_fastq.txt"
+check "  ... input_dir.txt keeps both places" bash -c "[[ \$(wc -l < '$MV2/eurlc-wgs/log/input_dir.txt') -eq 2 ]]"
+if [[ -s "$MV2/eurlc-wgs/results/qc/stage1_rawdata/md5/md5-A.txt" ]]; then
+    cp -r "$MV2" "$T/move_c"; echo "@x" | gzip >> "$T/move_c/A_S1_L001_R1_001.fastq.gz"
+    run "$T/m3.out" outdir="$T/move_c/eurlc-wgs" --resume --assume-yes disable=chewbbaca
+    check "moved analysis with a changed raw file: stops (exit 1)" \
+          bash -c "[[ $RC -eq 1 ]] && grep -q 'are not the files that were analysed' '$T/m3.out'"
+fi
+cp -r "$MV2" "$T/move_d"; rm "$T/move_d/A_S1_L001_R2_001.fastq.gz"
+run "$T/m4.out" outdir="$T/move_d/eurlc-wgs" --resume --assume-yes disable=chewbbaca
+check "moved analysis with raw data missing: resumes, with a warning" grep -q "the raw data of 1 sample(s) was not found" "$T/m4.out"
+check "  ... and the sample stays paired" bash -c "! grep -q 'treating sample as SE' '$T/m4.out'"
+
 # A folder with only logs (a run that stopped early) is started anew.
 mkdir -p "$T/out_logs/log"; echo x > "$T/out_logs/log/log.txt"
 run "$T/s4.out" datadir="$D" outdir="$T/out_logs" --assume-yes disable=chewbbaca
@@ -203,6 +228,8 @@ if command -v python3 > /dev/null && [[ -f "$INSPECT" ]]; then
           bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m.tsv' > '$T/inv.out' && grep -q '^path	size' '$T/m.tsv'"
     check "inspect extract makes a package" \
           bash -c "python3 '$INSPECT' extract '$OUT' --all-samples --anonymize -o '$T/pkg' > /dev/null && tar tzf '$T/pkg.tar.gz' | grep -q MANIFEST.tsv"
+    check "inspect summarize reads the run" \
+          bash -c "python3 '$INSPECT' summarize '$OUT' --tsv '$T/sum.tsv' > '$T/sum.out' && grep -q '^run	sample' '$T/sum.tsv'"
     check "  ... and leaves the output folder unchanged" \
           bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m2.tsv' > /dev/null && cmp -s <(cut -f1,2,9 '$T/m.tsv') <(cut -f1,2,9 '$T/m2.tsv')"
 fi

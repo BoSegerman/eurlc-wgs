@@ -6,6 +6,10 @@
 #              manifest (TSV) with sizes and optionally MD5 checksums
 #   extract    a small .tar.gz with the tools' own result files, logs and
 #              report tables for chosen samples (no reads, no BAM)
+#   summarize  every sample of one or more runs in one table (QC measures,
+#              status, species, typing), the spread of each measure per
+#              species, how the thresholds fall out against what is known
+#              about the samples, and the issues found across runs
 #   mixture    the intra-species mixture metric of every sample in one or more
 #              output folders, with species and QC status, and its spread per
 #              species (for choosing thresholds)
@@ -31,7 +35,7 @@ import urllib.parse
 import zlib
 from collections import defaultdict
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -682,10 +686,26 @@ class Anonymizer:
                         self.paths.append((d, "<DATADIR>"))
         self.paths.sort(key=lambda kv: -len(kv[0]))
         self.home_rx = re.compile(r"(/home/|/Users/|/mnt/[a-z]/Users/)[^/\s\"'<>]+")
+        # The same folders reached by another path (a symlink, another mount
+        # point, an earlier run started elsewhere): any absolute path that
+        # ends in the data folder's name, or in <data folder>/eurlc-wgs.
+        names = set()
+        for p, rep_ in self.paths:
+            b = os.path.basename(p.rstrip("/"))
+            if b == "eurlc-wgs":
+                b = os.path.basename(os.path.dirname(p.rstrip("/")))
+            if b and len(b) >= 3:
+                names.add(b)
+        self.name_rx = None
+        if names:
+            alt = "|".join(re.escape(n) for n in sorted(names, key=lambda x: -len(x)))
+            self.name_rx = re.compile(r"(?<![\w.-])/(?:[^\s\"'<>/]+/)*(?:%s)(/eurlc-wgs)?(?=[/\s\"'<>,;:)\]]|$)" % alt)
 
     def text(self, s):
         for p, rep in self.paths:
             s = s.replace(p, rep)
+        if self.name_rx:
+            s = self.name_rx.sub(lambda m: "<OUTDIR>" if m.group(1) else "<DATADIR>", s)
         s = self.home_rx.sub(lambda m: m.group(1) + "USER", s)
         if self.rx:
             s = self.rx.sub(lambda m: self.map[m.group(1)], s)
@@ -845,6 +865,297 @@ def _add_text(tar, name, text):
     ti.mode = 0o644
     tar.addfile(ti, io.BytesIO(b))
 
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# summarize
+# ─────────────────────────────────────────────────────────────────────────────
+
+LEVELS = ("PASS", "WARNING", "CRITICAL", "FAIL")
+
+
+def _find_runs(folders):
+    """eurlc-wgs output folders (with data/rundata.json) below the given folders."""
+    runs = []
+    seen = set()
+    for folder in folders:
+        if not os.path.isdir(folder):
+            die("not a folder: %s" % folder)
+        for dirpath, dirnames, filenames in os.walk(folder):
+            dirnames[:] = [d for d in dirnames if d not in ("results", "large_files", "report", "log")]
+            if os.path.basename(dirpath) == "data" and "rundata.json" in filenames:
+                out = os.path.dirname(os.path.abspath(dirpath))
+                real = os.path.realpath(out)
+                if real not in seen:
+                    seen.add(real)
+                    runs.append(out)
+    return sorted(runs)
+
+
+def _run_label(outdir):
+    b = os.path.basename(outdir.rstrip(os.sep))
+    if b in ("eurlc-wgs", "eurlc-wgs_qcscreen"):
+        b = os.path.basename(os.path.dirname(outdir.rstrip(os.sep))) or b
+    return b
+
+
+def _get(d, *path, default=""):
+    for k in path:
+        if not isinstance(d, dict):
+            return default
+        d = d.get(k)
+    return default if d is None else d
+
+
+def _issue_texts(block):
+    out = []
+    for lvl in ("fail", "critical", "warning"):
+        for t in (_get(block, "issues", lvl, default=[]) or []):
+            out.append((lvl.upper(), t if isinstance(t, str) else json.dumps(t)))
+    return out
+
+
+def _sample_row(run, smp):
+    mr = smp.get("main_results") or {}
+    qc = smp.get("qc_checks") or {}
+    row = {
+        "run": run,
+        "sample": smp.get("name", ""),
+        "type": smp.get("type", ""),
+        "species": _get(mr, "taxonomy", "species"),
+        "species_score": _get(mr, "taxonomy", "species_score"),
+        "qc_status": _get(smp, "qc", "status"),
+        "qc_issues": "; ".join("%s: %s" % x for x in _issue_texts(smp.get("qc"))),
+        "runtime_status": _get(smp, "runtime_issues", "status"),
+        "runtime_issues": "; ".join("%s: %s" % x for x in _issue_texts(smp.get("runtime_issues"))),
+        "abandoned": smp.get("fatal_error_message") or "" if smp.get("fatal_error") else "",
+        "assembly_method": _get(mr, "assembly", "method"),
+        "st": _get(mr, "mlst", "st"),
+        "serotype": _get(mr, "typing", "serotype", "value"),
+        "cgmlst_schema": _get(mr, "typing", "cgmlst_call_rate_schema"),
+        "contamination_species": _get(mr, "contamination", "species"),
+        "contamination_genus": _get(mr, "contamination", "genus"),
+    }
+    hits = _get(smp, "results", "amrfinderplus", "amr_hits", default=[]) or []
+    amr = sorted({h.get("element_symbol", "") for h in hits
+                  if isinstance(h, dict) and (h.get("type") or h.get("element_type") or "AMR").upper() == "AMR"} - {""})
+    row["amr_genes"] = ",".join(amr)
+    measures = {}
+    for m, c in qc.items():
+        if not isinstance(c, dict):
+            continue
+        measures[m] = (c.get("observed"), c.get("status", ""))
+    return row, measures
+
+
+def _thresholds_of(smp):
+    out = {}
+    for m, e in (smp.get("qc_expectations") or {}).items():
+        t = (e or {}).get("thresholds") or {}
+        out[m] = {lvl: ((t.get(lvl) or {}).get("raw") or "") for lvl in ("warning", "critical", "fail")}
+    return out
+
+
+def _read_expected(path):
+    exp = {}
+    with open(path, encoding="utf-8") as fh:
+        for i, line in enumerate(fh):
+            if not line.strip() or line.startswith("#"):
+                continue
+            c = line.rstrip("\n").split("\t")
+            if i == 0 and c[0].lower() == "run":
+                continue
+            if len(c) < 3:
+                warn("%s line %d: needs run, sample, expected (tab-separated)" % (path, i + 1))
+                continue
+            exp[(c[0], c[1])] = (c[2].strip().lower(), c[3] if len(c) > 3 else "")
+    return exp
+
+
+def cmd_summarize(a):
+    runs = _find_runs(a.folders)
+    if not runs:
+        die("no data/rundata.json below %s" % ", ".join(a.folders), 1)
+    expected = _read_expected(a.expected) if a.expected else {}
+
+    rows, all_measures, thresholds = [], [], defaultdict(dict)   # thresholds[species][measure]
+    measure_names = set()
+    issue_groups = defaultdict(lambda: {"n": 0, "samples": [], "level": ""})
+    for out in runs:
+        run = _run_label(out)
+        try:
+            with open(os.path.join(out, "data", "rundata.json"), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:
+            warn("cannot read %s: %s" % (out, e))
+            continue
+        for smp in data.get("samples") or []:
+            if not isinstance(smp, dict):
+                continue
+            row, meas = _sample_row(run, smp)
+            if expected:
+                e = expected.get((run, row["sample"])) or expected.get(("*", row["sample"]))
+                row["expected"], row["expected_note"] = e if e else ("", "")
+            rows.append(row)
+            all_measures.append(meas)
+            measure_names.update(meas)
+            sp = row["species"] or "(species unknown)"
+            for m, t in _thresholds_of(smp).items():
+                thresholds[sp].setdefault(m, t)
+            for blk in ("qc", "runtime_issues"):
+                for lvl, txt in _issue_texts(smp.get(blk)):
+                    key = (blk, re.sub(r"(?<![A-Za-z])-?\d+(?:\.\d+)?", "#", txt))
+                    g = issue_groups[key]
+                    g["n"] += 1
+                    g["level"] = lvl
+                    if len(g["samples"]) < 6:
+                        g["samples"].append("%s/%s" % (run, row["sample"]))
+        # run-level errors from log/run_status.json
+        rs_path = os.path.join(out, "log", "run_status.json")
+        try:
+            with open(rs_path, encoding="utf-8") as fh:
+                rs = json.load(fh)
+            for e in rs.get("errors") or []:
+                txt = e if isinstance(e, str) else (e.get("text") or e.get("message") or json.dumps(e))
+                g = issue_groups[("run error", re.sub(r"(?<![A-Za-z])-?\d+(?:\.\d+)?", "#", txt))]
+                g["n"] += 1
+                g["level"] = "ERROR"
+                if len(g["samples"]) < 6:
+                    g["samples"].append(run)
+        except (OSError, ValueError):
+            pass
+
+    if a.species:
+        keep = [i for i, r in enumerate(rows) if re.search(a.species, r["species"], re.I)]
+        rows = [rows[i] for i in keep]
+        all_measures = [all_measures[i] for i in keep]
+    mnames = sorted(measure_names)
+
+    # ── the table ───────────────────────────────────────────────────────────
+    base_cols = ["run", "sample", "type", "species", "species_score", "qc_status", "qc_issues",
+                 "runtime_status", "runtime_issues", "abandoned", "assembly_method", "st", "serotype",
+                 "cgmlst_schema", "amr_genes", "contamination_species", "contamination_genus"]
+    if expected:
+        base_cols[2:2] = ["expected", "expected_note"]
+    if a.tsv:
+        with open(a.tsv, "w", encoding="utf-8") as fh:
+            fh.write("\t".join(base_cols + mnames + [m + "_status" for m in mnames]) + "\n")
+            for r, meas in zip(rows, all_measures):
+                vals = [str(r.get(c, "")) for c in base_cols]
+                vals += ["" if meas.get(m, (None, ""))[0] in (None, "n/a") else str(meas[m][0]) for m in mnames]
+                vals += [meas.get(m, (None, ""))[1] for m in mnames]
+                fh.write("\t".join(v.replace("\t", " ") for v in vals) + "\n")
+
+    w = sys.stdout.write
+    w("eurlc-wgs-inspect %s summarize: %d run(s), %d sample(s)\n" % (VERSION, len(runs), len(rows)))
+
+    # ── overview: species × status (× expected) ─────────────────────────────
+    w("\n== Samples per species and QC status\n")
+    tab = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        tab[r["species"] or "(species unknown)"][r["qc_status"] or "?"] += 1
+    cols = list(LEVELS) + sorted({st for d in tab.values() for st in d} - set(LEVELS))
+    table = [["species", "n"] + cols]
+    for sp in sorted(tab):
+        table.append([sp, sum(tab[sp].values())] + [tab[sp].get(c, 0) for c in cols])
+    _print_table(w, table)
+
+    if expected:
+        w("\n== What is known about the samples, against the QC status they got\n")
+        conf = defaultdict(lambda: defaultdict(int))
+        for r in rows:
+            conf[r.get("expected") or "(not listed)"][r["qc_status"] or "?"] += 1
+        table = [["expected", "n"] + cols]
+        for e in sorted(conf):
+            table.append([e, sum(conf[e].values())] + [conf[e].get(c, 0) for c in cols])
+        _print_table(w, table)
+        missed = [r for r in rows if r.get("expected") not in ("", "clean", "unknown", None) and r["qc_status"] == "PASS"]
+        if missed:
+            w("Known problem samples that PASS:\n")
+            for r in missed[:30]:
+                w("  %s/%s  (%s: %s)\n" % (r["run"], r["sample"], r["expected"], r.get("expected_note", "")))
+        flagged = [r for r in rows if r.get("expected") == "clean" and r["qc_status"] not in ("PASS", "")]
+        if flagged:
+            w("Clean samples that do not PASS:\n")
+            for r in flagged[:30]:
+                w("  %s/%s  %s  %s\n" % (r["run"], r["sample"], r["qc_status"], r["qc_issues"][:150]))
+
+    # ── spread per species and measure ──────────────────────────────────────
+    w("\n== Spread of each measure per species%s\n"
+      % (" (spread and W/C/F over the samples listed as clean; 'problems flagged' = how many of the\n"
+         "   other listed samples get WARNING or worse on this measure, 'problem values' = their values)"
+         if expected else ""))
+    w("(n = samples with a value; the thresholds are the ones in force in these runs)\n")
+    by_sp = defaultdict(list)
+    for r, meas in zip(rows, all_measures):
+        by_sp[r["species"] or "(species unknown)"].append((r, meas))
+    for sp in sorted(by_sp):
+        if a.min_samples and len(by_sp[sp]) < a.min_samples:
+            continue
+        w("\n-- %s (%d sample(s))\n" % (sp, len(by_sp[sp])))
+        table = [["measure", "n", "min", "p5", "median", "p95", "max", "warning", "critical", "fail", "W/C/F"]
+                 + (["problems flagged", "problem values"] if expected else [])]
+        for m in mnames:
+            if a.measures and not re.search(a.measures, m):
+                continue
+            vals, lv, flag, pvals = [], defaultdict(int), [0, 0], []
+            for r, meas in by_sp[sp]:
+                obs, st = meas.get(m, (None, ""))
+                v = _num(obs)
+                if v is None:
+                    continue
+                if expected and r.get("expected") not in ("clean",):
+                    if r.get("expected") and r.get("expected") != "unknown":
+                        flag[1] += 1
+                        if st in ("WARNING", "CRITICAL", "FAIL"):
+                            flag[0] += 1
+                        pvals.append(v)
+                    continue
+                vals.append(v)
+                lv[st] += 1
+            if not vals and not flag[1]:
+                continue
+            vals.sort()
+            t = thresholds.get(sp, {}).get(m, {})
+            f = _fmt_num
+            line = [m, len(vals), f(vals[0] if vals else None), f(_quantile(vals, .05)), f(_quantile(vals, .5)),
+                    f(_quantile(vals, .95)), f(vals[-1] if vals else None),
+                    t.get("warning", ""), t.get("critical", ""), t.get("fail", ""),
+                    "%d/%d/%d" % (lv["WARNING"], lv["CRITICAL"], lv["FAIL"])]
+            if expected:
+                line.append("%d of %d" % tuple(flag) if flag[1] else "")
+                line.append(",".join(_fmt_num(v) for v in sorted(pvals)[:6]) + (",..." if len(pvals) > 6 else ""))
+            table.append(line)
+        if len(table) == 1:
+            w("  (no values%s)\n" % (" from samples listed as clean -- add them to --expected, or run without it"
+                                     if expected else ""))
+        else:
+            _print_table(w, table)
+
+    # ── issues across runs ──────────────────────────────────────────────────
+    if issue_groups:
+        w("\n== Issues across runs (numbers replaced by #), most frequent first\n")
+        for (blk, txt), g in sorted(issue_groups.items(), key=lambda kv: -kv[1]["n"])[: a.top]:
+            w("%5d  %-8s %-14s %s\n" % (g["n"], g["level"], blk, txt[:160]))
+            w("%30s e.g. %s\n" % ("", ", ".join(g["samples"][:4])))
+    if a.tsv:
+        w("\nTable: %s (%d rows, one column per measure and one for its status)\n" % (a.tsv, len(rows)))
+    return 0
+
+
+def _fmt_num(x):
+    if x is None:
+        return ""
+    if abs(x) >= 1000:
+        return "%d" % round(x)
+    return "%g" % float("%.4g" % x)
+
+
+def _print_table(w, table):
+    widths = [max(len(str(x)) for x in col) for col in zip(*table)]
+    for line in table:
+        w("  ".join(str(x).ljust(wd) for x, wd in zip(line, widths)).rstrip() + "\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1012,7 +1323,8 @@ def main(argv=None):
                "  eurlc-wgs-inspect inventory /data/run192/eurlc-wgs --md5 --manifest run192.manifest.tsv\n"
                "  eurlc-wgs-inspect inventory --from-listing listing.txt\n"
                "  eurlc-wgs-inspect extract /data/run192/eurlc-wgs --samples 23SCA11,PT43-10 -o run192_review\n"
-               "  eurlc-wgs-inspect mixture /data/run*/eurlc-wgs --tsv mixture.tsv --threshold 30\n",
+               "  eurlc-wgs-inspect mixture /data/run*/eurlc-wgs --tsv mixture.tsv --threshold 30\n"
+               "  eurlc-wgs-inspect summarize /data/run*/eurlc-wgs --expected known.tsv --tsv all_samples.tsv\n",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
     sub = p.add_subparsers(dest="cmd")
@@ -1043,6 +1355,18 @@ def main(argv=None):
                    help="replace sample names (S01, S02 …) and folder paths; the key is written next to the package")
     e.add_argument("--max-file-mb", type=float, default=20, help="leave out files larger than this")
 
+    sm = sub.add_parser("summarize", help="every sample of one or more runs: QC measures, spread per species, issues",
+                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    sm.add_argument("folders", nargs="+", help="output folders, or folders above them (searched for data/rundata.json)")
+    sm.add_argument("--tsv", metavar="FILE", help="write one row per sample, one column per measure, to this file")
+    sm.add_argument("--expected", metavar="FILE",
+                    help="what is known about the samples: run<TAB>sample<TAB>expected[<TAB>note], expected = "
+                         "clean, contaminated, low_quality, mixed, ... (run * = any run)")
+    sm.add_argument("--species", metavar="REGEX", help="only samples of matching species")
+    sm.add_argument("--measures", metavar="REGEX", help="only matching measures in the spread tables")
+    sm.add_argument("--min-samples", type=int, default=1, help="leave out species with fewer samples")
+    sm.add_argument("--top", type=int, default=40, help="issue groups to show")
+
     x = sub.add_parser("mixture", help="the intra-species mixture metric per sample, and per species",
                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     x.add_argument("folders", nargs="+", help="output folders, or folders above them (searched for *.remap_qc.json)")
@@ -1057,6 +1381,8 @@ def main(argv=None):
         return cmd_extract(a)
     if a.cmd == "mixture":
         return cmd_mixture(a)
+    if a.cmd == "summarize":
+        return cmd_summarize(a)
     p.print_help()
     return 2
 

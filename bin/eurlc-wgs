@@ -128,6 +128,10 @@ our $MAIN_PID       = $$;                # forked children must not write the EN
 our @S_RUN_ISSUES   = ();                # every ERROR/WARNING logged, for the end-of-run summary
 our $S_ISSUES_PAUSED = 0;                # 1 while re-printing already collected messages
 our @S_TOOLS_NOT_RUN = ();               # filled by report_species_tools_not_run()
+our %S_CGMLST_NO_SCHEMA = ();            # species => [sample names] without an installed cgMLST schema
+our @S_DATA_ROOTS_OLD = ();              # data folders recorded by earlier runs (log/input_dir.txt), oldest first
+our %S_RELOCATED = ();                   # recorded raw file path => where it was found now (moved analysis)
+our %S_RAW_MISSING = ();                 # sample base => [recorded raw paths not found now]
 our %S_CLEANUP_REMOVED = ();
 our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
 our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
@@ -1004,8 +1008,8 @@ my %QC_MEASURE_DEF = (
     },
     qscore_raw_n_rate => {
         category => 'qscore',
-        path     => [qw(qscore raw n_rate)],
-        label    => 'Raw read N rate',
+        path     => [qw(qscore raw n_pct)],      # was n_rate, which is never filled
+        label    => 'Raw read N bases (%)',
     },
     qscore_raw_q30_rate => {
         category => 'qscore',
@@ -1045,8 +1049,8 @@ my %QC_MEASURE_DEF = (
     },
     qscore_trimmed_adapters => {
         category => 'qscore',
-        path     => [qw(qscore trimmed adapters)],
-        label    => 'Trimmed read adapter content',
+        path     => [qw(qscore trimmed adapter_pct)],   # was adapters, which is never filled
+        label    => 'Trimmed read adapter content (%)',
     },
     qscore_trimmed_average_read_length => {
         category => 'qscore',
@@ -1132,7 +1136,7 @@ my %QC_MEASURE_DEF = (
     },
     typing_cgmlst_paralogous => {
         category => 'typing',
-        path     => [qw(typing cgmlst paralogous)],
+        path     => [qw(typing cgmlst_paralogous)],   # set with cgmlst_call_rate, same schema
         label    => 'cgMLST paralogous loci',
     },
 );
@@ -2353,13 +2357,28 @@ our @LATER_ARG_NAMES = qw(
                  || ( $args{overwrite} // "" ) =~ /^(resume|extend)$/i;
     if ( defined $S_OUTDIR_ARG && !exists $args{datadir} && $resumeish ) {
         my $f = "$S_OUTDIR_ARG/log/input_dir.txt";
-        if ( -f $f && open( my $fh, '<', $f ) ) {
-            chomp( my $saved = <$fh> // "" );
-            close $fh;
-            if ( $saved ne "" && -d $saved && $saved ne peekdir("in") ) {
-                setdir("in", $saved);
-                log_message("NOTICE: Resume: data folder of this analysis is [$saved] (from log/input_dir.txt)");
+        my @saved = read_input_dir_history($f);
+        my $out_abs = eval { abs_path($S_OUTDIR_ARG) } // $S_OUTDIR_ARG;
+        if ( basename($out_abs) eq $S_DEFAULT_OUT_NAME && -d dirname($out_abs) ) {
+            # The usual layout: the output folder eurlc-wgs/ inside the data
+            # folder. A moved or copied analysis (the whole data folder) then
+            # reads the raw files next to its own output folder -- also when
+            # the original is still where it was.
+            my $here = dirname($out_abs);
+            if ( $here ne peekdir("in") ) {
+                setdir("in", $here);
+                log_message("NOTICE: Resume: data folder of this analysis is [$here] (the folder the output folder lies in"
+                          . ( @saved && $saved[-1] ne $here ? "; recorded as [$saved[-1]]" : "" ) . ")");
             }
+        }
+        elsif ( my ($found) = grep { -d $_ } reverse @saved ) {
+            if ( $found ne peekdir("in") ) {
+                setdir("in", $found);
+                log_message("NOTICE: Resume: data folder of this analysis is [$found] (from log/input_dir.txt)");
+            }
+        }
+        elsif ( @saved ) {
+            log_message("WARNING: Resume: the recorded data folder [$saved[-1]] is not there -- give datadir= for the folder that holds the raw data", "yellow");
         }
     }
     set_output_paths( $S_OUTDIR_ARG // ( peekdir("in") . "/$S_DEFAULT_OUT_NAME" ) );
@@ -3602,9 +3621,19 @@ getdir("out,control");  # creates out/control/  -- control channel spool dir
 initiate_logfile();
 # Which data folder these results belong to (also lets "outdir=X --resume"
 # find the data again; see "Output folder").
-if ( open( my $ifh, '>', getdir("out,log") . "/input_dir.txt" ) ) {
-    print {$ifh} abs_path( peekdir("in") ) . "\n";
-    close $ifh;
+# One line per data folder this analysis has been run from, oldest first:
+# the first line is where the raw data was when the analysis was made, the
+# last where it is now (a moved or copied analysis adds a line).
+{
+    my $f = getdir("out,log") . "/input_dir.txt";
+    @S_DATA_ROOTS_OLD = is_resume_mode() ? read_input_dir_history($f) : ();
+    my $now = abs_path( peekdir("in") );
+    my @lines = @S_DATA_ROOTS_OLD;
+    push @lines, $now unless @lines && $lines[-1] eq $now;
+    if ( open( my $ifh, '>', $f ) ) {
+        print {$ifh} "$_\n" for @lines;
+        close $ifh;
+    }
 }
 if ( $S_RUN_MODE eq "resumed" ) {
     # Keep the program/database/config logs of the earlier run: they are
@@ -3809,18 +3838,33 @@ sub parse_md5_rawdata_results {
         return {};
     };
 
+    # The file was written with the paths as they were spelled then; on a
+    # --resume the same files may be reached by another path (a symlink, a
+    # different mount point). Match on the path, then on the real path, then
+    # on the file name -- the file holds only this sample's files.
+    my $real = sub { my $p = shift; return "" if !defined $p || $p eq ""; return eval { abs_path($p) } // $p; };
+    my %known_real = map { $_ => $real->($known{$_}) } keys %known;
+    my %known_name = map { $_ => ( $known{$_} ne "" ? basename($known{$_}) : "" ) } keys %known;
+    my @lines;
     while (my $line = <$fh>) {
         chomp $line;
         next unless $line =~ /^([0-9a-f]{32})\s+(.+)$/i;
-        my ($digest, $path) = ($1, $2);
-        for my $key (keys %known) {
-            if ($known{$key} ne "" && $path eq $known{$key}) {
-                $md5{$key} = $digest;
-                last;
+        push @lines, [ $1, $2 ];
+    }
+    close $fh;
+    for my $how (
+        sub { my ($k, $p) = @_; return $p eq $known{$k} },
+        sub { my ($k, $p) = @_; my $r = $real->($p); return $r ne "" && $r eq $known_real{$k} },
+        sub { my ($k, $p) = @_; return basename($p) eq $known_name{$k} },
+    ) {
+        for my $l (@lines) {
+            my ($digest, $path) = @$l;
+            for my $key (keys %known) {
+                next if $known{$key} eq "" || exists $md5{$key};
+                if ($how->($key, $path)) { $md5{$key} = $digest; last; }
             }
         }
     }
-    close $fh;
     return \%md5;
 }
 
@@ -5209,6 +5253,18 @@ sub resolve_auto_enabled {
     log_message("NOTICE: Species scope: " . ( @scope ? join(", ", @scope) : "(none)" )
               . ( @all_on ? " -- species tools on: " . join(", ", @all_on) : " -- no species tools on" ));
     log_message("INFO: Species tools off (species not in scope): " . join(", ", @off)) if @off;
+}
+
+# The install command for the cgMLST schema of a species EURLC-WGS knows a
+# schema for, or "" for other species.
+sub cgmlst_install_hint {
+    my ($species) = @_;
+    return "" unless defined $species;
+    return "eurlc-wgs --install-efsa-schemas=campylobacter" if $species =~ /^Campylobacter (jejuni|coli)\b/;
+    return "eurlc-wgs --install-efsa-schemas=salmonella"    if $species =~ /^Salmonella\b/;
+    return "eurlc-wgs --install-efsa-schemas=ecoli"         if $species =~ /^(Escherichia coli|Shigella)\b/;
+    return "eurlc-wgs --install-efsa-schemas=listeria"      if $species =~ /^Listeria monocytogenes\b/;
+    return "";
 }
 
 # Largest genus other than the sample's own, from a Kraken2/Bracken result
@@ -8211,13 +8267,19 @@ sub postprocess_kraken2 {
         @species_hits = @{ $R_samples->[$samplenr]{results}{$runstep_name}{kraken2}{species} // [] };
     }
 
+    # Close relatives Kraken cannot separate from the sample's species are not
+    # counted: crossreactive_species (e.g. C. coli for C. jejuni) and every
+    # species of a crossreactive_genus (e.g. Shigella for E. coli -- before,
+    # only the genus level skipped it, so "Shigella flexneri 12 %" could fail
+    # an E. coli sample on species contamination). Read like other species
+    # settings: species, then genus section, then default.
     my %crossreactive_species = ();
-    if ($species_result ne "n/a" && exists $R_cfg->{species}{$species_result}{crossreactive_species}) {
-        my $cross = $R_cfg->{species}{$species_result}{crossreactive_species} // "";
-        foreach my $name (split /\s*,\s*/, $cross) {
-            next if !defined $name || $name eq "";
-            $crossreactive_species{lc $name} = 1;
-        }
+    my %crossreactive_genus   = ();
+    if ($species_result ne "n/a") {
+        my $cross = get_config_value_for_species($species_result, 'crossreactive_species', "") // "";
+        $crossreactive_species{lc $_} = 1 for grep { defined $_ && $_ ne "" } split /\s*,\s*/, $cross;
+        my $cg = get_config_value_for_species($species_result, 'crossreactive_genus', "") // "";
+        $crossreactive_genus{lc $_} = 1 for grep { defined $_ && $_ ne "" } split /\s*,\s*/, $cg;
     }
 
     my $species_result2         = "n/a";
@@ -8234,6 +8296,8 @@ sub postprocess_kraken2 {
 
         # skip configured cross-reactive species
         next if exists $crossreactive_species{lc $candidate_name};
+        my ($candidate_genus) = $candidate_name =~ /^(\S+)/;
+        next if defined $candidate_genus && exists $crossreactive_genus{lc $candidate_genus};
 
         # skip generic "Genus sp." style candidate for same genus
         if ($genus_result ne "n/a" && $candidate_name =~ /^\Q$genus_result\E\s+sp\./i) {
@@ -10290,6 +10354,19 @@ sub postprocess_remap {
         $R_samples->[$samplenr]{main_results}{contamination}{mixed_sites_isolated} = $mix->{mixed_sites_isolated};
         $R_samples->[$samplenr]{main_results}{contamination}{mixed_minoraf_median} = $mix->{mixed_minoraf_median};
         $R_samples->[$samplenr]{main_results}{contamination}{mixed_method}         = "remap, method $mix->{method_version}";
+    }
+
+    # The re-mapping values main_results.assembly has places for (they were
+    # never filled in): for the reports, a GUI and eurlc-wgs-inspect.
+    {
+        my $A = $R_samples->[$samplenr]{main_results}{assembly};
+        my $M = $result_ref->{mapping} // {};
+        $A->{remap_rate}        = $M->{reads_mapped_pct}    // "n/a";
+        $A->{remap_insert_size} = $M->{insert_size_average} // "n/a";
+        $A->{remap_mean_depth}  = $cov->{depth_mean}        // "n/a";
+        $A->{breadth_10x}       = $cov->{breadth_10x_pct}   // "n/a";
+        $A->{breadth_20x}       = $cov->{breadth_20x_pct}   // "n/a";
+        $A->{breadth_30x}       = $cov->{breadth_30x_pct}   // "n/a";
     }
 
     my $fmt = sub {
@@ -16199,6 +16276,7 @@ sub postprocess_chewbbaca {
                        ) {
                            $R_typing->{cgmlst_call_rate} = $new_call_rate;
                            $R_typing->{cgmlst_call_rate_schema} = $schema_dirname;
+                           $R_typing->{cgmlst_paralogous} = $rec->{paralogous} // $rec->{niph_total} // "n/a";   # same schema as the call rate
                        }
                    }
 
@@ -17198,6 +17276,14 @@ sub preprocess_chewbbaca_per_sample {
 
     if (!@schemas) {
         log_message("NOTICE: Sample $sample_name: no chewBBACA schema configured for species [$species], skipping");
+        # For the species EURLC-WGS has schemas for, a missing schema is
+        # worth saying out loud: it often means the schema was removed or
+        # never installed, and on --resume earlier cgMLST results of the
+        # sample are then no longer used.
+        if (cgmlst_install_hint($species)) {
+            push @{ $S_CGMLST_NO_SCHEMA{$species} }, $sample_name;
+            set_runtime_issue($samplenr, "warning", "cgMLST not run: no schema installed for $species");
+        }
         return "";
     }
 
@@ -17395,6 +17481,7 @@ sub postprocess_chewbbaca_per_sample {
                  || $new_call_rate < $R_typing->{cgmlst_call_rate} ) {
                 $R_typing->{cgmlst_call_rate} = $new_call_rate;
                 $R_typing->{cgmlst_call_rate_schema} = $s->{schema_dirname};
+                $R_typing->{cgmlst_paralogous} = $rec->{paralogous} // $rec->{niph_total} // "n/a";   # same schema as the call rate
             }
         }
 
@@ -17611,6 +17698,7 @@ sub preprocess_chewbbaca_regenerate_per_batch {
                          || $new_call_rate < $R_typing->{cgmlst_call_rate} ) {
                         $R_typing->{cgmlst_call_rate} = $new_call_rate;
                         $R_typing->{cgmlst_call_rate_schema} = $schema_dirname;
+                        $R_typing->{cgmlst_paralogous} = $rec->{paralogous} // $rec->{niph_total} // "n/a";   # same schema as the call rate
                     }
                 }
             }
@@ -17995,6 +18083,12 @@ sub plan_read_regeneration {
             $need{$_} //= $name for @keys;
         }
         next unless %need;
+        if ( my $miss = $S_RAW_MISSING{ $R_samples->[$i]{base} // $R_samples->[$i]{name} } ) {
+            my $why = join(", ", map { "$_ (for $need{$_})" } sort keys %need);
+            log_message("WARNING: Sample " . ( $R_samples->[$i]{name} // $i ) . ": its reads are needed again ($why), "
+                      . "but the raw data is not found [$miss->[0]] -- those steps will fail. Give datadir= for the folder that holds the data.", "red");
+            set_runtime_issue($i, "warning", "Raw data not found on resume: steps that need the reads again cannot run");
+        }
         # downsampled reads are made from the trimmed ones
         $need{trimmed_fastq} //= "downsampling" if $need{trimmed_downsampled_fastq};
         my @what;
@@ -18109,17 +18203,27 @@ log_message("NOTICE: collecting sample information.");
         # earlier run may follow older naming rules (B28).
         my $files_of = sub { my ($l) = @_; my @f = split /\t/, $l, -1; my $nf = @f;
                              return grep { $_ ne "" && m{/} } @f[ $nf > 2 ? ( 0, 1, 4 .. $nf - 1 ) : ( 0 ) ]; };
+        # Compared relative to the data folder, so that the files of a moved
+        # analysis (the recorded paths are those of the old place) are not
+        # taken for new ones.
+        my $now_root = eval { abs_path( getdir("in") ) } // getdir("in");
+        my @roots = sort { length($b) <=> length($a) } ( @S_DATA_ROOTS_OLD, $now_root );
+        my $rel = sub {
+            my ($p) = @_;
+            for my $r (@roots) { return substr( $p, length($r) + 1 ) if index( $p, "$r/" ) == 0; }
+            return $p;
+        };
         my %saved;
         for my $f ($filelist_path_fastq, $filelist_path_fasta) {
             open(my $in, '<', $f) or next;
-            while (my $l = <$in>) { chomp $l; next if $l eq ""; $saved{$_} = 1 for $files_of->($l); }
+            while (my $l = <$in>) { chomp $l; next if $l eq ""; $saved{ $rel->($_) } = 1 for $files_of->($l); }
             close $in;
         }
         my @now = map { $files_of->($_) } (
             ( $R_cfg->{"general"}{"fastq"} ? do { local $S_QUIET_SAMPLE_LIST = 1; prepare_fastq_files(getdir("in"), $recursive_flag) } : () ),
             ( $R_cfg->{"general"}{"fasta"} ? prepare_fasta_files(getdir("in"), $recursive_flag) : () ),
         );
-        my @new = grep { !$saved{$_} } @now;
+        my @new = grep { !$saved{ $rel->($_) } } @now;
         if (@new) {
             my $n = scalar @new;
             my @show = @new[0 .. ($n > 10 ? 9 : $n - 1)];
@@ -18136,6 +18240,7 @@ $rundata{stats}{total} //= 0;
 
 read_fastq_filelist(\%rundata);
 read_fasta_filelist(\%rundata);
+check_moved_inputs(\%rundata) if is_resume_mode();
 
 log_message(
     "NOTICE: Found $rundata{stats}{total} samples " .
@@ -29695,8 +29800,14 @@ sub read_fastq_filelist {
             $_ = "" unless defined $_;
             s/^\s+|\s+$//g;
         }
+        # A moved analysis: find the raw files at the data folder's new place
+        # (the sample name below is made from the recorded paths, as before).
+        my ($R1_rec, $R2_rec) = ($R1, $R2);
+        $R1 = resolve_moved_input($R1);
+        $R2 = resolve_moved_input($R2);
+        @more = map { resolve_moved_input($_) } @more;
 
-        $base = unique_basename($run_data, $base, $R1, $R2) // next;
+        $base = unique_basename($run_data, $base, $R1_rec, $R2_rec) // next;
 
         my $sample = new_sample_struct($base);
 
@@ -29707,7 +29818,12 @@ sub read_fastq_filelist {
             my @src_R1 = ( $R1, map { $more[ 2 * $_ ] }     0 .. int( @more / 2 ) - 1 );
             my @src_R2 = ( $R2, map { $more[ 2 * $_ + 1 ] } 0 .. int( @more / 2 ) - 1 );
             my @missing = grep { $_ ne "" && !-f $_ } @src_R1, @src_R2;
-            if (@missing) {
+            if (@missing && is_resume_mode()) {
+                # Resume: the sample stays as it was; only steps that need the
+                # raw reads again are affected (see plan_read_regeneration).
+                push @{ $S_RAW_MISSING{$base} }, @missing;
+            }
+            elsif (@missing) {
                 log_message("WARNING: Sample $base: lane file(s) missing [" . join( ", ", @missing ) . "] -- sample skipped", "red");
                 next;
             }
@@ -29739,6 +29855,14 @@ sub read_fastq_filelist {
         my $has_R1 = ($R1 ne "" && -f $R1) ? 1 : 0;
         my $has_R2 = ($R2 ne "" && -f $R2) ? 1 : 0;
         my $R2_given = ($R2 ne "") ? 1 : 0;
+
+        # Resume: the sample keeps the type of the earlier run, also when
+        # its raw files cannot be found now -- a missing file must not turn
+        # a paired sample into a single-read one, or drop it.
+        if (is_resume_mode() && $R1 ne "" && (!$has_R1 || ($R2_given && !$has_R2))) {
+            push @{ $S_RAW_MISSING{$base} }, grep { $_ ne "" && !-f $_ } ($R1, $R2);
+            ($has_R1, $has_R2) = (1, $R2_given);
+        }
 
         if ($has_R1 && $has_R2) {
             $sample->{type} = "PE";
@@ -29830,9 +29954,14 @@ sub read_fasta_filelist {
             s/^\s+|\s+$//g;
         }
 
-        $base = unique_basename($run_data, $base, $fasta, "") // next;
+        my $fasta_rec = $fasta;
+        $fasta = resolve_moved_input($fasta);
+        $base = unique_basename($run_data, $base, $fasta_rec, "") // next;
 
-        unless ($fasta ne "" && -f $fasta) {
+        if ($fasta ne "" && !-f $fasta && is_resume_mode()) {
+            push @{ $S_RAW_MISSING{$base} }, $fasta;
+        }
+        elsif (!($fasta ne "" && -f $fasta)) {
             log_message("WARNING: Sample $base: FASTA missing [$fasta]", "red");
             next;
         }
@@ -30281,6 +30410,17 @@ sub print_run_summary {
         $add->("    (or add the species to species_scope in the configuration to always include it)");
     }
 
+    # cgMLST not run: no schema installed for a species that has one
+    if (%S_CGMLST_NO_SCHEMA) {
+        $add->(sprintf( "  %-12s %s", "No cgMLST:", "no schema installed for these species:" ), "yellow");
+        for my $sp (sort keys %S_CGMLST_NO_SCHEMA) {
+            my @s = @{ $S_CGMLST_NO_SCHEMA{$sp} };
+            my $list = @s > 8 ? join(", ", @s[0..7]) . ", ... +" . (@s - 8) : join(", ", @s);
+            $add->("    $sp (" . scalar(@s) . "): $list", "yellow");
+            $add->("      install: " . cgmlst_install_hint($sp) . "   then: " . _suggest_command());
+        }
+    }
+
     # Where to look
     my $out = eval { abs_path( getdir("out") ) } // "";
     if ( $out ne "" ) {
@@ -30295,7 +30435,7 @@ sub print_run_summary {
     my ($verdict, $vcol) =
         $exit_code !~ /^[035]$/ ? ( "STOPPED (exit code $exit_code)", "red" )
       : $problems                          ? ( "FINISHED WITH PROBLEMS -- check the errors / abandoned / FAIL samples above", "red" )
-      : ( $n_warn || $qc{WARNING} || $qc{CRITICAL} || @S_TOOLS_NOT_RUN )
+      : ( $n_warn || $qc{WARNING} || $qc{CRITICAL} || @S_TOOLS_NOT_RUN || %S_CGMLST_NO_SCHEMA )
                                            ? ( "FINISHED WITH WARNINGS -- see above", "yellow" )
       :                                      ( "FINISHED OK", "green" );
     $S_RUN_RESULT = $vcol eq "green" ? "ok" : $vcol eq "yellow" ? "warnings" : "problems";
@@ -35945,6 +36085,109 @@ sub note_if_reused {
     emit_runstep_event('runstep_finished', $i, $name, status => 'reused');
 }
 
+###################################################################################################
+## Moved or copied analyses (resume)
+##
+## log/filelist_fastq.txt and filelist_fasta.txt keep the raw file paths as
+## they were when the analysis was made, and are never rewritten: together
+## with the MD5 sums in results/qc/stage1_rawdata/md5/ they document which
+## files were analysed. When an analysis has been moved or copied (normally
+## the whole data folder, with eurlc-wgs/ in it), a resumed run finds each
+## file at the data folder's new place, checks it against its recorded MD5,
+## and records the move (log, rundata provenance, report banner).
+
+## The data folders in log/input_dir.txt, oldest first.
+sub read_input_dir_history {
+    my ($f) = @_;
+    my @l;
+    if ( -f $f && open( my $fh, '<', $f ) ) {
+        while ( my $x = <$fh> ) { chomp $x; $x =~ s/^\s+|\s+$//g; push @l, $x if $x ne ""; }
+        close $fh;
+    }
+    return @l;
+}
+
+## A recorded input path -> the path to read now. Unchanged when the file is
+## there or this is not a resume. Otherwise: the same path relative to an
+## earlier data folder, under the current one; then the same file name
+## directly in the current one. Records what it found (%S_RELOCATED).
+sub resolve_moved_input {
+    my ($path) = @_;
+    return $path if !defined $path || $path eq "" || -f $path || !is_resume_mode();
+    my $now = eval { abs_path( peekdir("in") ) } // peekdir("in");
+    for my $old ( sort { length($b) <=> length($a) } @S_DATA_ROOTS_OLD ) {
+        next if $old eq $now;
+        if ( index( $path, "$old/" ) == 0 ) {
+            my $cand = $now . substr( $path, length $old );
+            if ( -f $cand ) { $S_RELOCATED{$path} = $cand; return $cand; }
+        }
+    }
+    my $cand = "$now/" . basename($path);
+    if ( -f $cand ) { $S_RELOCATED{$path} = $cand; return $cand; }
+    return $path;
+}
+
+## After the sample lists are read on a resume: check every moved file
+## against the MD5 recorded when it was analysed (a mismatch stops the run),
+## report raw files that are not found, and record the move.
+sub check_moved_inputs {
+    my ($run_data) = @_;
+    if (%S_RELOCATED) {
+        my $md5dir = getdir("out") . "/results/qc/stage1_rawdata/md5";
+        my %recorded;   # file name => md5
+        if ( opendir( my $dh, $md5dir ) ) {
+            for my $f ( grep { /\.txt$/ } readdir $dh ) {
+                open( my $fh, '<', "$md5dir/$f" ) or next;
+                while ( my $l = <$fh> ) {
+                    $recorded{ basename($2) } = lc $1 if $l =~ /^([0-9a-f]{32})\s+(.+?)\s*$/i;
+                }
+                close $fh;
+            }
+            closedir $dh;
+        }
+        my $n = scalar keys %S_RELOCATED;
+        log_message("NOTICE: Resume: the data folder has moved -- $n raw file(s) found at the new place; checking their MD5 sums");
+        require Digest::MD5;
+        my ( @bad, @unverified );
+        my $ok = 0;
+        for my $old ( sort keys %S_RELOCATED ) {
+            my $new = $S_RELOCATED{$old};
+            my $want = $recorded{ basename($old) };
+            unless ( defined $want ) { push @unverified, $new; next; }
+            my $got = "";
+            if ( open( my $fh, '<', $new ) ) {
+                binmode $fh;
+                $got = Digest::MD5->new->addfile($fh)->hexdigest;
+                close $fh;
+            }
+            if ( $got eq $want ) { $ok++; } else { push @bad, "$new (MD5 $got, recorded $want for $old)"; }
+        }
+        if (@bad) {
+            graceful_die("Resume: " . scalar(@bad) . " raw file(s) at the new place are not the files that were analysed:\n  "
+                       . join("\n  ", @bad)
+                       . "\nPut the original files there, or give datadir= for the folder that holds them.");
+        }
+        log_message("WARNING: Resume: " . scalar(@unverified) . " moved raw file(s) have no recorded MD5 and were matched by name only: "
+                  . join(", ", map { basename($_) } @unverified), "yellow") if @unverified;
+        my %from = map { my $o = $_; my ($r) = grep { index( $o, "$_/" ) == 0 } @S_DATA_ROOTS_OLD; ( ( $r // dirname($o) ) => 1 ) } keys %S_RELOCATED;
+        my $to = eval { abs_path( peekdir("in") ) } // peekdir("in");
+        log_message("NOTICE: Resume: raw data read from [$to] (moved from [" . join("], [", sort keys %from) . "]): "
+                  . "$ok file(s) MD5-verified" . ( @unverified ? ", " . scalar(@unverified) . " by name only" : "" ), "green");
+        $rundata{provenance}{run}{data_relocation} = {
+            from => [ sort keys %from ], to => $to, files => $n,
+            md5_verified => $ok, name_only => scalar(@unverified), run_number => $S_RUN_NUMBER,
+        };
+    }
+    if (%S_RAW_MISSING) {
+        my @s = sort keys %S_RAW_MISSING;
+        log_message("WARNING: Resume: the raw data of " . scalar(@s) . " sample(s) was not found ("
+                  . join(", ", @s[0 .. ($#s < 7 ? $#s : 7)]) . ( @s > 8 ? ", ..." : "" ) . "). "
+                  . "Steps that already have results are not affected; a step that needs the reads again will fail. "
+                  . "First missing file: $S_RAW_MISSING{$s[0]}[0] -- give datadir= for the folder that holds the data.", "yellow");
+        $rundata{provenance}{run}{raw_missing} = { map { $_ => $S_RAW_MISSING{$_} } @s };
+    }
+}
+
 # Banner for the main HTML report (resumed runs only).
 sub get_resume_html_for_report {
     return "" unless $S_RUN_MODE eq "resumed";
@@ -35962,6 +36205,11 @@ sub get_resume_html_for_report {
         ? "Results reused from earlier run(s) for $n_samples sample(s): " . encode_entities( join(", ", sort keys %steps) )
           . ". Program and database versions of earlier runs: log/previous_runs/."
         : "No earlier results were reused.";
+    if ( my $mv = $rundata{provenance}{run}{data_relocation} ) {
+        $detail .= "<br>The analysis has been moved: raw data read from <b>" . encode_entities( $mv->{to} // "" )
+                 . "</b> (analysed at " . encode_entities( join(", ", @{ $mv->{from} // [] }) ) . "); "
+                 . ( $mv->{md5_verified} // 0 ) . " of " . ( $mv->{files} // 0 ) . " file(s) checked against their recorded MD5.";
+    }
     return <<"HTML";
 <div class="seal-banner seal-warning">
   <span class="seal-icon">&#8635;</span>

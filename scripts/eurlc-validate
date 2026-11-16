@@ -1,0 +1,642 @@
+#!/usr/bin/env python3
+"""eurlc-validate -- compare a pipeline's results with an EURL-Campylobacter
+WGS validation dataset (D1, D2, D3, ...).
+
+Pipeline-neutral: it reads the dataset's own files and one table of observed
+results in a simple format (docs/eurlc-validate.md), plus optionally cgMLST
+distance matrices and the MD5 sums of the FASTQ files that were analysed.
+
+    eurlc-validate --dataset <dataset folder> --observed observed.tsv \\
+                   [--distances matrix.tsv[:threshold] ...] [--cluster-threshold N] \\
+                   [--fastq-md5 md5.txt | --fastq-dir <folder>] [--out <folder>]
+
+The dataset folder holds <ID>_validation_profile.yml and the expected-results
+file the profile names (and, optionally, <ID>_file_manifest.tsv). Exit code
+0 when every required check agrees, 1 when one does not, 2 on a usage error.
+
+Standard library only (Python >= 3.7). GPL-3.0-or-later. Part of EURLC-WGS.
+"""
+
+import argparse
+import csv
+import datetime
+import glob
+import hashlib
+import html
+import json
+import os
+import re
+import sys
+from collections import defaultdict, OrderedDict
+
+VERSION = "1.0.0"
+NA = {"", "n/a", "na", "none", "-", "nan"}
+
+# Observed QC status -> reportable class (EURL convention: PASS and WARNING
+# are reportable, WARNING with a note; CRITICAL and FAIL are not).
+STATUS_CLASS = {"PASS": "PASS", "WARNING": "PASS", "CRITICAL": "FAIL", "FAIL": "FAIL"}
+
+
+def die(msg, code=2):
+    sys.stderr.write("eurlc-validate: %s\n" % msg)
+    sys.exit(code)
+
+
+def is_na(v, extra=()):
+    return v is None or str(v).strip().lower() in NA or str(v).strip() in extra
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A small YAML reader: enough for the validation profiles (nested mappings,
+# lists of scalars, quoted scalars, folded ">" blocks). PyYAML is used when
+# it is installed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _scalar(s):
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"":
+        return s[1:-1]
+    low = s.lower()
+    if low in ("true", "yes"):
+        return True if low == "true" else "yes"
+    if low == "false":
+        return False
+    if re.match(r"^-?\d+$", s):
+        return int(s)
+    if re.match(r"^-?\d+\.\d*$", s):
+        return float(s)
+    return s
+
+
+def read_yaml(path):
+    try:
+        import yaml  # noqa
+        with open(path, encoding="utf-8") as fh:
+            return yaml.safe_load(fh)
+    except ImportError:
+        pass
+    lines = []
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            lines.append(raw.rstrip("\n"))
+    pos = [0]
+
+    def indent(l):
+        return len(l) - len(l.lstrip(" "))
+
+    def block(ind):
+        if pos[0] >= len(lines):
+            return None
+        first = lines[pos[0]]
+        if first.lstrip().startswith("- "):
+            out = []
+            while pos[0] < len(lines) and indent(lines[pos[0]]) == ind and lines[pos[0]].lstrip().startswith("- "):
+                out.append(_scalar(lines[pos[0]].lstrip()[2:]))
+                pos[0] += 1
+            return out
+        out = OrderedDict()
+        while pos[0] < len(lines) and indent(lines[pos[0]]) == ind:
+            l = lines[pos[0]].strip()
+            m = re.match(r"^([^:]+):\s*(.*)$", l)
+            if not m:
+                pos[0] += 1
+                continue
+            key, val = m.group(1).strip(), m.group(2)
+            pos[0] += 1
+            if val in (">", "|", ">-", "|-"):
+                parts = []
+                while pos[0] < len(lines) and indent(lines[pos[0]]) > ind:
+                    parts.append(lines[pos[0]].strip())
+                    pos[0] += 1
+                out[key] = (" " if val.startswith(">") else "\n").join(parts)
+            elif val == "":
+                if pos[0] < len(lines) and indent(lines[pos[0]]) > ind:
+                    out[key] = block(indent(lines[pos[0]]))
+                elif pos[0] < len(lines) and indent(lines[pos[0]]) == ind and lines[pos[0]].lstrip().startswith("- "):
+                    out[key] = block(ind)
+                else:
+                    out[key] = None
+            else:
+                out[key] = _scalar(val)
+        return out
+
+    return block(0) if lines else {}
+
+
+def read_tsv(path):
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        return [{k.strip(): (v or "").strip() for k, v in r.items() if k is not None}
+                for r in csv.DictReader(fh, delimiter="\t")]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Normalisation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def norm_st(v):
+    if is_na(v):
+        return ""
+    m = re.match(r"^\s*(?:ST)?\s*(\d+)\s*$", str(v), re.I)
+    return m.group(1) if m else str(v).strip()
+
+
+def parse_alleles(v):
+    """'aspA(2);glnA(1);...' or 'aspA:2;glnA:1' -> {gene: allele}"""
+    out = {}
+    if is_na(v):
+        return out
+    for part in re.split(r"[;,]\s*", str(v).strip()):
+        m = re.match(r"^\s*([A-Za-z0-9_]+)\s*[(:=]\s*([^)\s]+)\s*\)?\s*$", part)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def norm_species(v):
+    return re.sub(r"\s+", " ", str(v or "").strip()).lower()
+
+
+def split_list(v):
+    if is_na(v):
+        return []
+    return [x.strip().lower() for x in re.split(r"[;,]", str(v)) if x.strip() and not is_na(x)]
+
+
+def yes_no(v):
+    s = str(v or "").strip().lower()
+    if s in ("yes", "y", "true", "1"):
+        return "yes"
+    if s in ("no", "n", "false", "0"):
+        return "no"
+    return ""
+
+
+def to_float(v):
+    try:
+        return float(str(v).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Distance matrices and clusters
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_matrix(path):
+    with open(path, encoding="utf-8") as fh:
+        rows = [l.rstrip("\n").split("\t") for l in fh if l.strip()]
+    names = rows[0][1:]
+    d = {}
+    for r in rows[1:]:
+        a = r[0]
+        for b, v in zip(names, r[1:]):
+            x = to_float(v)
+            if x is not None:
+                d[(a, b)] = x
+    return names, d
+
+
+def clusters_single_linkage(names, d, threshold):
+    """Clusters at <= threshold (single linkage), as sample -> cluster id."""
+    parent = {n: n for n in names}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            v = d.get((a, b), d.get((b, a)))
+            if v is not None and v <= threshold:
+                parent[find(a)] = find(b)
+    return {n: find(n) for n in names}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The checks
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Result:
+    def __init__(self):
+        self.rows = []          # one per sample x check
+
+    def add(self, sample, check, expected, observed, outcome, note="", required=True):
+        # outcome: agree, disagree, not_assessed, info
+        self.rows.append(OrderedDict(sample_id=sample, check=check, expected=expected, observed=observed,
+                                     outcome=outcome, required="yes" if required else "no", note=note))
+
+
+def run_checks(profile, expected, observed, matrices, cluster_threshold, res):
+    checks = profile.get("checks") or {}
+    vcfg = profile.get("validation") or {}
+    sid_col = vcfg.get("sample_id_column", "sample_id")
+    ignore = set(str(x) for x in (vcfg.get("ignore_values") or ["n/a"]))
+    targets = [norm_species(x) for x in ((profile.get("scope") or {}).get("target_species") or [])]
+    obs = {r.get("sample_id", ""): r for r in observed}
+
+    def ign(v, extra=()):
+        return is_na(v, tuple(ignore) + tuple(extra))
+
+    def enabled(name):
+        c = checks.get(name)
+        return isinstance(c, dict) and c.get("enabled", True) is not False
+
+    def required(c, exp_value_present=True):
+        if c.get("required") is True:
+            return True
+        if c.get("required_when_expected") is True:
+            return exp_value_present
+        return bool(c.get("required", False)) if not c.get("required_when_column_present") else True
+
+    for e in expected:
+        sid = e.get(sid_col, "")
+        o = obs.get(sid)
+        if o is None:
+            res.add(sid, "sample", "present", "missing", "disagree", "no observed result for this sample")
+            continue
+
+        obs_status = str(o.get("qc_status", "")).strip().upper()
+        obs_species = o.get("species", "")
+        in_scope = (not targets) or norm_species(obs_species) in targets
+        obs_rep = yes_no(o.get("reportable", ""))
+        rep_note = ""
+        if not obs_rep:
+            # derived: QC status (PASS/WARNING reportable), the sample was analysed to the end
+            abandoned = yes_no(o.get("abandoned", "")) == "yes"
+            obs_rep = "yes" if STATUS_CLASS.get(obs_status) == "PASS" and not abandoned else "no"
+            rep_note = "derived from QC status"
+        if obs_rep == "yes" and not in_scope:
+            obs_rep = "no"
+            rep_note = (rep_note + "; " if rep_note else "") + "species outside the dataset's target species"
+
+        # species
+        if enabled("species"):
+            c = checks["species"]
+            exp_sp = e.get(c.get("expected_column", "expected_species"), "")
+            tcol = c.get("target_species_column")
+            is_target = (yes_no(e.get(tcol, "yes")) != "no") if tcol else True
+            if ign(exp_sp):
+                res.add(sid, "species", exp_sp, obs_species, "not_assessed", required=False)
+            elif is_target:
+                ok = norm_species(obs_species) == norm_species(exp_sp)
+                res.add(sid, "species", exp_sp, obs_species, "agree" if ok else "disagree", required=required(c))
+            else:
+                ok = norm_species(obs_species) not in targets
+                exact = norm_species(obs_species) == norm_species(exp_sp)
+                note = ("not reported as a target species" if ok else "reported as a target species")
+                if ok and not exact:
+                    note += "; species differs from the documented one (not a criterion)"
+                res.add(sid, "species", exp_sp + " (non-target)", obs_species, "agree" if ok else "disagree", note,
+                        required=required(c))
+
+        # MLST
+        if enabled("mlst"):
+            c = checks["mlst"]
+            exp_st = e.get(c.get("expected_st_column", "expected_st"), "")
+            exp_al = e.get(c.get("expected_alleles_column", "expected_mlst_alleles"), "")
+            if ign(exp_st):
+                pass
+            else:
+                ok = norm_st(o.get("st", "")) == norm_st(exp_st)
+                res.add(sid, "mlst_st", exp_st, o.get("st", ""), "agree" if ok else "disagree", required=required(c))
+            if not ign(exp_al):
+                ea, oa = parse_alleles(exp_al), parse_alleles(o.get("mlst_alleles", ""))
+                if not oa:
+                    res.add(sid, "mlst_alleles", exp_al, o.get("mlst_alleles", ""), "disagree", "no observed alleles",
+                            required=required(c))
+                else:
+                    diff = [g for g in ea if ea[g] != oa.get(g)]
+                    res.add(sid, "mlst_alleles", exp_al, o.get("mlst_alleles", ""), "disagree" if diff else "agree",
+                            ("differs at " + ", ".join(diff)) if diff else "", required=required(c))
+
+        # QC status (PASS/WARNING vs CRITICAL/FAIL)
+        if enabled("qc_status"):
+            c = checks["qc_status"]
+            exp_q = e.get(c.get("expected_column", "expected_qc_status"), "")
+            alt_q = e.get(c.get("alternative_column", ""), "") if c.get("alternative_column") else ""
+            if not ign(exp_q):
+                accepted = {exp_q.upper()} | ({alt_q.upper()} if not ign(alt_q) else set())
+                ok = obs_status in accepted or STATUS_CLASS.get(obs_status) in {STATUS_CLASS.get(x, x) for x in accepted}
+                note = ""
+                if obs_status == "WARNING" and "WARNING" not in accepted and ok:
+                    note = "WARNING counted as PASS (reportable)"
+                if obs_status == "CRITICAL" and ok:
+                    note = "CRITICAL counted as FAIL (not reportable)"
+                res.add(sid, "qc_status", exp_q + ("" if ign(alt_q) else " (or %s)" % alt_q), obs_status,
+                        "agree" if ok else "disagree", note, required=required(c))
+
+        # QC issue
+        obs_issues = set(split_list(o.get("qc_issues", "")))
+        if enabled("qc_issue"):
+            c = checks["qc_issue"]
+            exp_i = e.get(c.get("expected_column", "expected_qc_issue"), "")
+            if not ign(exp_i):
+                want = split_list(exp_i)
+                miss = [w for w in want if w not in obs_issues]
+                res.add(sid, "qc_issue", exp_i, ";".join(sorted(obs_issues)), "disagree" if miss else "agree",
+                        ("not detected: " + ", ".join(miss)) if miss else "", required=required(c))
+        if enabled("possible_additional_qc_issues"):
+            c = checks["possible_additional_qc_issues"]
+            exp_a = e.get(c.get("expected_column", "possible_additional_qc_issues"), "")
+            if not ign(exp_a):
+                want = split_list(exp_a)
+                seen = [w for w in want if w in obs_issues]
+                res.add(sid, "possible_additional_qc_issues", exp_a, ";".join(seen), "info",
+                        "%d of %d seen (supporting information, not a criterion)" % (len(seen), len(want)), required=False)
+
+        # cgMLST call rate
+        if enabled("cgmlst_call_rate"):
+            c = checks["cgmlst_call_rate"]
+            exp_c = e.get(c.get("expected_min_called_percent_column", "expected_cgmlst_min_called_percent"), "")
+            if not ign(exp_c):
+                v, m = to_float(o.get("cgmlst_called_percent", "")), to_float(exp_c)
+                ok = v is not None and m is not None and v >= m
+                res.add(sid, "cgmlst_call_rate", ">= %s" % exp_c, o.get("cgmlst_called_percent", ""),
+                        "agree" if ok else "disagree",
+                        ("scheme: " + o["cgmlst_scheme"]) if o.get("cgmlst_scheme") else "", required=required(c))
+
+        # reportability
+        if enabled("reportability"):
+            c = checks["reportability"]
+            col = c.get("expected_reportable_column", "expected_reportable")
+            if col in e and not ign(e.get(col)):
+                exp_r = yes_no(e[col])
+                why = e.get(c.get("non_reportable_reason_column", ""), "") if c.get("non_reportable_reason_column") else ""
+                note = rep_note
+                if obs_status == "WARNING" and obs_rep == "yes":
+                    note = (note + "; " if note else "") + "reportable with a WARNING"
+                if o.get("reportable_reason"):
+                    note = (note + "; " if note else "") + o["reportable_reason"]
+                res.add(sid, "reportable", exp_r + ("" if ign(why) else " (%s)" % why), obs_rep,
+                        "agree" if obs_rep == exp_r else "disagree", note, required=True)
+
+    # clusters
+    if enabled("cluster"):
+        c = checks["cluster"]
+        ccol = c.get("expected_column", "expected_cluster")
+        mcol = c.get("max_pairwise_distance_column")
+        groups = defaultdict(list)
+        maxd = {}
+        for e in expected:
+            lab = e.get(ccol, "")
+            if not ign(lab):
+                groups[lab].append(e.get(sid_col, ""))
+                if mcol and to_float(e.get(mcol)) is not None:
+                    maxd[lab] = to_float(e.get(mcol))
+        if groups:
+            obs_label = {r.get("sample_id", ""): r.get("cluster", "") for r in observed if not is_na(r.get("cluster"))}
+            if not matrices and not obs_label:
+                for lab, members in sorted(groups.items()):
+                    res.add(",".join(members), "cluster", lab, "", "not_assessed",
+                            "no distance matrix or observed cluster given", required=required(c))
+            for lab, members in sorted(groups.items()):
+                assessed = False
+                for mname, (names, d, thr) in matrices.items():
+                    present = [s for s in members if s in names]
+                    if not present:
+                        continue
+                    assessed = True
+                    t = cluster_threshold if thr is None else thr
+                    cl = clusters_single_linkage(names, d, t)
+                    ids = {cl[s] for s in present}
+                    missing = [s for s in members if s not in names]
+                    pair = [d.get((a, b), d.get((b, a))) for i, a in enumerate(present) for b in present[i + 1:]]
+                    pair = [p for p in pair if p is not None]
+                    worst = max(pair) if pair else 0
+                    others = sorted(s for s in names if s not in members and cl.get(s) in ids)
+                    problems = []
+                    if len(ids) > 1:
+                        problems.append("split over %d clusters at <= %g" % (len(ids), t))
+                    if lab in maxd and worst > maxd[lab]:
+                        problems.append("max pairwise distance %g > %g" % (worst, maxd[lab]))
+                    if missing:
+                        problems.append("not in the matrix: " + ", ".join(missing))
+                    note = "matrix %s, threshold %g, max pairwise distance %g" % (mname, t, worst)
+                    if others:
+                        note += "; also in the cluster: " + ", ".join(others)
+                    res.add(",".join(members), "cluster", lab + ("" if lab not in maxd else " (max %g)" % maxd[lab]),
+                            "%d member(s) in %d cluster(s)" % (len(present), len(ids)),
+                            "disagree" if problems else "agree",
+                            "; ".join(problems + [note]), required=required(c))
+                if not assessed and obs_label:
+                    labs = {obs_label.get(s, "") for s in members}
+                    ok = len(labs) == 1 and "" not in labs
+                    res.add(",".join(members), "cluster", lab, ",".join(sorted(labs)), "agree" if ok else "disagree",
+                            "observed cluster labels", required=required(c))
+                elif not assessed and matrices:
+                    res.add(",".join(members), "cluster", lab, "", "disagree", "samples not in any distance matrix",
+                            required=required(c))
+
+
+def check_manifest(dataset_dir, prefix, fastq_md5, res):
+    """MD5 of the analysed FASTQ files against the dataset's file manifest."""
+    mf = os.path.join(dataset_dir, "%s_file_manifest.tsv" % prefix)
+    if not os.path.isfile(mf):
+        return None
+    man = {r.get("filename", ""): r.get("md5", "").lower() for r in read_tsv(mf)}
+    ok, bad, missing = 0, [], []
+    for fn, md5 in man.items():
+        got = fastq_md5.get(fn)
+        if got is None:
+            missing.append(fn)
+        elif got.lower() == md5:
+            ok += 1
+        else:
+            bad.append(fn)
+    outcome = "agree" if not bad and not missing else "disagree"
+    note = "%d of %d files match the manifest" % (ok, len(man))
+    if bad:
+        note += "; different: " + ", ".join(bad[:5]) + (" ..." if len(bad) > 5 else "")
+    if missing:
+        note += "; not analysed: " + ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else "")
+    res.add("(dataset)", "dataset_files", "%d files" % len(man), "%d match" % ok, outcome, note)
+    return ok, len(man)
+
+
+def read_md5_listing(path):
+    out = {}
+    with open(path, encoding="utf-8") as fh:
+        for l in fh:
+            m = re.match(r"^([0-9a-fA-F]{32})\s+\*?(.+?)\s*$", l)
+            if m:
+                out[os.path.basename(m.group(2))] = m.group(1).lower()
+    return out
+
+
+def md5_of_dir(folder):
+    out = {}
+    for p in sorted(glob.glob(os.path.join(folder, "**", "*.f*q*"), recursive=True)):
+        if os.path.isfile(p):
+            h = hashlib.md5()
+            with open(p, "rb") as fh:
+                for b in iter(lambda: fh.read(4 << 20), b""):
+                    h.update(b)
+            out[os.path.basename(p)] = h.hexdigest()
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Output
+# ─────────────────────────────────────────────────────────────────────────────
+
+def summarize(res):
+    by = OrderedDict()
+    for r in res.rows:
+        s = by.setdefault(r["check"], {"agree": 0, "disagree": 0, "not_assessed": 0, "info": 0, "required": 0})
+        s[r["outcome"]] += 1
+        if r["required"] == "yes" and r["outcome"] in ("agree", "disagree"):
+            s["required"] += 1
+    return by
+
+
+def write_outputs(out, profile, res, meta):
+    os.makedirs(out, exist_ok=True)
+    cols = ["sample_id", "check", "expected", "observed", "outcome", "required", "note"]
+    with open(os.path.join(out, "validation_results.tsv"), "w", encoding="utf-8") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for r in res.rows:
+            fh.write("\t".join(str(r[c]).replace("\t", " ") for c in cols) + "\n")
+    summ = summarize(res)
+    with open(os.path.join(out, "validation_summary.tsv"), "w", encoding="utf-8") as fh:
+        fh.write("check\tagree\tdisagree\tnot_assessed\tinfo\n")
+        for k, s in summ.items():
+            fh.write("%s\t%d\t%d\t%d\t%d\n" % (k, s["agree"], s["disagree"], s["not_assessed"], s["info"]))
+    verdict = meta["verdict"]
+    with open(os.path.join(out, "validation.json"), "w", encoding="utf-8") as fh:
+        json.dump({"meta": meta, "summary": summ, "results": res.rows}, fh, indent=1)
+
+    ds = profile.get("dataset") or {}
+    e = html.escape
+    rows_html = []
+    for r in res.rows:
+        cls = {"agree": "ok", "disagree": "bad", "info": "info", "not_assessed": "na"}[r["outcome"]]
+        rows_html.append("<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                         % (cls, e(r["sample_id"]), e(r["check"]), e(str(r["expected"])), e(str(r["observed"])),
+                            e(r["outcome"].replace("_", " ")), e(r["note"])))
+    summ_html = "".join("<tr><td>%s</td><td>%d</td><td class='%s'>%d</td><td>%d</td><td>%d</td></tr>"
+                        % (e(k), s["agree"], "bad" if s["disagree"] else "", s["disagree"], s["not_assessed"], s["info"])
+                        for k, s in summ.items())
+    page = """<!doctype html><html><head><meta charset="utf-8"><title>Validation %(id)s</title>
+<style>body{font-family:system-ui,sans-serif;margin:2em;max-width:1300px}table{border-collapse:collapse;margin:1em 0}
+td,th{border:1px solid #ccc;padding:3px 8px;font-size:13px;text-align:left;vertical-align:top}th{background:#eee}
+tr.ok td{background:#eef8ee}tr.bad td,td.bad{background:#fbe3e3}tr.info td{background:#f3f3f9}tr.na td{color:#888}
+.verdict{font-size:1.3em;padding:.6em 1em;border-radius:6px;display:inline-block}
+.pass{background:#d9f2d9}.fail{background:#f7d0d0}small{color:#666}</style></head><body>
+<h1>Validation against %(title)s</h1>
+<p class="verdict %(vcls)s">%(verdict)s</p>
+<p><small>%(meta)s</small></p>
+<h2>Summary</h2><table><tr><th>check</th><th>agree</th><th>disagree</th><th>not assessed</th><th>info</th></tr>%(summ)s</table>
+<p><small>QC status: PASS and WARNING count as reportable (WARNING is noted), CRITICAL and FAIL as not reportable.
+Rows marked info are supporting information, not criteria.</small></p>
+<h2>All checks</h2><table><tr><th>sample</th><th>check</th><th>expected</th><th>observed</th><th>outcome</th><th>note</th></tr>%(rows)s</table>
+</body></html>""" % {
+        "id": e(str(ds.get("id", ""))), "title": e(str(ds.get("title", ds.get("id", "dataset")))),
+        "verdict": e(verdict), "vcls": "pass" if meta["all_agree"] else "fail",
+        "meta": e("; ".join("%s: %s" % (k, v) for k, v in meta.items() if k not in ("verdict", "all_agree"))),
+        "summ": summ_html, "rows": "".join(rows_html)}
+    with open(os.path.join(out, "validation_report.html"), "w", encoding="utf-8") as fh:
+        fh.write(page)
+
+
+def find_profile(dataset_dir):
+    c = sorted(glob.glob(os.path.join(dataset_dir, "*_validation_profile.yml")) +
+               glob.glob(os.path.join(dataset_dir, "*_validation_profile.yaml")))
+    if not c:
+        die("no *_validation_profile.yml in %s" % dataset_dir)
+    if len(c) > 1:
+        die("more than one validation profile in %s: %s" % (dataset_dir, ", ".join(os.path.basename(x) for x in c)))
+    return c[0]
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="eurlc-validate", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
+    p.add_argument("--dataset", required=True, help="folder with <ID>_validation_profile.yml and the expected results")
+    p.add_argument("--observed", required=True, help="observed results (TSV, see docs/eurlc-validate.md)")
+    p.add_argument("--distances", action="append", default=[], metavar="FILE[:THRESHOLD]",
+                   help="cgMLST distance matrix (square TSV); repeat for several species/schemes")
+    p.add_argument("--cluster-threshold", type=float, default=None,
+                   help="allele distance at or below which samples cluster (single linkage); "
+                        "used for matrices given without their own threshold")
+    p.add_argument("--fastq-md5", help="md5sum-style list of the analysed FASTQ files (checked against the manifest)")
+    p.add_argument("--fastq-dir", help="or: the folder with the analysed FASTQ files (MD5 is computed)")
+    p.add_argument("--out", default="validation", help="output folder")
+    p.add_argument("--label", default="", help="free text for the report, e.g. pipeline name and version")
+    a = p.parse_args(argv)
+
+    if not os.path.isdir(a.dataset):
+        die("not a folder: %s" % a.dataset)
+    prof_path = find_profile(a.dataset)
+    profile = read_yaml(prof_path) or {}
+    prefix = os.path.basename(prof_path).split("_validation_profile")[0]
+    exp_file = (profile.get("validation") or {}).get("expected_results_file") or "%s_expected_results.tsv" % prefix
+    exp_path = os.path.join(a.dataset, exp_file)
+    if not os.path.isfile(exp_path):
+        die("expected-results file not found: %s" % exp_path)
+    expected = read_tsv(exp_path)
+    observed = read_tsv(a.observed)
+    if observed and "sample_id" not in observed[0]:
+        die("%s has no sample_id column" % a.observed)
+
+    matrices = OrderedDict()
+    for spec in a.distances:
+        path, thr = spec, None
+        m = re.match(r"^(.*):(-?\d+(?:\.\d+)?)$", spec)
+        if m and os.path.isfile(m.group(1)):
+            path, thr = m.group(1), float(m.group(2))
+        if not os.path.isfile(path):
+            die("distance matrix not found: %s" % path)
+        names, d = read_matrix(path)
+        matrices[os.path.basename(path)] = (names, d, thr)
+    if matrices and a.cluster_threshold is None and any(v[2] is None for v in matrices.values()):
+        die("give --cluster-threshold, or FILE:THRESHOLD for every matrix")
+
+    res = Result()
+    fq = None
+    if a.fastq_md5:
+        fq = read_md5_listing(a.fastq_md5)
+    elif a.fastq_dir:
+        fq = md5_of_dir(a.fastq_dir)
+    if fq is not None:
+        check_manifest(a.dataset, prefix, fq, res)
+    run_checks(profile, expected, observed, matrices, a.cluster_threshold, res)
+
+    req = [r for r in res.rows if r["required"] == "yes" and r["outcome"] in ("agree", "disagree")]
+    bad = [r for r in req if r["outcome"] == "disagree"]
+    ds = profile.get("dataset") or {}
+    verdict = ("ALL %d REQUIRED CHECKS AGREE" % len(req)) if not bad else \
+              ("%d OF %d REQUIRED CHECKS DISAGREE" % (len(bad), len(req)))
+    meta = OrderedDict([
+        ("dataset", "%s %s" % (ds.get("id", prefix), ds.get("version", ""))),
+        ("validation mode", (profile.get("validation") or {}).get("mode", "")),
+        ("samples expected", len(expected)), ("samples observed", len(observed)),
+        ("observed results", os.path.abspath(a.observed)),
+        ("distance matrices", ", ".join("%s (threshold %g)" % (k, v[2] if v[2] is not None else a.cluster_threshold)
+                                        for k, v in matrices.items()) or "none"),
+        ("label", a.label), ("eurlc-validate", VERSION),
+        ("date", datetime.datetime.now().astimezone().isoformat(timespec="seconds")),
+        ("verdict", verdict), ("all_agree", not bad),
+    ])
+    write_outputs(a.out, profile, res, meta)
+
+    summ = summarize(res)
+    print("eurlc-validate %s -- %s" % (VERSION, meta["dataset"]))
+    w = max(len(k) for k in summ) if summ else 10
+    print("%-*s  agree  disagree  not assessed  info" % (w, "check"))
+    for k, s in summ.items():
+        print("%-*s  %5d  %8d  %12d  %4d" % (w, k, s["agree"], s["disagree"], s["not_assessed"], s["info"]))
+    for r in bad[:40]:
+        print("  DISAGREE  %s  %s: expected [%s], observed [%s]%s" % (r["sample_id"], r["check"], r["expected"],
+                                                                      r["observed"], ("  -- " + r["note"]) if r["note"] else ""))
+    if len(bad) > 40:
+        print("  ... %d more, see %s" % (len(bad) - 40, os.path.join(a.out, "validation_results.tsv")))
+    print("\n%s\nReport: %s" % (verdict, os.path.join(a.out, "validation_report.html")))
+    return 0 if not bad else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

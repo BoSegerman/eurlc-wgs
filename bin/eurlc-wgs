@@ -133,6 +133,8 @@ our @S_DATA_ROOTS_OLD = ();              # data folders recorded by earlier runs
 our %S_RELOCATED = ();                   # recorded raw file path => where it was found now (moved analysis)
 our %S_RAW_MISSING = ();                 # sample base => [recorded raw paths not found now]
 our %S_VALIDATION = ();                  # result of the validation against a dataset (run_dataset_validation)
+our %S_VERIFICATION = ();                # result of the comparison with a reference run (run_reference_verification)
+our $S_FINGERPRINT_FORMAT_VERSION = 1;   # report/tables/eurlc_results_fingerprint.json.gz (write_results_fingerprint)
 our %S_CLEANUP_REMOVED = ();
 our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
 our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
@@ -1220,6 +1222,17 @@ $rundata{config}{defaults} = {
         #          profile (default); off = never; <folder> = that dataset.
         # Writes report/validation/; see docs/eurlc-validate.md.
         validate   => "auto",
+
+        # verify_reference: compare the results with an earlier run of the
+        # same data (after an update of the pipeline, tools or databases).
+        #   auto = the newest reference/*.json.gz in the data folder or the
+        #          folder above it (default); off = never; <file or folder>.
+        # A reference is an earlier run's report/tables/eurlc_results_fingerprint.json.gz.
+        # verify_expect: areas or measures where differences are expected
+        # (comma-separated, e.g. "amr,qc.coverage"); they are listed but do
+        # not count. Writes report/verification/.
+        verify_reference => "auto",
+        verify_expect    => "",
 
         # Companion config files. Relative paths are resolved against the
         # DATABASE directory (falling back to the config file's directory
@@ -21565,6 +21578,10 @@ sub summarize_results(){
   # validation dataset is found
   my $observed = write_observed_results_table();
   run_dataset_validation($observed);
+  # the results fingerprint, and the comparison with a reference run when
+  # one is found (verify_reference)
+  my $fingerprint = write_results_fingerprint();
+  run_reference_verification($fingerprint);
 
   print_main_html_report();
   
@@ -21669,7 +21686,8 @@ sub print_main_html_report {
 
     my $amr_table = main_report_section_amr();
 
-    my $config_seal_html = get_config_seal_html_for_report() . get_resume_html_for_report() . get_validation_html_for_report();
+    my $config_seal_html = get_config_seal_html_for_report() . get_resume_html_for_report() . get_validation_html_for_report()
+                         . get_verification_html_for_report();
 
     # Inject seal banner CSS and the banner itself into the report HTML.
     # We do this via post-processing rather than relying on the template
@@ -30513,6 +30531,10 @@ sub print_run_summary {
         $add->(sprintf( "  %-12s %s: %s", "Validation:", $S_VALIDATION{dataset}, $S_VALIDATION{verdict} ),
                $S_VALIDATION{all_agree} ? "green" : "yellow");
     }
+    if (%S_VERIFICATION) {
+        $add->(sprintf( "  %-12s %s: %s", "Reference:", $S_VERIFICATION{reference}, $S_VERIFICATION{verdict} ),
+               $S_VERIFICATION{same} ? "green" : "yellow");
+    }
 
     # cgMLST not run: no schema installed for a species that has one
     if (%S_CGMLST_NO_SCHEMA) {
@@ -32188,6 +32210,7 @@ sub seal_relevant_overrides {
         timeout cache_max_age_days cleanup trimmed_fastq downsampled_fastq
         archive_results chewbbaca_write_md5 machine_aliases
         seal db_freeze_config conda_manifest frozen_dbs_root validate
+        verify_reference verify_expect
     );
     my @relevant;
     for my $line ( split /\n/, $rundata{config}{overrides} // "" ) {
@@ -36379,6 +36402,278 @@ sub write_observed_results_table {
     }
     close $fh;
     return $file;
+}
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## Results fingerprint: report/tables/eurlc_results_fingerprint.json.gz
+##
+## Every result that matters for a report, per sample and grouped by area,
+## plus what the run was made with (versions, settings). Two runs are
+## compared with eurlc-wgs-inspect compare (after an update: are the results
+## the same as before?; the same data run twice: repeatability). Format:
+##   { format, format_version, created, run_name, pipeline_version,
+##     context => { versions => {k=>v}, settings => {k=>v} },
+##     samples => { <name> => { <area> => { <key> => scalar | [list] },
+##                              cgmlst_alleles => { <schema> => { <locus> => allele } } } } }
+## Areas: status taxonomy qc qc_status mixture mlst serotype amr virulence
+## cgmlst cgmlst_alleles assembly. Values are kept as the pipeline wrote
+## them (strings); lists are sorted.
+
+sub fingerprint_sample {
+    my ($s) = @_;
+    my %fp;
+    my $mr  = $s->{main_results} // {};
+    my $res = $s->{results}      // {};
+    my $sc  = sub { my $v = shift; return undef if !defined $v || ref $v; return "$v"; };
+    my $put = sub { my ($area, $k, $v) = @_; $v = $sc->($v); $fp{$area}{$k} = $v if defined $v && $v ne ""; };
+
+    # status
+    $put->( status => qc_status  => $s->{qc}{status} );
+    $put->( status => reportable => ( $mr->{reportable} // {} )->{value} );
+    $put->( status => abandoned  => $s->{fatal_error} ? "yes" : "no" );
+    $put->( status => abandoned_step => $s->{fatal_error_runstep} ) if $s->{fatal_error};
+    $put->( status => type       => $s->{type} );
+    for my $lvl (qw(warning critical fail)) {
+        my $l = ( $s->{qc}{issues} // {} )->{$lvl};
+        $fp{status}{"issues_$lvl"} = [ sort map { ref $_ ? ( $_->{check} // $_->{message} // "" ) : $_ } @$l ]
+            if ref $l eq 'ARRAY' && @$l;
+    }
+    $put->( status => qc_issue_words => validation_issue_codes($s) );
+
+    # taxonomy (and contamination by other species/genera)
+    for my $k ( sort keys %{ $mr->{taxonomy} // {} } ) { $put->( taxonomy => $k => $mr->{taxonomy}{$k} ); }
+    my $ct = $mr->{contamination} // {};
+    for my $k ( sort keys %$ct ) {
+        $put->( ( $k =~ /^mixed_/ ? "mixture" : "taxonomy" ), "contamination_$k" =~ s/^contamination_mixed_/mixed_/r, $ct->{$k} );
+    }
+
+    # QC measures: observed values and their status
+    my $qc = $s->{qc_checks} // {};
+    for my $m ( sort keys %$qc ) {
+        next unless ref $qc->{$m} eq 'HASH';
+        $put->( qc        => $m => $qc->{$m}{observed} );
+        $put->( qc_status => $m => $qc->{$m}{status} );
+    }
+
+    # MLST: the reported ST, and each tool's ST and alleles
+    for my $k ( sort keys %{ $mr->{mlst} // {} } ) { $put->( mlst => $k => $mr->{mlst}{$k} ); }
+    for my $tool (qw(mlst fastmlst)) {
+        my $m = ( $res->{$tool} // {} )->{main};
+        next unless ref $m eq 'HASH';
+        $put->( mlst => "$tool.st" => $m->{st} );
+        $put->( mlst => "$tool.schema" => $m->{schema} );
+        $put->( mlst => "$tool.$_" => $m->{$_} ) for grep { /^allele_/ } sort keys %$m;
+    }
+
+    # serotype, lineage and the like: the reported value and every tool's
+    my $ty = $mr->{typing} // {};
+    $put->( serotype => reported => ( $ty->{serotype} // {} )->{value} ) if ref $ty->{serotype} eq 'HASH';
+    $put->( serotype => lineage => $ty->{lineage} );
+    if ( ref $ty->{virulence} eq 'HASH' ) { $put->( virulence => "reported.$_" => $ty->{virulence}{$_} ) for sort keys %{ $ty->{virulence} }; }
+    for my $tool ( sort keys %$res ) {
+        my $r = $res->{$tool};
+        next unless ref $r eq 'HASH';
+        for my $k (qw(serotype serovar o_type h_type pathotype stx_subtypes lineage serogroup)) {
+            $put->( serotype => "$tool.$k" => $r->{$k} ) if defined $r->{$k} && !ref $r->{$k};
+        }
+    }
+
+    # AMR and virulence genes (sorted lists)
+    my $af = ( $res->{amrfinderplus} // {} )->{amr_hits};
+    if ( ref $af eq 'ARRAY' ) {
+        my %by;
+        for my $h (@$af) {
+            next unless ref $h eq 'HASH';
+            my $t = lc( $h->{type} // $h->{element_type} // $h->{subtype} // "amr" );
+            $by{$t}{ $h->{element_symbol} // $h->{gene_symbol} // "?" } = 1;
+        }
+        $fp{amr}{"amrfinderplus.$_"} = [ sort keys %{ $by{$_} } ] for keys %by;
+        $fp{amr}{"amrfinderplus.hits"} = scalar @$af;
+    }
+    for my $tool ( grep { /^resfinder/ } sort keys %$res ) {
+        my $h = $res->{$tool}{resfinder_hits};
+        next unless ref $h eq 'ARRAY';
+        $fp{amr}{"$tool.genes"} = [ sort map { $_->{resistance_gene} // "?" } grep { ref $_ eq 'HASH' } @$h ];
+    }
+    for my $tool ( grep { /^virulencefinder/ } sort keys %$res ) {
+        my $h = $res->{$tool}{hits};
+        $fp{virulence}{"$tool.genes"} = [ sort map { $_->{gene} // "?" } grep { ref $_ eq 'HASH' } @$h ] if ref $h eq 'ARRAY';
+    }
+
+    # cgMLST, per schema: call rate etc. and the (hashed) allele profile
+    my $cgdir = getdir("out") . "/results/clustering/chewbbaca";
+    for my $tsv ( sort glob("$cgdir/*/*/per_sample/tsv/$s->{name}.profile.tsv") ) {
+        my $schema = basename( dirname( dirname( dirname($tsv) ) ) );
+        my $sp     = basename( dirname( dirname( dirname( dirname($tsv) ) ) ) );
+        my $key    = "$sp/$schema";
+        if ( open( my $fh, '<', $tsv ) ) {
+            chomp( my $h = <$fh> // "" );
+            chomp( my $r = <$fh> // "" );
+            close $fh;
+            my @h = split /\t/, $h;
+            my @r = split /\t/, $r, -1;
+            my %a;
+            @a{ @h[ 1 .. $#h ] } = @r[ 1 .. $#h ];
+            $fp{cgmlst_alleles}{$key} = \%a;
+            $fp{cgmlst}{"$key.profile_md5"} = Digest::MD5::md5_hex( join( "\t", map { "$_=" . ( $a{$_} // "" ) } sort keys %a ) );
+        }
+        my $js = dirname( dirname($tsv) ) . "/json/$s->{name}.json";
+        my $j  = -s $js ? eval { read_json_file($js) } : undef;
+        if ( ref $j eq 'HASH' ) {
+            for my $k (qw(call_rate called schema_size paralogous inferred EXC INF LNF NIPH NIPHEM ASM ALM PLOT3 PLOT5 LOTSC PAMA)) {
+                $put->( cgmlst => "$key.$k" => $j->{$k} );
+            }
+        }
+    }
+    $put->( cgmlst => "reported.call_rate" => $mr->{typing}{cgmlst_call_rate} );
+    $put->( cgmlst => "reported.schema"    => $mr->{typing}{cgmlst_call_rate_schema} );
+
+    # assemblies: the selected one, and every candidate (with its MD5)
+    my $as = $mr->{assembly} // {};
+    for my $k ( sort keys %$as ) { $put->( assembly => "main.$k" => $as->{$k} ); }
+    my $cand = ( $res->{select_main_assembly} // {} )->{candidates};
+    my $altdir = getdir("out,results,assemblies,alternative_assemblies");
+    if ( ref $cand eq 'ARRAY' ) {
+        for my $c ( grep { ref $_ eq 'HASH' && defined $_->{assembler} } @$cand ) {
+            my $a = $c->{assembler};
+            $put->( assembly => "$a.$_" => $c->{$_} ) for grep { $_ ne 'assembler' } sort keys %$c;
+            my ($f) = grep { -s $_ } ( "$altdir/$s->{name}.$a.fasta", "$altdir/$s->{name}.$a.fa" );
+            $put->( assembly => "$a.md5" => md5_file($f) ) if $f;
+        }
+    }
+    return \%fp;
+}
+
+## Everything that is not a result but decides results: tool and database
+## versions, the effective configuration.
+sub fingerprint_context {
+    my %v;
+    $v{pipeline} = $PIPELINE_VERSION;
+    $v{pipeline_date} = $rundata{pipeline_info}{versiondate} if defined $rundata{pipeline_info}{versiondate};
+    my $pr = $rundata{provenance}{run} // {};
+    for my $t ( sort keys %{ $pr->{tools} // {} } ) {
+        my $x = $pr->{tools}{$t};
+        $v{"tool.$t"} = $x->{version} // "" if ref $x eq 'HASH';
+    }
+    for my $d ( sort keys %{ $pr->{databases} // {} } ) {
+        my $x = $pr->{databases}{$d};
+        next unless ref $x eq 'HASH';
+        $v{"database.$d"} = join( " ", grep { defined $_ && $_ ne "" } $x->{version_label}, $x->{md5} );
+    }
+    my %set;
+    my $enc = JSON::MaybeXS->new( canonical => 1 );
+    for my $sec ( sort keys %{ $R_cfg // {} } ) {
+        next unless ref $R_cfg->{$sec} eq 'HASH';
+        for my $k ( sort keys %{ $R_cfg->{$sec} } ) {
+            my $x = $R_cfg->{$sec}{$k};
+            $set{"$sec.$k"} = ref $x ? $enc->encode($x) : ( $x // "" );
+        }
+    }
+    $set{"run.overrides"} = $rundata{config}{overrides} // "";
+    $set{"run.seal"} = ref $S_SEAL_RESULT eq 'HASH'
+        ? join( " ", grep { defined $_ && $_ ne "" } $S_SEAL_RESULT->{status}, $S_SEAL_RESULT->{name} ) : "UNSEALED";
+    return { versions => \%v, settings => \%set };
+}
+
+sub write_results_fingerprint {
+    my $dir  = getdir("out,report,tables");
+    my $file = "$dir/eurlc_results_fingerprint.json.gz";
+    my %fp = (
+        format           => "eurlc-wgs-results-fingerprint",
+        format_version   => $S_FINGERPRINT_FORMAT_VERSION,
+        created          => strftime( "%Y-%m-%dT%H:%M:%S", localtime ),
+        run_name         => $rundata{pipeline_info}{run_name} // basename( getdir("out") ),
+        pipeline_version => $PIPELINE_VERSION,
+        context          => fingerprint_context(),
+        samples          => {},
+    );
+    for my $s (@$R_samples) {
+        my $fps = eval { fingerprint_sample($s) };
+        if ( !$fps ) { log_message("WARNING: Fingerprint: sample $s->{name} skipped: $@", "yellow"); next; }
+        $fp{samples}{ $s->{name} } = $fps;
+    }
+    require IO::Compress::Gzip;
+    my $txt = JSON::MaybeXS->new( utf8 => 1, pretty => 1, canonical => 1 )->encode( \%fp );
+    unless ( IO::Compress::Gzip::gzip( \$txt => "$file.part", Minimal => 1 ) && rename( "$file.part", $file ) ) {
+        log_message("WARNING: cannot write [$file]", "yellow");
+        unlink "$file.part";
+        return;
+    }
+    return $file;
+}
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## Verification against a reference run (verify_reference=auto|off|<file>)
+##
+## auto: the newest reference/*.json(.gz) in the data folder or the folder
+## above it (next to a validation dataset's documentation). The comparison
+## (eurlc-wgs-inspect compare) goes to report/verification/, into the main
+## report and the run summary. The reference is the fingerprint of an
+## earlier run, copied there by hand: cp report/tables/eurlc_results_fingerprint.json.gz
+## <dataset>/reference/<date>_<version>.json.gz
+
+sub find_verification_reference {
+    my $v = $R_cfg->{general}{verify_reference} // "auto";
+    return "" if $v =~ /^(off|no|0|false)$/i;
+    if ( $v !~ /^(auto|yes|1|on|true)$/i ) {
+        my @f = -d $v ? glob("$v/*.json $v/*.json.gz") : ($v);
+        @f = sort { ( CORE::stat($b) )[9] <=> ( CORE::stat($a) )[9] } grep { -s $_ } @f;
+        log_message("WARNING: Verification: no reference fingerprint in [$v]", "yellow") unless @f;
+        return $f[0] // "";
+    }
+    my $in = eval { abs_path( getdir("in") ) } // getdir("in");
+    for my $d ( $in, dirname($in) ) {
+        my @f = grep { -s $_ } glob("$d/reference/*.json $d/reference/*.json.gz");
+        next unless @f;
+        @f = sort { ( CORE::stat($b) )[9] <=> ( CORE::stat($a) )[9] || $b cmp $a } @f;
+        return $f[0];
+    }
+    return "";
+}
+
+sub run_reference_verification {
+    my ($fingerprint) = @_;
+    %S_VERIFICATION = ();
+    my $ref = find_verification_reference();
+    return unless $ref ne "" && defined $fingerprint && -s $fingerprint;
+    my $self = eval { abs_path($0) } // $0;
+    my ($tool) = grep { -f $_ } ( dirname($self) . "/eurlc-wgs-inspect", dirname($self) . "/../scripts/eurlc-wgs-inspect" );
+    $tool //= `command -v eurlc-wgs-inspect 2>/dev/null`;
+    chomp $tool if defined $tool;
+    unless ( defined $tool && $tool ne "" && -f $tool ) {
+        log_message("WARNING: Verification reference found ($ref), but eurlc-wgs-inspect is not installed -- not compared", "yellow");
+        return;
+    }
+    my $out = getdir("out,report") . "/verification";
+    File::Path::make_path($out);
+    my $expect = $R_cfg->{general}{verify_expect} // "";
+    my @cmd = ( "python3", $tool, "compare", $ref, $fingerprint, "--out", $out,
+                ( $expect ne "" ? ( "--expect", $expect ) : () ) );
+    log_message("NOTICE: Verification: comparing the results with the reference run [" . basename($ref) . "]");
+    my $txt = "";
+    if ( open( my $p, '-|', @cmd ) ) { local $/; $txt = <$p> // ""; close $p; }
+    my $rc = $? >> 8;
+    log_message("INFO: Verification output:\n$txt");
+    my $j = eval { read_json_file("$out/comparison.json") } // {};
+    my $verdict = $j->{verdict} // ( $rc == 0 ? "NO UNEXPECTED DIFFERENCES" : "comparison could not be completed" );
+    %S_VERIFICATION = ( reference => basename($ref), verdict => $verdict, same => ( $rc == 0 ? 1 : 0 ),
+                        report => "$out/comparison.html" );
+    $rundata{verification} = { %S_VERIFICATION };
+    log_message( ( $rc == 0 ? "NOTICE" : "WARNING" ) . ": Verification against " . basename($ref) . ": $verdict -- report/verification/comparison.html",
+                 $rc == 0 ? "green" : "yellow" );
+}
+
+sub get_verification_html_for_report {
+    return "" unless %S_VERIFICATION;
+    my $cls = $S_VERIFICATION{same} ? "seal-verified" : "seal-warning";
+    my $txt = "Verification against the reference run " . encode_entities( $S_VERIFICATION{reference} // "" ) . ": <b>"
+            . encode_entities( $S_VERIFICATION{verdict} // "" ) . "</b>";
+    return <<"HTML";
+<div class="seal-banner $cls">
+  <span class="seal-icon">&#8644;</span>
+  <span class="seal-label">$txt<br><small style='opacity:0.75'><a href="verification/comparison.html">Comparison</a> (per area and sample; also comparison.tsv)</small></span>
+</div>
+HTML
 }
 
 ## The folder of the validation dataset to use, or "" (validate=auto|off|<folder>).

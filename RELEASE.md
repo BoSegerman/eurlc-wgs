@@ -95,11 +95,18 @@ E. coli, Listeria; gärna ett kontaminerat och ett med för låg täckning).
 
 - [ ] Sekventiellt läge: körningen når slutet, exitkod 0/3/5 som väntat,
       RESULT-raden stämmer.
-- [ ] Parallellt läge (`parallel_mode=on`): samma resultat som sekventiellt.
-      Titta på `Parallel:`-raden i sammanfattningen.
-- [ ] Jämför typningsresultaten (ST, serotyp, AMR-gener, cgMLST-avstånd)
-      mot förra versionen eller mot kända svar. Skillnader ska kunna
-      förklaras (nytt verktyg, ny databas, rättat fel).
+- [ ] Parallellt läge (`parallel_mode=on`): samma resultat som sekventiellt
+      (se `compare` nedan). Titta på `Parallel:`-raden i sammanfattningen.
+- [ ] Verifieringsdatasetet (grundsatsen + extra prov) med `reference/`:
+      rutan "Verification against ..." i rapporten, eller
+      `eurlc-wgs-inspect compare <förra versionens körning> <denna> --out verifiering/`.
+      Varje skillnad ska kunna förklaras (nytt verktyg, ny databas, rättat
+      fel) och anges med `--expect`; spara `comparison.html` med releasen.
+      När versionen godkänts: kopiera dess `eurlc_results_fingerprint.json.gz`
+      till `reference/` som ny referens.
+- [ ] Parallellt läge jämfört med sekventiellt med `compare`.
+- [ ] Valideringsdataseten D1–D3: `report/validation/` visar ALL REQUIRED
+      CHECKS AGREE (eller förklarade avvikelser).
 - [ ] `--qc-screen` ger trafikljusrapport och `qcscreen_status.json`.
 - [ ] `--resume` efter Ctrl+C mitt i en körning: avbrutna steg körs om,
       färdiga återanvänds.

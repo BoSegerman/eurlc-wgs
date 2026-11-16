@@ -242,6 +242,21 @@ if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
           bash -c "head -1 '$VDATA/eurlc-wgs/report/tables/eurlc_observed_results.tsv' | grep -q '^sample_id	species	st'"
     check "pipeline finds the validation dataset and validates" test -s "$VDATA/eurlc-wgs/report/validation/validation.json"
     check "  ... and says so in the run summary" grep -q "Validation:" "$T/v1.out"
+    # results fingerprint; a reference in the data folder is compared with
+    FPF="$VDATA/eurlc-wgs/report/tables/eurlc_results_fingerprint.json.gz"
+    check "pipeline writes the results fingerprint" bash -c "gzip -dc '$FPF' | grep -q eurlc-wgs-results-fingerprint"
+    mkdir -p "$VDATA/reference"; cp "$FPF" "$VDATA/reference/2026-01-01_ref.json.gz"
+    run "$T/v2.out" datadir="$VDATA" --resume --assume-yes disable=chewbbaca
+    check "pipeline compares with reference/ and finds no differences" \
+          bash -c "grep -q 'Verification against .*NO UNEXPECTED DIFFERENCES' '$T/v2.out' && test -s '$VDATA/eurlc-wgs/report/verification/comparison.html'"
+    INSP="$REPO/scripts/eurlc-wgs-inspect"
+    gzip -dc "$FPF" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["samples"]["A"]; s.setdefault("amr",{})["amrfinderplus.amr"]=["blaOXA-61"]; s.setdefault("qc",{})["coverage_raw"]="31.5"; json.dump(d,sys.stdout)' > "$T/fp_changed.json"
+    check "inspect compare: a changed result is unexpected (exit 1)" \
+          bash -c "! python3 '$INSP' compare '$FPF' '$T/fp_changed.json' > '$T/cmp1.out' && grep -q 'UNEXPECTED DIFFERENCES IN 1' '$T/cmp1.out'"
+    check "  ... and not with --expect for its areas (exit 0)" \
+          python3 "$INSP" compare "$FPF" "$T/fp_changed.json" --expect amr,qc.coverage --out "$T/cmp2" > /dev/null
+    check "  ... the reference may be given as an output folder" \
+          bash -c "python3 '$INSP' compare '$VDATA/eurlc-wgs' '$FPF' > /dev/null"
 fi
 
 # --- scripts/eurlc-wgs-inspect (read-only, on the output folder above) ------

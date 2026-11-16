@@ -10,12 +10,15 @@
 #              status, species, typing), the spread of each measure per
 #              species, how the thresholds fall out against what is known
 #              about the samples, and the issues found across runs
+#   compare    the results of one or more runs against a reference run, area by
+#              area (after an update: what changed?; the same data run again:
+#              repeatability), from the runs' results fingerprints
 #   mixture    the intra-species mixture metric of every sample in one or more
 #              output folders, with species and QC status, and its spread per
 #              species (for choosing thresholds)
 #
 # Standard library only (Python >= 3.7). Reads the output folder, never
-# writes to it.
+# writes to it (compare --out writes only where it is told).
 #
 # Part of EURLC-WGS. GPL-3.0-or-later.
 
@@ -35,7 +38,7 @@ import urllib.parse
 import zlib
 from collections import defaultdict
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -267,8 +270,8 @@ HINTS = [
      "assembly graph from SKESA/Shovill; not used afterwards"),
     ("blast-tmp",
      r"_blast/tmp/",
-     "BLAST XML from ResFinder / VirulenceFinder (tmp folder); results are in the "
-     "tool's json/txt"),
+     "BLAST XML from ResFinder / VirulenceFinder / PlasmidFinder (tmp folder); results are in "
+     "the tool's json/txt. Removed at the end of a run with cleanup.blast_tmp=1 (default)"),
     ("quast-extras",
      r"/quast/.*(icarus|/basic_stats/|report\.(html|pdf|tex)$|transposed_report\.(tex|txt)$)",
      "QUAST viewers, plots and duplicate report formats; report.tsv is what is read"),
@@ -1314,6 +1317,329 @@ def cmd_mixture(a):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# compare
+# ─────────────────────────────────────────────────────────────────────────────
+
+FP_NAME = "eurlc_results_fingerprint.json.gz"
+AREAS = ("status", "taxonomy", "qc_status", "qc", "mixture", "mlst", "serotype", "amr", "virulence",
+         "cgmlst", "cgmlst_alleles", "assembly")
+AREA_TEXT = {
+    "status": "QC status, reportable, abandoned", "taxonomy": "species, genus, contamination by other taxa",
+    "qc_status": "status of each QC measure", "qc": "QC measure values", "mixture": "intra-species mixture",
+    "mlst": "MLST (ST, alleles, each tool)", "serotype": "serotype and similar", "amr": "AMR genes",
+    "virulence": "virulence genes", "cgmlst": "cgMLST call rate, missing loci, profile",
+    "cgmlst_alleles": "cgMLST alleles, locus by locus", "assembly": "assemblies (selected and candidates, MD5)",
+}
+
+
+def _fp_path(arg):
+    """A fingerprint file, or an output folder (or the data folder above it) holding one."""
+    if os.path.isfile(arg):
+        return arg
+    for c in (os.path.join(arg, "report", "tables", FP_NAME),
+              os.path.join(arg, "eurlc-wgs", "report", "tables", FP_NAME),
+              os.path.join(arg, "report", "tables", FP_NAME[:-3])):
+        if os.path.isfile(c):
+            return c
+    if os.path.isdir(arg):
+        die("no results fingerprint in %s -- it is written by eurlc-wgs 0.1.0-beta1 (Nov 2026) and later; "
+            "for an older output folder run 'eurlc-wgs summarize' in it first" % arg)
+    die("not found: %s" % arg)
+
+
+def _load_fp(arg):
+    path = _fp_path(arg)
+    try:
+        opener = gzip.open if path.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8") as fh:
+            fp = json.load(fh)
+    except (OSError, ValueError) as ex:
+        die("cannot read %s: %s" % (path, ex))
+    if fp.get("format") != "eurlc-wgs-results-fingerprint":
+        die("%s is not a eurlc-wgs results fingerprint" % path)
+    fp["_path"] = path
+    label = fp.get("run_name") or ""
+    folder = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(path))))
+    if os.path.basename(path) == FP_NAME or os.path.basename(path) == FP_NAME[:-3]:
+        label = _run_label(folder)
+    else:
+        label = re.sub(r"\.json(\.gz)?$", "", os.path.basename(path))
+    fp["_label"] = label
+    return fp
+
+
+def _as_num(v):
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    if isinstance(v, str) and re.match(r"^\s*-?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?\s*$", v):
+        return float(v)
+    return None
+
+
+def _show(v):
+    if v is None:
+        return "(none)"
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v) if v else "(empty)"
+    return str(v)
+
+
+def _same_value(a, b, tol, rtol):
+    """(same?, short description of the difference)"""
+    if isinstance(a, list) or isinstance(b, list):
+        sa = set(a if isinstance(a, list) else ([] if a is None else [a]))
+        sb = set(b if isinstance(b, list) else ([] if b is None else [b]))
+        if sa == sb:
+            return True, ""
+        parts = []
+        if sb - sa:
+            parts.append("+" + ",".join(sorted(map(str, sb - sa))))
+        if sa - sb:
+            parts.append("-" + ",".join(sorted(map(str, sa - sb))))
+        return False, " ".join(parts)
+    if a == b:
+        return True, ""
+    na, nb = _as_num(a), _as_num(b)
+    if na is not None and nb is not None:
+        d = abs(na - nb)
+        lim = max(tol, rtol * max(abs(na), abs(nb)))
+        if d <= lim:
+            return True, ""
+        return False, "%+g" % (nb - na)
+    return False, ""
+
+
+def _expect_match(patterns, area, key):
+    full = "%s.%s" % (area, key)
+    for p in patterns:
+        if p == area or full == p or full.startswith(p + ".") or full.startswith(p + "_") or \
+                (p.startswith(area + ".") and key.startswith(p[len(area) + 1:])) or fnmatch.fnmatchcase(full, p):
+            return True
+    return False
+
+
+def _compare_alleles(ra, rb, max_loci):
+    """per schema: (n different, n called in one only, list of loci)"""
+    out = {}
+    for schema in sorted(set(ra) | set(rb)):
+        a, b = ra.get(schema), rb.get(schema)
+        if a is None or b is None:
+            out[schema] = ("profile only in the %s" % ("run" if a is None else "reference"), None, [])
+            continue
+        diff, one = [], []
+        for locus in sorted(set(a) | set(b)):
+            x, y = a.get(locus, ""), b.get(locus, "")
+            if x == y:
+                continue
+            missing = lambda v: v in ("", "-", "0", "LNF", "NIPH", "NIPHEM", "ASM", "ALM", "PLOT3", "PLOT5", "LOTSC", "PAMA")
+            if missing(x) or missing(y):
+                one.append(locus)
+            else:
+                diff.append(locus)
+        if diff or one:
+            out[schema] = (len(diff), len(one), (diff + one)[:max_loci])
+    return out
+
+
+def _compare_pair(ref, run, a):
+    """Every difference of one run from the reference: list of dicts."""
+    rows = []
+    rs, ss = ref.get("samples", {}), run.get("samples", {})
+    for name in sorted(set(rs) | set(ss)):
+        if name not in ss:
+            rows.append(dict(sample=name, area="sample", key="", ref="present", val="missing", note="sample not in the run"))
+            continue
+        if name not in rs:
+            rows.append(dict(sample=name, area="sample", key="", ref="missing", val="present", note="sample not in the reference"))
+            continue
+        x, y = rs[name], ss[name]
+        for area in AREAS:
+            if a.areas and area not in a.areas:
+                continue
+            ax, ay = x.get(area) or {}, y.get(area) or {}
+            if area == "cgmlst_alleles":
+                for schema, (nd, n1, loci) in _compare_alleles(ax, ay, a.max_loci).items():
+                    if n1 is None:
+                        note = nd
+                        rv, vv = ("profile", "(none)") if "run" in nd else ("(none)", "profile")
+                    else:
+                        note = "%d loci with another allele, %d called in only one" % (nd, n1)
+                        rv, vv = "", ""
+                    rows.append(dict(sample=name, area=area, key=schema, ref=rv, val=vv,
+                                     note=note + ((": " + ", ".join(loci)) if loci and a.details else "")))
+                continue
+            for key in sorted(set(ax) | set(ay)):
+                if a.ignore and any(_expect_match([p], area, key) for p in a.ignore):
+                    continue
+                va, vb = ax.get(key), ay.get(key)
+                same, note = _same_value(va, vb, a.tolerance, a.rel_tolerance)
+                if not same:
+                    rows.append(dict(sample=name, area=area, key=key, ref=_show(va), val=_show(vb), note=note))
+    for r in rows:
+        r["expected"] = r["area"] != "sample" and _expect_match(a.expect, r["area"], r["key"])
+    return rows
+
+
+def _context_diff(ref, run):
+    out = []
+    for part in ("versions", "settings"):
+        x = (ref.get("context") or {}).get(part) or {}
+        y = (run.get("context") or {}).get(part) or {}
+        for k in sorted(set(x) | set(y)):
+            if _show(x.get(k)) != _show(y.get(k)):
+                out.append((part, k, _show(x.get(k)), _show(y.get(k))))
+    return out
+
+
+def _write_compare_html(path, ref, runs, results, verdict, ok, repeat):
+    e = lambda s: (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    parts = ["""<!doctype html><html><head><meta charset="utf-8"><title>Comparison with %s</title>
+<style>body{font-family:system-ui,sans-serif;margin:2em;max-width:1300px}table{border-collapse:collapse;margin:1em 0}
+td,th{border:1px solid #ccc;padding:3px 8px;font-size:13px;text-align:left;vertical-align:top}th{background:#eee}
+tr.exp td{background:#f3f3f9;color:#555}tr.bad td{background:#fbe3e3}tr.ok td{background:#eef8ee}
+.verdict{font-size:1.3em;padding:.6em 1em;border-radius:6px;display:inline-block}
+.pass{background:#d9f2d9}.fail{background:#f7d0d0}small{color:#666}</style></head><body>
+<h1>Comparison with the reference run %s</h1><p class="verdict %s">%s</p>
+<p><small>Reference: %s (%s, eurlc-wgs %s)</small></p>""" % (
+        e(ref["_label"]), e(ref["_label"]), "pass" if ok else "fail", e(verdict),
+        e(ref["_path"]), e(ref.get("created", "")), e(ref.get("pipeline_version", "")))]
+    if repeat:
+        parts.append("<h2>Samples with the same results in every run</h2><table><tr><th>area</th><th>what</th>"
+                     "<th>same in all runs</th><th>differ</th></tr>")
+        for area, (same, n) in repeat.items():
+            parts.append("<tr class='%s'><td>%s</td><td>%s</td><td>%d of %d</td><td>%d</td></tr>" % (
+                "ok" if same == n else "bad", area, e(AREA_TEXT.get(area, "")), same, n, n - same))
+        parts.append("</table>")
+    for run, rows, ctx in results:
+        un = [r for r in rows if not r["expected"]]
+        parts.append("<h2>%s</h2><p><small>%s (%s, eurlc-wgs %s): %d difference(s), %d of them expected</small></p>" % (
+            e(run["_label"]), e(run["_path"]), e(run.get("created", "")), e(run.get("pipeline_version", "")),
+            len(rows), len(rows) - len(un)))
+        if ctx:
+            parts.append("<details><summary>What the run was made with that differs from the reference (%d)</summary>"
+                         "<table><tr><th></th><th>key</th><th>reference</th><th>run</th></tr>%s</table></details>" % (
+                len(ctx), "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % tuple(map(e, c)) for c in ctx)))
+        if rows:
+            parts.append("<table><tr><th>sample</th><th>area</th><th>key</th><th>reference</th><th>run</th><th>note</th></tr>")
+            for r in rows:
+                parts.append("<tr class='%s'><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                    "exp" if r["expected"] else "bad", e(r["sample"]), e(r["area"]), e(r["key"]), e(r["ref"]),
+                    e(r["val"]), e(r["note"] + (" (expected)" if r["expected"] else ""))))
+            parts.append("</table>")
+    parts.append("</body></html>")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(parts))
+
+
+def cmd_compare(a):
+    a.expect = [x.strip() for x in ",".join(a.expect or []).split(",") if x.strip()]
+    a.ignore = [x.strip() for x in ",".join(a.ignore or []).split(",") if x.strip()]
+    a.areas = [x.strip() for x in (a.areas or "").split(",") if x.strip()]
+    for p in a.areas:
+        if p not in AREAS:
+            die("unknown area '%s' (areas: %s)" % (p, ", ".join(AREAS)))
+    ref = _load_fp(a.reference)
+    runs = [_load_fp(r) for r in a.runs]
+    w = sys.stdout.write
+    w("eurlc-wgs-inspect %s compare: reference %s (%s)\n" % (VERSION, ref["_label"], ref.get("created", "")))
+    if a.expect:
+        w("Expected to differ: %s\n" % ", ".join(a.expect))
+    results = []
+    unexpected_samples = set()
+    tsv_rows = []
+    for run in runs:
+        rows = _compare_pair(ref, run, a)
+        ctx = _context_diff(ref, run)
+        results.append((run, rows, ctx))
+        un = [r for r in rows if not r["expected"]]
+        unexpected_samples |= {(run["_label"], r["sample"]) for r in un}
+        w("\n== %s (%s, eurlc-wgs %s)\n" % (run["_label"], run.get("created", ""), run.get("pipeline_version", "")))
+        if ctx:
+            vers = [c for c in ctx if c[0] == "versions"]
+            sets = [c for c in ctx if c[0] == "settings"]
+            w("   made with: %d version(s) and %d setting(s) differ from the reference\n" % (len(vers), len(sets)))
+            for c in (vers + sets)[: (None if a.details else 12)]:
+                w("     %-9s %-40s %s -> %s\n" % (c[0], c[1], c[2][:40], c[3][:40]))
+            if not a.details and len(ctx) > 12:
+                w("     ... %d more (--details)\n" % (len(ctx) - 12))
+            th = [c for c in sets if c[1] in ("general.threads", "general.parallel_mode")]
+            if th:
+                w("   NOTE: the number of threads or the parallel mode differs; some assemblers give slightly\n"
+                  "         different assemblies with another thread count\n")
+        by_area = defaultdict(lambda: [0, 0, set()])
+        for r in rows:
+            b = by_area[r["area"]]
+            b[1 if r["expected"] else 0] += 1
+            b[2].add(r["sample"])
+        if not rows:
+            w("   no differences in %d sample(s)\n" % len(run.get("samples", {})))
+        else:
+            w("   %-15s %10s %10s %8s\n" % ("area", "unexpected", "expected", "samples"))
+            for area in ("sample",) + AREAS:
+                if area in by_area:
+                    b = by_area[area]
+                    w("   %-15s %10d %10d %8d\n" % (area, b[0], b[1], len(b[2])))
+            shown = un if not a.details else rows
+            for r in shown[: (None if a.details else a.top)]:
+                w("   %-14s %-14s %-40s %s -> %s%s\n" % (
+                    r["sample"][:14], r["area"], r["key"][-40:], r["ref"][:30], r["val"][:30],
+                    ("  [" + r["note"][:80] + "]") if r["note"] else ""))
+            if not a.details and len(shown) > a.top:
+                w("   ... %d more unexpected differences (--details, --tsv)\n" % (len(shown) - a.top))
+        for r in rows:
+            tsv_rows.append([run["_label"], r["sample"], r["area"], r["key"], r["ref"], r["val"],
+                             "expected" if r["expected"] else "unexpected", r["note"]])
+
+    # repeatability: per area, samples whose results are the same in all runs
+    repeat = {}
+    if len(runs) >= 1:
+        names = set(ref.get("samples", {}))
+        for run in runs:
+            names &= set(run.get("samples", {}))
+        bad = defaultdict(set)
+        for run, rows, ctx in results:
+            for r in rows:
+                bad[r["area"]].add(r["sample"])
+        for area in AREAS:
+            if a.areas and area not in a.areas:
+                continue
+            if not any(area in (s or {}) for s in ref.get("samples", {}).values()):
+                continue
+            n = len(names)
+            repeat[area] = (n - len(bad[area] & names), n)
+        w("\nSamples with the same results in %s (%d sample(s) in all):\n" % (
+            "the reference and the run" if len(runs) == 1 else "the reference and all %d runs" % len(runs), len(names)))
+        for area, (same, n) in repeat.items():
+            w("   %-15s %4d of %-4d %s\n" % (area, same, n, AREA_TEXT.get(area, "")))
+
+    n_un = len(unexpected_samples)
+    ok = n_un == 0
+    verdict = "NO UNEXPECTED DIFFERENCES" if ok else "UNEXPECTED DIFFERENCES IN %d SAMPLE(S)" % n_un
+    if len(runs) > 1 and not ok:
+        verdict = "UNEXPECTED DIFFERENCES IN %d SAMPLE/RUN PAIR(S)" % n_un
+    w("\n%s\n" % verdict)
+
+    header = ["run", "sample", "area", "key", "reference", "value", "kind", "note"]
+    tsvs = [a.tsv] if a.tsv else []
+    if a.out:
+        os.makedirs(a.out, exist_ok=True)
+        tsvs.append(os.path.join(a.out, "comparison.tsv"))
+        _write_compare_html(os.path.join(a.out, "comparison.html"), ref, runs, results, verdict, ok, repeat)
+        with open(os.path.join(a.out, "comparison.json"), "w", encoding="utf-8") as fh:
+            json.dump({"verdict": verdict, "no_unexpected_differences": ok, "reference": ref["_path"],
+                       "runs": [r["_path"] for r in runs], "expect": a.expect,
+                       "tolerance": a.tolerance, "rel_tolerance": a.rel_tolerance,
+                       "repeatability": {k: {"same": v[0], "samples": v[1]} for k, v in repeat.items()},
+                       "differences": [dict(zip(header, t)) for t in tsv_rows]}, fh, indent=1)
+    for t in tsvs:
+        with open(t, "w", encoding="utf-8") as fh:
+            fh.write("\t".join(header) + "\n")
+            for row in tsv_rows:
+                fh.write("\t".join(str(c).replace("\t", " ").replace("\n", " ") for c in row) + "\n")
+    return 0 if ok else 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="eurlc-wgs-inspect",
@@ -1324,7 +1650,8 @@ def main(argv=None):
                "  eurlc-wgs-inspect inventory --from-listing listing.txt\n"
                "  eurlc-wgs-inspect extract /data/run192/eurlc-wgs --samples 23SCA11,PT43-10 -o run192_review\n"
                "  eurlc-wgs-inspect mixture /data/run*/eurlc-wgs --tsv mixture.tsv --threshold 30\n"
-               "  eurlc-wgs-inspect summarize /data/run*/eurlc-wgs --expected known.tsv --tsv all_samples.tsv\n",
+               "  eurlc-wgs-inspect summarize /data/run*/eurlc-wgs --expected known.tsv --tsv all_samples.tsv\n"
+               "  eurlc-wgs-inspect compare reference/2026-11-16_v0.1.0.json.gz /data/verif/eurlc-wgs --expect amr\n",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
     sub = p.add_subparsers(dest="cmd")
@@ -1374,7 +1701,27 @@ def main(argv=None):
     x.add_argument("--threshold", type=float, help="count the samples above this many windows, per species")
     x.add_argument("--summary-only", action="store_true", help="only the per-species spread")
 
+    c = sub.add_parser("compare", help="results of runs against a reference run (after an update; repeatability)",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    c.add_argument("reference", help="the reference: a results fingerprint, or an output folder holding one")
+    c.add_argument("runs", nargs="+", help="the run(s) to compare with it (fingerprints or output folders)")
+    c.add_argument("--expect", action="append", metavar="LIST",
+                   help="areas or measures where differences are expected (comma-separated; e.g. amr, "
+                        "qc.coverage, assembly.*.md5): listed, but not counted")
+    c.add_argument("--ignore", action="append", metavar="LIST", help="areas or measures left out entirely")
+    c.add_argument("--areas", metavar="LIST", help="only these areas (%s)" % ", ".join(AREAS))
+    c.add_argument("--tolerance", type=float, default=0.0, help="numbers this close count as the same")
+    c.add_argument("--rel-tolerance", type=float, default=0.0,
+                   help="numbers this close, as a fraction of the larger (0.001 = 0.1%%), count as the same")
+    c.add_argument("--details", action="store_true", help="every difference, also expected ones, and the cgMLST loci")
+    c.add_argument("--max-loci", type=int, default=50, help="cgMLST loci listed per sample and schema with --details")
+    c.add_argument("--top", type=int, default=40, help="differences shown per run without --details")
+    c.add_argument("--tsv", metavar="FILE", help="write every difference to this file")
+    c.add_argument("--out", metavar="DIR", help="write comparison.html, comparison.tsv and comparison.json here")
+
     a = p.parse_args(argv)
+    if a.cmd == "compare":
+        return cmd_compare(a)
     if a.cmd == "inventory":
         return cmd_inventory(a)
     if a.cmd == "extract":

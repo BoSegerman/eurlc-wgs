@@ -108,6 +108,14 @@ if ( @ARGV == 1 && $ARGV[0] =~ /^-{0,2}version$/i ) {
     exit 0;
 }
 
+# Internal modes of the remap step (planned §36), handled before anything
+# else is set up: --remap-summary=depth|pileup reads samtools output from a
+# pipe inside the step; --remap-check compares the streaming way with the
+# results already in output folders. See remap_internal_main().
+if ( @ARGV && $ARGV[0] =~ /^--remap-(?:summary|check)\b/ ) {
+    exit remap_internal_main(@ARGV);
+}
+
 # How this run relates to the output directory, set by the overwrite check:
 #   "new"         -- output directory did not exist
 #   "overwritten" -- an existing output directory was removed first
@@ -425,7 +433,11 @@ my %data_key = (
         check => sub { my ($i) = @_; return -f fill_placeholders("__DIR-QC3__/quast/__BASE__/report.txt", $i) ? 1 : 0; },
     },
     remap_done => {
-        check => sub { my ($i) = @_; return -f fill_placeholders("__DIR-QC3__/remapping/__BASE__/__BASE__.sorted.bam", $i) ? 1 : 0; },
+        check => sub {
+            my ($i) = @_;
+            return 1 if -f fill_placeholders("__DIR-QC3__/remapping/__BASE__/__BASE__.pileup_summary.json", $i);
+            return remap_earlier_way_done($i) ? 1 : 0;
+        },
     },
     mlst_assembled => {
         check => sub { my ($i) = @_; return defined $R_samples->[$i]{results}{mlst}{st} ? 1 : 0; },
@@ -1326,11 +1338,14 @@ $rundata{config}{defaults} = {
         #   and is always kept. Default: remove (the histogram is kept regardless).
         jellyfish_db       => 1,
         #
-        # bam: remapping BAM and BAI files in results/qc/stage3_assembly/remapping/.
+        # bam: remapping BAM and BAI files in results/qc/stage3_assemblies/remapping/.
         #   These are useful for visual inspection in IGV and to verify coverage,
         #   but are large (comparable to raw input). They can also be used to
-        #   reconstruct FASTQ reads via `samtools fastq`. Default: keep.
-        bam                => 0,
+        #   reconstruct FASTQ reads via `samtools fastq`. Since the streaming
+        #   remap step (planned §36) the step removes them itself, right after
+        #   use; this setting is also read there. Default: remove. Keep with
+        #   cleanup.bam=0; make them again with rerun=remap cleanup.bam=0.
+        bam                => 1,
         #
         # assembler_workfiles: an assembler's working files (SPAdes k-mer
         #   folders, intermediate graphs, copies of the contigs, ...), removed
@@ -10004,7 +10019,11 @@ $runstep{$runstep_name} = {
       message    => "Running Bowtie2 re-mapping...",
       long_name  => "Bowtie2 re-mapping",
       output_dir => "__DIR-QC3__/remapping/__BASE__",
-      resultfile => "__DIR-QC3__/remapping/__BASE__/__BASE__.sorted.bam",
+      # Written last, atomically, by --remap-summary=pileup: the step is done
+      # only when the whole chain ran (planned §36). Folders made before the
+      # streaming way count as done by remap_earlier_way_done().
+      resultfile => "__DIR-QC3__/remapping/__BASE__/__BASE__.pileup_summary.json",
+      rerun_paths => [ "__DIR-QC3__/remapping/__BASE__" ],   # rerun=remap: the whole folder, cache too
       cachefile  => "__DIR-QC3__/remapping/__BASE__/__BASE__.remap_qc.json",
       mixed_sites_tsv  => "__DIR-QC3__/remapping/__BASE__/__BASE__.mixed_positions.tsv",      
       resultfiles_status => "NA",
@@ -10021,7 +10040,11 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+# The commands are chained with && (wrap_cmd_strict), and the pipes run with
+# pipefail: a failed bowtie2 or samtools then fails the step, instead of the
+# next commands running on a missing or cut-off BAM and the step being
+# reported as done (planned §36, småfel 2).
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     cp __DIR-ASSEMBLIES__/__BASE__.fasta __DIR-QC3__/remapping/__BASE__/__BASE__.fasta
        __HIDE-OUTPUT__
     __NEWCOMMAND__ 
@@ -10034,6 +10057,7 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        __HIDE-OUTPUT__
     __NEWCOMMAND__    
     conda run -n $R_cfg->{bowtie2}->{env} --no-capture-output bash -c '
+       set -o pipefail;
        bowtie2 
        -p __THREADS__
        -x __BASE__ 
@@ -10070,18 +10094,24 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        __BASE__.sorted.bam > __BASE__.coverage
        __HIDE-STDERR__    
     __NEWCOMMAND__     
-    conda run -n $R_cfg->{bowtie2}->{env} --no-capture-output  samtools depth 
-        -aa __BASE__.sorted.bam > __BASE__.depth.tsv
+    conda run -n $R_cfg->{bowtie2}->{env} --no-capture-output  bash -c '
+        set -o pipefail;
+        samtools depth -aa __BASE__.sorted.bam
+        | __REMAP-PERL__ --remap-summary=depth --out __BASE__.depth_summary.json '
         __HIDE-STDERR__    
     __NEWCOMMAND__        
     conda run -n $R_cfg->{bowtie2}->{env} --no-capture-output  bash -c '
+        set -o pipefail;
         samtools mpileup 
         -aa 
         -q 20 -Q 20 
         -f __BASE__.fasta 
         __BASE__.sorted.bam 
-        | gzip -c > __BASE__.pileup.gz '
+        | __REMAP-PERL__ --remap-summary=pileup
+          --allele-counts __BASE__.allele_counts.tsv.gz
+          --summary __BASE__.pileup_summary.json '
        __HIDE-STDERR__
+       __REMAP-REMOVE-BAM__
 CMD
 
 # TEST---------------------------------
@@ -10122,13 +10152,26 @@ sub preprocess_remap {
 
     log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
 
-    if (-f $resultfile) {
+    if (-f $resultfile || remap_earlier_way_done($samplenr)) {
         log_message("NOTICE: Runstep: $runstep{$runstep_name}{long_name} Sample: $sample_name already exists. Skipping");
         postprocess_remap($samplenr);
         return "";
     }
 
     ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr, $runstep_name));
+
+    # depth and mpileup are read by this script itself (--remap-summary), with
+    # the perl it runs under: the command runs inside the bowtie2 environment.
+    my $self = eval { abs_path($0) } // $0;
+    my $perl = $^X;
+    $command =~ s/__REMAP-PERL__/'$perl' '$self'/g;
+
+    # cleanup.bam=1 (default): the BAM, its index and the copy of the assembly
+    # are removed as soon as the summaries are written. rerun=remap
+    # cleanup.bam=0 makes them again.
+    my $remove = is_disabled( $R_cfg->{cleanup}{bam} // 1 ) ? ""
+               : " && rm -f __BASE__.sorted.bam __BASE__.sorted.bam.bai __BASE__.fasta __BASE__.fasta.fai";
+    $command =~ s/\s*__REMAP-REMOVE-BAM__/$remove/;
 
     $command = fill_placeholders($command, $samplenr, $runstep_name);
 
@@ -10139,7 +10182,36 @@ sub preprocess_remap {
 
 $runstep{$runstep_name}{result_parsing} = \&postprocess_remap;
 
-$runstep{$runstep_name}{result_parsing} = \&postprocess_remap;
+## A remap folder made before the streaming way (no pileup_summary.json)
+## counts as done when its cache and table are there, together with the BAM
+## or the pileup they were made from.
+sub remap_earlier_way_done {
+    my ($i) = @_;
+    my $d = fill_placeholders("__DIR-QC3__/remapping/__BASE__/__BASE__", $i);
+    return 0 unless -s "$d.remap_qc.json" && -f "$d.mixed_positions.tsv";
+    return ( -f "$d.sorted.bam" || -s "$d.pileup.gz" ) ? 1 : 0;
+}
+
+## Can the mixture metric be made again from what is in the folder?
+sub remap_mixture_recomputable {
+    my ($i) = @_;
+    my $d = fill_placeholders("__DIR-QC3__/remapping/__BASE__/__BASE__", $i);
+    return 1 if -s "$d.pileup_summary.json" && -s "$d.allele_counts.tsv.gz";
+    return 1 if -s "$d.pileup.gz";
+    return 0;
+}
+
+## Do two sets of [remap_mixture] values differ?
+sub remap_params_differ {
+    my ($a, $b) = @_;
+    return 1 unless ref $a eq 'HASH' && ref $b eq 'HASH';
+    my %d = remap_mixture_defaults();
+    for my $k (keys %d) {
+        my ($x, $y) = ($a->{$k}, $b->{$k});
+        return 1 if !defined $x || !defined $y || $x != $y;
+    }
+    return 0;
+}
 
 sub postprocess_remap {
     my ($samplenr) = @_;
@@ -10169,13 +10241,24 @@ sub postprocess_remap {
         }
         elsif (($result_ref->{mixture}{method_version} // 1) < REMAP_MIXTURE_METHOD_VERSION()) {
             # The cache was written before the mixture metric changed. It can be brought
-            # up to date without mapping again as long as the pileup is still on disk.
-            if (-s "$output_dir/$sample_name.pileup.gz") {
-                log_message("NOTICE: Remap QC for sample $sample_name was made with an earlier mixture method -- parsing the pileup again");
+            # up to date without mapping again from the allele counts or the pileup.
+            if (remap_mixture_recomputable($samplenr)) {
+                log_message("NOTICE: Remap QC for sample $sample_name was made with an earlier mixture method -- calculating it again");
                 $result_ref = undef;
             }
             else {
-                log_message("NOTICE: Remap QC for sample $sample_name was made with an earlier mixture method and the pileup is gone -- the new mixture values are not available (rerun=remap to get them)");
+                log_message("NOTICE: Remap QC for sample $sample_name was made with an earlier mixture method and neither allele counts nor pileup are left -- the new mixture values are not available (rerun=remap to get them)");
+            }
+        }
+        elsif (defined $result_ref->{mixture}{mixed_params}
+               && remap_params_differ($result_ref->{mixture}{mixed_params}, remap_mixture_params())) {
+            # [remap_mixture] has changed since the cache was written (planned §36, småfel 5).
+            if (remap_mixture_recomputable($samplenr)) {
+                log_message("NOTICE: [remap_mixture] values differ from those used for sample $sample_name -- calculating the mixture metric again");
+                $result_ref = undef;
+            }
+            else {
+                log_message("NOTICE: [remap_mixture] values differ from those used for sample $sample_name, but neither allele counts nor pileup are left -- the stored values are kept (rerun=remap to apply the new ones)");
             }
         }
     }
@@ -10289,7 +10372,6 @@ sub postprocess_remap {
 #       coverage         => "<samtools coverage output>",
 #       idxstats         => "<samtools idxstats output>",
 #       stats            => "<samtools stats output>",
-#       snps_bcf         => "<optional SNP BCF path, if later added>",
 #       depth_tsv        => "<samtools depth -aa output>",
 #       pileup           => "<samtools mpileup.gz output>",
 #       mixed_sites_tsv  => "<tab-delimited table of mixed positions>",
@@ -10433,10 +10515,6 @@ sub postprocess_remap {
 #       },
 #   },
 #
-#   variants => {
-#       # currently reserved / not actively populated in this version
-#   },
-#
 #   mixture => {
 #       # ---- callable sites in pileup at minimum depth ----
 #       callable_sites_dp_ge_20           => int,
@@ -10489,13 +10567,247 @@ sub postprocess_remap {
 
 
 
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## remap_internal_main(@ARGV) -- the internal --remap-* modes
+##
+##   samtools depth -aa X.bam | eurlc-wgs --remap-summary=depth --out X.depth_summary.json
+##   samtools mpileup ... X.bam | eurlc-wgs --remap-summary=pileup \
+##        --allele-counts X.allele_counts.tsv.gz --summary X.pileup_summary.json
+##   eurlc-wgs --remap-check [--convert] [--keep <dir>] <folder> [<folder> ...]
+##
+## --remap-check looks below each folder for remap results made the earlier
+## way (<base>.pileup.gz, <base>.depth.tsv and the remap_qc.json + 
+## mixed_positions.tsv made from them), runs the streaming way on the same
+## pileup and depth files, and compares: coverage, mapping and mixture values
+## and the mixed_positions.tsv rows must be identical -- for the streaming
+## way and for the earlier way as the pipeline now runs it (the code was split
+## up, so both are checked against what the earlier code wrote). Nothing in the folders
+## is changed; the new files go to a temporary folder (or --keep <dir>).
+## Exit code 0 when every sample is identical, 1 otherwise.
+## --convert: for each IDENTICAL sample, put the new files in its folder and
+## remove <base>.depth.tsv and <base>.pileup.gz (the BAM is left alone; the
+## cache and the table are already identical). A DIFFERENT sample is not touched.
+##
+## Runs before the pipeline is set up (called at the top of the main
+## program), so it may only use subs and compile-time imports.
+sub remap_internal_main {
+    my ($mode_arg, @rest) = @_;
+    {
+        no warnings 'redefine';
+        *log_message = sub { my ($m) = @_; $m .= "\n" unless $m =~ /\n$/; print STDERR $m; };
+    }
+    my $warn = sub { print STDERR "WARNING: $_[0]\n" };
+    my (%o, @paths);
+    while (@rest) {
+        my $a = shift @rest;
+        if ($a =~ /^--(convert)$/) {
+            $o{$1} = 1;                       # a flag: never takes the next word
+        } elsif ($a =~ /^--([\w-]+)(?:=(.*))?$/) {
+            $o{$1} = defined $2 ? $2 : (@rest && $rest[0] !~ /^--/ ? shift @rest : 1);
+        } else {
+            push @paths, $a;
+        }
+    }
+
+    my $ok = eval {
+        if ($mode_arg =~ /^--remap-summary=depth$/) {
+            die "--remap-summary=depth needs --out <file>\n" unless $o{out};
+            remap_summary_depth_stream(\*STDIN, $o{out}, $o{cap});
+            1;
+        }
+        elsif ($mode_arg =~ /^--remap-summary=pileup$/) {
+            die "--remap-summary=pileup needs --allele-counts <file> and --summary <file>\n"
+                unless $o{'allele-counts'} && $o{summary};
+            remap_summary_pileup_stream(\*STDIN, allele_counts => $o{'allele-counts'},
+                summary => $o{summary}, min_dp => $o{'min-dp'} // 20);
+            1;
+        }
+        elsif ($mode_arg eq '--remap-check') {
+            die "usage: eurlc-wgs --remap-check [--convert] [--keep <dir>] <output folder> [...]\n" unless @paths;
+            return remap_check(\@paths, $o{keep}, $warn, $o{convert}) ? 0 : 1;
+        }
+        else {
+            die "unknown internal mode [$mode_arg]\n";
+        }
+    };
+    return $ok if defined $ok && $ok =~ /^[01]$/ && $mode_arg eq '--remap-check';
+    unless ($ok) {
+        print STDERR "ERROR: " . ($@ || "failed\n");
+        return 1;
+    }
+    return 0;
+}
+
+sub remap_check {
+    my ($paths, $keep, $warn, $convert) = @_;
+    require File::Find;
+    require File::Temp;
+
+    my @found;
+    for my $p (@$paths) {
+        die "not a folder: $p\n" unless -d $p;
+        File::Find::find({ no_chdir => 1, wanted => sub {
+            $File::Find::prune = 1 if -d $_ && $_ =~ m{/(large_files|report)$};
+            return unless /\.pileup\.gz$/ && -f $_;
+            push @found, $_;
+        } }, $p);
+    }
+    die "no <sample>.pileup.gz found below: @$paths\n" unless @found;
+
+    my $tmp_root = $keep // File::Temp::tempdir("eurlc-wgs-remap-check-XXXXXX", TMPDIR => 1, CLEANUP => 1);
+    mkdir $tmp_root unless -d $tmp_root;
+
+    my $norm;
+    $norm = sub {
+        my ($x) = @_;
+        return { map { $_ => $norm->($x->{$_}) } keys %$x } if ref $x eq 'HASH';
+        return [ map { $norm->($_) } @$x ] if ref $x eq 'ARRAY';
+        return defined $x ? "$x" : undef;
+    };
+    my $diff;
+    $diff = sub {
+        my ($a, $b, $path, $out) = @_;
+        return if @$out >= 15;
+        if (ref $a eq 'HASH' && ref $b eq 'HASH') {
+            my %k = map { $_ => 1 } (keys %$a, keys %$b);
+            $diff->($a->{$_}, $b->{$_}, "$path.$_", $out) for sort keys %k;
+        } elsif (ref $a eq 'ARRAY' && ref $b eq 'ARRAY') {
+            my $n = @$a > @$b ? @$a : @$b;
+            $diff->($a->[$_], $b->[$_], "$path\[$_\]", $out) for 0 .. $n - 1;
+        } else {
+            my $sa = ref $a ? JSON::MaybeXS->new(canonical => 1)->encode($a) : ($a // "(none)");
+            my $sb = ref $b ? JSON::MaybeXS->new(canonical => 1)->encode($b) : ($b // "(none)");
+            push @$out, "$path: $sa -> $sb" if $sa ne $sb;
+        }
+    };
+
+    my ($n_same, $n_diff, $n_skip, $n_conv) = (0, 0, 0, 0);
+    my ($bytes_old, $bytes_new) = (0, 0);
+    for my $pileup (sort @found) {
+        (my $dir = $pileup) =~ s{/[^/]+$}{};
+        (my $base = $pileup) =~ s{^.*/|\.pileup\.gz$}{}g;
+        my $label = $dir =~ m{([^/]+)/eurlc-wgs/} ? "$1/$base" : $base;
+        my $cache = remap_read_json_file("$dir/$base.remap_qc.json");
+        my $ref_tsv = "$dir/$base.mixed_positions.tsv";
+        if (!-s "$dir/$base.depth.tsv" || ref $cache ne 'HASH' || !-s $ref_tsv) {
+            print "SKIP       $label: needs $base.depth.tsv, $base.remap_qc.json and $base.mixed_positions.tsv\n";
+            $n_skip++;
+            next;
+        }
+        if (($cache->{mixture}{method_version} // 1) < REMAP_MIXTURE_METHOD_VERSION()) {
+            print "SKIP       $label: remap_qc.json has mixture method " . ($cache->{mixture}{method_version} // 1)
+                . " -- run eurlc-wgs --resume in that output folder first\n";
+            $n_skip++;
+            next;
+        }
+        my $work = "$tmp_root/" . ($label =~ s{/}{__}gr);
+        mkdir $work;
+        my $t0 = time();
+
+        open(my $dfh, "<", "$dir/$base.depth.tsv") or do { print "SKIP       $label: $!\n"; $n_skip++; next; };
+        remap_summary_depth_stream($dfh, "$work/$base.depth_summary.json");
+        close $dfh;
+        open(my $pfh, "-|", "gzip", "-dc", $pileup) or do { print "SKIP       $label: $!\n"; $n_skip++; next; };
+        remap_summary_pileup_stream($pfh, allele_counts => "$work/$base.allele_counts.tsv.gz",
+                                    summary => "$work/$base.pileup_summary.json", min_dp => 20);
+        close $pfh;
+
+        my %P = (remap_mixture_defaults(), %{ $cache->{mixture}{mixed_params} // {} });
+        my $new = parse_remap_qc($dir, undef,
+            base           => $base,
+            depth_summary  => remap_read_json_file("$work/$base.depth_summary.json"),
+            pileup_summary => remap_read_json_file("$work/$base.pileup_summary.json"),
+            allele_counts  => "$work/$base.allele_counts.tsv.gz",
+            mixed_tsv      => "$work/$base.mixed_positions.tsv",
+            params         => \%P,
+            warn           => $warn,
+        );
+        # The earlier way too, as the pipeline now does it for older folders
+        my $old = parse_remap_qc($dir, undef,
+            base => $base, force_old => 1, mixed_tsv => "$work/$base.mixed_positions.earlier_way.tsv",
+            params => \%P, warn => $warn,
+        );
+        my @d;
+        for my $way ([ "streaming", $new, "$work/$base.mixed_positions.tsv" ],
+                     [ "earlier way", $old, "$work/$base.mixed_positions.earlier_way.tsv" ]) {
+            my ($tag, $res, $tsv) = @$way;
+            my @dw;
+            for my $k (qw(mapping coverage mixture)) {
+                $diff->($norm->($cache->{$k}), $norm->(decode_json(encode_json({ x => $res->{$k} }))->{x}), $k, \@dw);
+            }
+            # the table of positions, row by row
+            if (open(my $fa, "<", $ref_tsv) and open(my $fb, "<", $tsv)) {
+                my $line = 0;
+                while (1) {
+                    my $la = <$fa>; my $lb = <$fb>;
+                    $line++;
+                    last if !defined $la && !defined $lb;
+                    if (($la // "(end of file)") ne ($lb // "(end of file)")) {
+                        chomp(my $ca = $la // "(end of file)"); chomp(my $cb = $lb // "(end of file)");
+                        push @dw, "mixed_positions.tsv line $line: [$ca] -> [$cb]";
+                        last;
+                    }
+                }
+            } else {
+                push @dw, "mixed_positions.tsv could not be read";
+            }
+            push @d, map { "($tag) $_" } @dw;
+        }
+        my $old_b = (-s "$dir/$base.depth.tsv") + (-s $pileup);
+        my $new_b = (-s "$work/$base.depth_summary.json") + (-s "$work/$base.pileup_summary.json")
+                  + (-s "$work/$base.allele_counts.tsv.gz");
+        $bytes_old += $old_b;
+        $bytes_new += $new_b;
+        my $sizes = sprintf("%.1f MB -> %.2f MB, %ds", $old_b / 1e6, $new_b / 1e6, time() - $t0);
+        if (@d) {
+            $n_diff++;
+            print "DIFFERENT  $label ($sizes)\n";
+            print "             $_\n" for @d;
+        } else {
+            $n_same++;
+            my $note = "";
+            if ($convert) {
+                # Same results: the new files take over, the large ones go.
+                my $ok = 1;
+                for my $f ("$base.depth_summary.json", "$base.allele_counts.tsv.gz", "$base.pileup_summary.json") {
+                    next if -s "$dir/$f";
+                    $ok = 0 unless copy("$work/$f", "$dir/$f.part") && rename("$dir/$f.part", "$dir/$f");
+                }
+                if ($ok) {
+                    unlink "$dir/$base.depth.tsv", $pileup;
+                    $note = ", converted: depth.tsv and pileup.gz removed";
+                    $n_conv++;
+                } else {
+                    $note = ", NOT converted (could not write the new files: $!)";
+                }
+            }
+            print "IDENTICAL  $label ($sizes$note)\n";
+        }
+    }
+    printf "\n%d identical, %d different, %d skipped. depth.tsv + pileup.gz %.1f MB -> new files %.2f MB\n",
+        $n_same, $n_diff, $n_skip, $bytes_old / 1e6, $bytes_new / 1e6;
+    print "Converted $n_conv sample(s): their remap results now come from the new files.\n" if $convert;
+    print "New files kept in $tmp_root\n" if $keep;
+    return $n_diff == 0 && $n_same > 0;
+}
+
+## parse_remap_qc($dir, $samplenr, %opt)
+##   Reads the remap step's files. Coverage comes from <base>.depth_summary.json
+##   when it is there, else from <base>.depth.tsv; the mixture metric from
+##   <base>.pileup_summary.json + <base>.allele_counts.tsv.gz when they are
+##   there, else from <base>.pileup.gz (folders made before the streaming way).
+##   %opt (used by --remap-check): base, depth_summary / pileup_summary
+##   (decoded hashes), allele_counts (path), mixed_tsv (path), params, warn,
+##   force_old (read depth.tsv and pileup.gz even when the new files are there).
 sub parse_remap_qc {
-    my ($dir, $samplenr) = @_;
+    my ($dir, $samplenr, %opt) = @_;
 
-    my $base = fill_placeholders("__BASE__", $samplenr);
+    my $base = $opt{base} // fill_placeholders("__BASE__", $samplenr);
     my $min_dp = 20;
+    my $warn = $opt{warn} // sub { log_message("WARNING: $_[0]", "yellow") };
 
-    my $mixed_sites_tsv = File::Spec->catfile($dir, "$base.mixed_positions.tsv");
+    my $mixed_sites_tsv = $opt{mixed_tsv} // File::Spec->catfile($dir, "$base.mixed_positions.tsv");
 
     my %res = (
         files => {
@@ -10503,14 +10815,15 @@ sub parse_remap_qc {
             coverage        => File::Spec->catfile($dir, "$base.coverage"),
             idxstats        => File::Spec->catfile($dir, "$base.idxstats"),
             stats           => File::Spec->catfile($dir, "$base.stats"),
-            snps_bcf        => File::Spec->catfile($dir, "$base.snps.bcf"),
             depth_tsv       => File::Spec->catfile($dir, "$base.depth.tsv"),
             pileup          => File::Spec->catfile($dir, "$base.pileup.gz"),
+            depth_summary   => File::Spec->catfile($dir, "$base.depth_summary.json"),
+            pileup_summary  => File::Spec->catfile($dir, "$base.pileup_summary.json"),
+            allele_counts   => File::Spec->catfile($dir, "$base.allele_counts.tsv.gz"),
             mixed_sites_tsv => $mixed_sites_tsv,
         },
         mapping  => {},
         coverage => {},
-        variants => {},
         warnings => [],
     );
 
@@ -10520,7 +10833,7 @@ sub parse_remap_qc {
         return [] unless -e $path;
 
         open(my $fh, "<", $path) or do {
-            log_message("WARNING: Cannot open [$path]: $!", "yellow");
+            $warn->("Cannot open [$path]: $!");
             return [];
         };
 
@@ -10765,9 +11078,16 @@ sub parse_remap_qc {
         push @{ $res{warnings} }, "Missing coverage file";
     }
 
-    # ---------- breadth/depth from depth file ----------
+    # ---------- breadth/depth: summary (streaming way) or depth file ----------
     my $contig_depth_ref;
-    if (-e $res{files}{depth_tsv}) {
+    my $DS = $opt{force_old} ? undef : $opt{depth_summary} // remap_read_json_file($res{files}{depth_summary});
+    if (ref $DS eq 'HASH') {
+        my ($ds, $per) = depth_stats_from_summary($DS);
+        @{ $res{coverage} }{ keys %$ds } = values %$ds if $ds;
+        $contig_depth_ref = $per;
+        $res{coverage}{depth_per_contig} = $contig_depth_ref if defined $contig_depth_ref;
+    }
+    elsif (-e $res{files}{depth_tsv}) {
         my $ds = depth_stats_from_file(path => $res{files}{depth_tsv}, cap => 5000);
         if ($ds) {
             @{ $res{coverage} }{ keys %$ds } = values %$ds;
@@ -10787,14 +11107,32 @@ sub parse_remap_qc {
         push @{ $res{warnings} }, "Missing depth file";
     }
 
-    # ---------- pileup-based mixture metrics ----------
-    my $mix = parse_pileup_minor_af_metrics(
-        pileup             => $res{files}{pileup},
-        min_dp             => $min_dp,
-        out_tsv            => $mixed_sites_tsv,
-        contig_depth_ref   => $contig_depth_ref,
-        contig_lengths_ref => $res{coverage}{contig_lengths},
-    );
+    # ---------- mixture metric: allele counts (streaming way) or pileup ----------
+    my $PS = $opt{force_old} ? undef : $opt{pileup_summary} // remap_read_json_file($res{files}{pileup_summary});
+    my $ac = $opt{allele_counts} // $res{files}{allele_counts};
+    my $mix;
+    if (ref $PS eq 'HASH' && -s $ac) {
+        $mix = remap_mixture_from_allele_counts(
+            summary            => $PS,
+            allele_counts      => $ac,
+            out_tsv            => $mixed_sites_tsv,
+            contig_depth_ref   => $contig_depth_ref,
+            contig_lengths_ref => $res{coverage}{contig_lengths},
+            params             => $opt{params},
+            warn               => $warn,
+        );
+    }
+    else {
+        $mix = parse_pileup_minor_af_metrics(
+            pileup             => $res{files}{pileup},
+            min_dp             => $min_dp,
+            out_tsv            => $mixed_sites_tsv,
+            contig_depth_ref   => $contig_depth_ref,
+            contig_lengths_ref => $res{coverage}{contig_lengths},
+            params             => $opt{params},
+            warn               => $warn,
+        );
+    }
     $res{mixture} = $mix if defined $mix;
 
     return \%res;
@@ -10986,19 +11324,7 @@ sub depth_stats_per_contig_from_file {
 sub REMAP_MIXTURE_METHOD_VERSION { return 2; }
 
 sub remap_mixture_params {
-    my %default = (
-        min_minor_reads            => 4,      # reads supporting the second base
-        min_minor_reads_per_strand => 1,      # ... of which at least this many on each strand (0 = off)
-        min_minor_af               => 0.05,   # second base / (A+C+G+T)
-        min_depth_ratio            => 0.5,    # pileup depth / median depth of the contig
-        max_depth_ratio            => 1.5,
-        min_contig_length          => 2000,
-        contig_end_margin          => 150,    # positions this close to a contig end are not used
-        indel_fraction             => 0.2,    # a position where this share of reads has an indel or deletion ...
-        indel_distance             => 5,      # ... sets aside candidates within this many bases (0 = off)
-        neighbour_distance         => 10,     # candidates this close to each other are set aside (0 = off)
-        window_size                => 1000,
-    );
+    my %default = remap_mixture_defaults();
     my $cfg = (ref($R_cfg) eq 'HASH' && ref($R_cfg->{remap_mixture}) eq 'HASH') ? $R_cfg->{remap_mixture} : {};
     my %p;
     for my $key (sort keys %default) {
@@ -11016,167 +11342,291 @@ sub remap_mixture_params {
     return \%p;
 }
 
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## The mixture metric is split in three parts, so that the same code serves
+## both the earlier way (pileup.gz on disk, parsed in result_parsing) and the
+## streaming way (planned §36: samtools mpileup piped into
+## eurlc-wgs --remap-summary=pileup, a sparse allele_counts.tsv.gz, the method
+## run on that in result_parsing):
+##
+##   remap_pileup_record()      one mpileup line -> base counts per strand
+##   remap_record_derive()      counts -> major/minor base, fractions, old-method bin
+##   remap_mixture_from_rows()  filters, windows, the numbers, mixed_positions.tsv
+##
+## None of them uses global state (no log_message, no $R_cfg): they are also
+## called from the internal --remap-* modes, before the pipeline is set up.
+
+# Columns of allele_counts.tsv.gz (format 1). One row per position that the
+# method can use: the earlier method's hits, positions whose second base has
+# >= 2 reads, and positions where >= 3 reads have an indel or deletion.
+sub REMAP_ALLELE_COUNT_COLUMNS {
+    return qw(contig pos ref depth A_fwd A_rev C_fwd C_rev G_fwd G_rev T_fwd T_rev del indel_starts n);
+}
+
+## One mpileup line -> hashref with the counts, or undef when the line is not
+## used (malformed, or depth below $min_dp).
+sub remap_pileup_record {
+    my ($ln, $min_dp) = @_;
+    chomp($ln);
+    return undef if $ln eq "";
+
+    my ($chr, $pos, $ref, $dp, $bases) = split(/\t/, $ln);
+    return undef unless defined $dp && $dp =~ /^\d+$/;
+    return undef unless defined $ref && defined $bases;
+    return undef if $dp < $min_dp;
+
+    # Read-start markers are "^" plus one mapping-quality character, which can
+    # itself be "+" or "-": they must go before indels are looked for.
+    $bases =~ s/\^.//g if index($bases, '^') >= 0;
+
+    # Indels are written after the base they follow: +2AG, -1t. Count them and cut them out.
+    my $indel_starts = 0;
+    if (index($bases, '+') >= 0 || index($bases, '-') >= 0) {
+        my $clean = '';
+        my $from  = 0;
+        while ($bases =~ /[+-](\d+)/g) {
+            my $start = $-[0];
+            my $skip  = $+[0] + $1;
+            $clean .= substr($bases, $from, $start - $from);
+            $from = $skip > length($bases) ? length($bases) : $skip;
+            pos($bases) = $from;
+            $indel_starts++;
+        }
+        $clean .= substr($bases, $from);
+        $bases = $clean;
+    }
+
+    my $refU = uc($ref);
+    my $ref_fwd = ($bases =~ tr/.//);
+    my $ref_rev = ($bases =~ tr/,//);
+    my %r = (
+        chr => $chr, pos => $pos, ref => $ref, dp => $dp,
+        A_fwd => ($bases =~ tr/A//), C_fwd => ($bases =~ tr/C//), G_fwd => ($bases =~ tr/G//), T_fwd => ($bases =~ tr/T//),
+        A_rev => ($bases =~ tr/a//), C_rev => ($bases =~ tr/c//), G_rev => ($bases =~ tr/g//), T_rev => ($bases =~ tr/t//),
+        del          => ($bases =~ tr/*#//),     # the read has a deletion at this position
+        indel_starts => $indel_starts,
+        n            => ($bases =~ tr/Nn//),
+    );
+    if ($refU =~ /^[ACGT]$/) {
+        $r{"${refU}_fwd"} += $ref_fwd;
+        $r{"${refU}_rev"} += $ref_rev;
+    }
+    return \%r;
+}
+
+## Adds the derived values to a record from remap_pileup_record() (or read
+## back from allele_counts.tsv.gz). Returns the old-method bin: 0, 1 (5-10 %),
+## 2 (10-20 %) or 3 (>= 20 %).
+sub remap_record_derive {
+    my ($r) = @_;
+    my @order = qw(A C G T);
+    my %cnt = map { $_ => $r->{"${_}_fwd"} + $r->{"${_}_rev"} } @order;
+
+    my $major_base  = "N";
+    my $major_count = 0;
+    for my $b (@order) {
+        if ($cnt{$b} > $major_count) { $major_count = $cnt{$b}; $major_base = $b; }
+    }
+    my $minor_base  = "N";
+    my $minor_count = 0;
+    for my $b (@order) {
+        next if $b eq $major_base;
+        if ($cnt{$b} > $minor_count) { $minor_count = $cnt{$b}; $minor_base = $b; }
+    }
+    my $dp = $r->{dp};
+    my $acgt_depth = $cnt{A} + $cnt{C} + $cnt{G} + $cnt{T};
+
+    $r->{major_base}     = $major_base;
+    $r->{major_count}    = $major_count;
+    # earlier method: everything that is not the major base, over the pileup depth
+    $r->{disagree_count} = $dp - $major_count;
+    $r->{minor_af}       = $dp > 0 ? ($r->{disagree_count} / $dp) : 0;
+    # new method: the second most common base, over A+C+G+T
+    $r->{minor_base}     = $minor_base;
+    $r->{minor_count}    = $minor_count;
+    $r->{minor_fwd}      = $minor_base eq "N" ? 0 : $r->{"${minor_base}_fwd"};
+    $r->{minor_rev}      = $minor_base eq "N" ? 0 : $r->{"${minor_base}_rev"};
+    $r->{acgt_depth}     = $acgt_depth;
+    $r->{minor_af_acgt}  = $acgt_depth > 0 ? ($minor_count / $acgt_depth) : 0;
+    $r->{del_count}      = $r->{del};
+    $r->{n_count}        = $r->{n};
+
+    my $af = $r->{minor_af};
+    return $af >= 0.20 ? 3 : $af >= 0.10 ? 2 : $af >= 0.05 ? 1 : 0;
+}
+
+## Is the record a candidate row (kept in mixed_positions.tsv)?
+sub remap_record_is_candidate {
+    my ($r, $bin) = @_;
+    return $bin || ($r->{minor_count} >= 2 && $r->{minor_af_acgt} >= 0.02);
+}
+
+## Does the record mark an indel position for the indel filter?
+sub remap_record_is_indel_position {
+    my ($r, $P) = @_;
+    my $k = $r->{indel_starts} + $r->{del};
+    return $P->{indel_distance} > 0 && $k >= 3 && $r->{dp} > 0 && $k / $r->{dp} >= $P->{indel_fraction};
+}
+
+## Is the record worth keeping in allele_counts.tsv.gz? Wider than the two
+## tests above, so that other [remap_mixture] values can be tried later.
+sub remap_record_is_stored {
+    my ($r, $bin) = @_;
+    return $bin || $r->{minor_count} >= 2 || ($r->{indel_starts} + $r->{del}) >= 3;
+}
+
+## The old method's median and p95 of the fraction over all callable
+## positions. Kept as a histogram of (disagreeing reads, depth) pairs rather
+## than a list of millions of values; the result is the same as sorting the
+## list (equal fractions are equal numbers, whatever pair they come from).
+sub remap_old_method_quantiles {
+    my ($hist) = @_;                       # {"disagree,depth" => count}
+    my %by_value;
+    my $n = 0;
+    for my $k (keys %$hist) {
+        my ($d, $dp) = split /,/, $k;
+        my $v = $dp > 0 ? $d / $dp : 0;
+        push @{ $by_value{$v} }, $v unless exists $by_value{$v};   # keep the number, not the string
+        $by_value{$v}[1] += $hist->{$k};
+        $n += $hist->{$k};
+    }
+    return (undef, undef) unless $n;
+    my @vals = sort { $a->[0] <=> $b->[0] } values %by_value;
+    my $pick = sub {
+        my ($idx) = @_;
+        my $cum = 0;
+        for my $e (@vals) { $cum += $e->[1]; return $e->[0] if $cum > $idx; }
+        return $vals[-1][0];
+    };
+    return (sprintf("%.6f", $pick->(int($n / 2))), sprintf("%.6f", $pick->(int(0.95 * ($n - 1)))));
+}
+
+## The default [remap_mixture] values (one place; remap_mixture_params reads the config on top).
+sub remap_mixture_defaults {
+    return (
+        min_minor_reads            => 4,      # reads supporting the second base
+        min_minor_reads_per_strand => 1,      # ... of which at least this many on each strand (0 = off)
+        min_minor_af               => 0.05,   # second base / (A+C+G+T)
+        min_depth_ratio            => 0.5,    # pileup depth / median depth of the contig
+        max_depth_ratio            => 1.5,
+        min_contig_length          => 2000,
+        contig_end_margin          => 150,    # positions this close to a contig end are not used
+        indel_fraction             => 0.2,    # a position where this share of reads has an indel or deletion ...
+        indel_distance             => 5,      # ... sets aside candidates within this many bases (0 = off)
+        neighbour_distance         => 10,     # candidates this close to each other are set aside (0 = off)
+        window_size                => 1000,
+    );
+}
+
+## Earlier way: read a whole pileup (file), then the method.
 sub parse_pileup_minor_af_metrics {
     my (%opt) = @_;
 
     my $pileup = $opt{pileup};
     my $min_dp = $opt{min_dp} // 20;
-    my $out_tsv = $opt{out_tsv};
-    my $contig_depth_ref = $opt{contig_depth_ref} // {};
-    my $contig_lengths_ref = $opt{contig_lengths_ref} // {};
     my $P = $opt{params} // remap_mixture_params();
+    my $warn = $opt{warn} // sub { log_message("WARNING: $_[0]", "yellow") };
 
     if (!defined $pileup || $pileup eq "") {
-        log_message("WARNING: parse_pileup_minor_af_metrics: missing pileup path", "yellow");
+        $warn->("parse_pileup_minor_af_metrics: missing pileup path");
         return undef;
     }
-
+    unless (-s $pileup) {
+        $warn->(($pileup =~ /\.gz$/ ? "Gzipped pileup" : "Pileup") . " file missing or empty: [$pileup]");
+        return undef;
+    }
     my $fh;
     if ($pileup =~ /\.gz$/) {
-        unless (-s $pileup) {
-            log_message("WARNING: Gzipped pileup file missing or empty: [$pileup]", "yellow");
-            return undef;
-        }
-        open($fh, "-|", "gzip", "-dc", $pileup) or do {
-            log_message("WARNING: Cannot open gzipped pileup [$pileup]: $!", "yellow");
-            return undef;
-        };
-    }
-    else {
-        unless (-s $pileup) {
-            log_message("WARNING: Pileup file missing or empty: [$pileup]", "yellow");
-            return undef;
-        }
-        open($fh, "<", $pileup) or do {
-            log_message("WARNING: Cannot open pileup [$pileup]: $!", "yellow");
-            return undef;
-        };
+        open($fh, "-|", "gzip", "-dc", $pileup) or do { $warn->("Cannot open gzipped pileup [$pileup]: $!"); return undef; };
+    } else {
+        open($fh, "<", $pileup) or do { $warn->("Cannot open pileup [$pileup]: $!"); return undef; };
     }
 
-    # ---- earlier method: totals -------------------------------------------
-    my $callable = 0;
-    my $bin_5_10  = 0;
-    my $bin_10_20 = 0;
-    my $bin_ge_20 = 0;
-    my @minor_afs;
-
-    # ---- new method: what is collected while reading ------------------------
-    # A row is kept for a position that the earlier method reported (so the TSV
-    # still contains everything it used to), or where the second base has at
-    # least 2 reads and 2 %. That is wider than the filters below on purpose:
-    # the TSV can then be used to try other settings without the pileup.
-    my @rows;               # one hash per kept position, in file order
-    my %indel_position;     # {contig}{position} = 1 where many reads have an indel/deletion
-
-    my @bases_order = qw(A C G T);
-
+    my %legacy = (callable => 0, bins => [0, 0, 0, 0]);
+    my %af_hist;
+    my (@rows, %indel_position);
     while (my $ln = <$fh>) {
-        chomp($ln);
-        next if $ln eq "";
-
-        my ($chr, $pos, $ref, $dp, $bases, $quals) = split(/\t/, $ln);
-        next unless defined $dp && $dp =~ /^\d+$/;
-        next unless defined $ref && defined $bases;
-        next if $dp < $min_dp;
-
-        $callable++;
-
-        # Read-start markers are "^" plus one mapping-quality character, which can
-        # itself be "+" or "-": they must go before indels are looked for.
-        $bases =~ s/\^.//g if index($bases, '^') >= 0;
-
-        # Indels are written after the base they follow: +2AG, -1t. Count them and cut them out.
-        my $indel_starts = 0;
-        if (index($bases, '+') >= 0 || index($bases, '-') >= 0) {
-            my $clean = '';
-            my $from  = 0;
-            while ($bases =~ /[+-](\d+)/g) {
-                my $start = $-[0];
-                my $skip  = $+[0] + $1;
-                $clean .= substr($bases, $from, $start - $from);
-                $from = $skip > length($bases) ? length($bases) : $skip;
-                pos($bases) = $from;
-                $indel_starts++;
-            }
-            $clean .= substr($bases, $from);
-            $bases = $clean;
-        }
-
-        my $refU = uc($ref);
-        my $ref_fwd = ($bases =~ tr/.//);
-        my $ref_rev = ($bases =~ tr/,//);
-        my %fwd = (A => ($bases =~ tr/A//), C => ($bases =~ tr/C//), G => ($bases =~ tr/G//), T => ($bases =~ tr/T//));
-        my %rev = (A => ($bases =~ tr/a//), C => ($bases =~ tr/c//), G => ($bases =~ tr/g//), T => ($bases =~ tr/t//));
-        if (exists $fwd{$refU}) {
-            $fwd{$refU} += $ref_fwd;
-            $rev{$refU} += $ref_rev;
-        }
-        my $del_count = ($bases =~ tr/*#//);      # the read has a deletion at this position
-        my $n_count   = ($bases =~ tr/Nn//);
-
-        my %cnt = map { $_ => $fwd{$_} + $rev{$_} } @bases_order;
-
-        my $major_base = "N";
-        my $major_count = 0;
-        for my $b (@bases_order) {
-            if ($cnt{$b} > $major_count) {
-                $major_count = $cnt{$b};
-                $major_base  = $b;
-            }
-        }
-
-        # ---- earlier method: everything that is not the major base, over the pileup depth
-        my $disagree_count = $dp - $major_count;
-        my $minor_af = $dp > 0 ? ($disagree_count / $dp) : 0;
-        push @minor_afs, $minor_af;
-
-        my $bin_hit = 0;
-        if ($minor_af >= 0.05 && $minor_af < 0.10) {
-            $bin_5_10++;
-            $bin_hit = 1;
-        }
-        elsif ($minor_af >= 0.10 && $minor_af < 0.20) {
-            $bin_10_20++;
-            $bin_hit = 1;
-        }
-        elsif ($minor_af >= 0.20) {
-            $bin_ge_20++;
-            $bin_hit = 1;
-        }
-
-        # ---- new method: the second most common base, over A+C+G+T
-        my $minor_base = "N";
-        my $minor_count = 0;
-        for my $b (@bases_order) {
-            next if $b eq $major_base;
-            if ($cnt{$b} > $minor_count) {
-                $minor_count = $cnt{$b};
-                $minor_base  = $b;
-            }
-        }
-        my $acgt_depth = $cnt{A} + $cnt{C} + $cnt{G} + $cnt{T};
-        my $minor_af_acgt = $acgt_depth > 0 ? ($minor_count / $acgt_depth) : 0;
-
-        if ($P->{indel_distance} > 0 && ($indel_starts + $del_count) >= 3
-            && ($indel_starts + $del_count) / $dp >= $P->{indel_fraction}) {
-            $indel_position{$chr}{$pos} = 1;
-        }
-
-        next unless $bin_hit || ($minor_count >= 2 && $minor_af_acgt >= 0.02);
-
-        push @rows, {
-            chr => $chr, pos => $pos, ref => $ref, dp => $dp,
-            major_base => $major_base, major_count => $major_count,
-            disagree_count => $disagree_count, minor_af => $minor_af,
-            minor_base => $minor_base, minor_count => $minor_count,
-            minor_fwd => ($minor_base eq "N" ? 0 : $fwd{$minor_base}),
-            minor_rev => ($minor_base eq "N" ? 0 : $rev{$minor_base}),
-            acgt_depth => $acgt_depth, minor_af_acgt => $minor_af_acgt,
-            del_count => $del_count, indel_starts => $indel_starts, n_count => $n_count,
-        };
+        my $r = remap_pileup_record($ln, $min_dp) or next;
+        $legacy{callable}++;
+        my $bin = remap_record_derive($r);
+        $af_hist{"$r->{disagree_count},$r->{dp}"}++;
+        $legacy{bins}[$bin]++;
+        $indel_position{ $r->{chr} }{ $r->{pos} } = 1 if remap_record_is_indel_position($r, $P);
+        push @rows, $r if remap_record_is_candidate($r, $bin);
     }
-
     close($fh);
+    @legacy{qw(minoraf_median minoraf_p95)} = remap_old_method_quantiles(\%af_hist);
+
+    return remap_mixture_from_rows(
+        rows => \@rows, indel_position => \%indel_position, legacy => \%legacy, params => $P,
+        min_dp => $min_dp, out_tsv => $opt{out_tsv}, warn => $warn,
+        contig_depth_ref => $opt{contig_depth_ref}, contig_lengths_ref => $opt{contig_lengths_ref},
+    );
+}
+
+## Streaming way, second half: allele_counts.tsv.gz + pileup_summary.json -> the method.
+sub remap_mixture_from_allele_counts {
+    my (%opt) = @_;
+    my $P    = $opt{params} // remap_mixture_params();
+    my $warn = $opt{warn} // sub { log_message("WARNING: $_[0]", "yellow") };
+    my $S    = $opt{summary};          # decoded pileup_summary.json
+    my $path = $opt{allele_counts};
+
+    unless (ref $S eq 'HASH' && defined $S->{callable}) {
+        $warn->("pileup summary missing or invalid -- no mixture values");
+        return undef;
+    }
+    my $fh;
+    unless (defined $path && -s $path && open($fh, "-|", "gzip", "-dc", $path)) {
+        $warn->("Cannot read allele counts [" . ($path // "") . "] -- no mixture values");
+        return undef;
+    }
+    my @cols = REMAP_ALLELE_COUNT_COLUMNS();
+    my (@rows, %indel_position);
+    my $header_seen = 0;
+    while (my $ln = <$fh>) {
+        next if $ln =~ /^#/;
+        chomp $ln;
+        my @f = split(/\t/, $ln, -1);
+        if (!$header_seen) { $header_seen = 1; next if $f[0] eq 'contig'; }
+        next unless @f == @cols;
+        my %r;
+        @r{@cols} = @f;
+        $r{chr} = delete $r{contig};
+        $r{dp}  = delete $r{depth};
+        my $bin = remap_record_derive(\%r);
+        $indel_position{ $r{chr} }{ $r{pos} } = 1 if remap_record_is_indel_position(\%r, $P);
+        push @rows, \%r if remap_record_is_candidate(\%r, $bin);
+    }
+    close($fh);
+
+    my %legacy = (
+        callable       => $S->{callable},
+        bins           => [ 0, @{ $S->{old_method_bins} // [0, 0, 0] } ],
+        minoraf_median => $S->{old_method_minoraf_median},
+        minoraf_p95    => $S->{old_method_minoraf_p95},
+    );
+    return remap_mixture_from_rows(
+        rows => \@rows, indel_position => \%indel_position, legacy => \%legacy, params => $P,
+        min_dp => $S->{min_dp} // 20, out_tsv => $opt{out_tsv}, warn => $warn,
+        contig_depth_ref => $opt{contig_depth_ref}, contig_lengths_ref => $opt{contig_lengths_ref},
+    );
+}
+
+## The method itself: filters, windows, numbers, and mixed_positions.tsv.
+sub remap_mixture_from_rows {
+    my (%opt) = @_;
+    my @rows               = @{ $opt{rows} };
+    my %indel_position     = %{ $opt{indel_position} };
+    my $L                  = $opt{legacy};
+    my $P                  = $opt{params};
+    my $min_dp             = $opt{min_dp} // 20;
+    my $out_tsv            = $opt{out_tsv};
+    my $warn               = $opt{warn} // sub { warn "WARNING: $_[0]\n" };
+    my $contig_depth_ref   = $opt{contig_depth_ref}   // {};
+    my $contig_lengths_ref = $opt{contig_lengths_ref} // {};
+    my $callable = $L->{callable};
+    my ($bin_5_10, $bin_10_20, $bin_ge_20) = @{ $L->{bins} }[1, 2, 3];
 
     # ---- new method: filters ------------------------------------------------
     # Each row gets the FIRST reason it is set aside for, or PASS. The order is
@@ -11310,7 +11760,7 @@ sub parse_pileup_minor_af_metrics {
             close($tfh);
         }
         else {
-            log_message("WARNING: Cannot write mixed-position TSV [$out_tsv]: $!", "yellow");
+            $warn->("Cannot write mixed-position TSV [$out_tsv]: $!");
         }
     }
 
@@ -11327,16 +11777,8 @@ sub parse_pileup_minor_af_metrics {
     $out{"rate_minoraf_0_10_to_0_20_dp$min_dp"} = $callable ? sprintf("%.6f", $bin_10_20 / $callable) : sprintf("%.6f", 0);
     $out{"rate_minoraf_ge_0_20_dp$min_dp"}      = $callable ? sprintf("%.6f", $bin_ge_20 / $callable) : sprintf("%.6f", 0);
 
-    if (@minor_afs) {
-        @minor_afs = sort { $a <=> $b } @minor_afs;
-        my $n = @minor_afs;
-        $out{"minoraf_median_dp$min_dp"} = sprintf("%.6f", $minor_afs[int($n / 2)]);
-        $out{"minoraf_p95_dp$min_dp"}    = sprintf("%.6f", $minor_afs[int(0.95 * ($n - 1))]);
-    }
-    else {
-        $out{"minoraf_median_dp$min_dp"} = undef;
-        $out{"minoraf_p95_dp$min_dp"}    = undef;
-    }
+    $out{"minoraf_median_dp$min_dp"} = $L->{minoraf_median};
+    $out{"minoraf_p95_dp$min_dp"}    = $L->{minoraf_p95};
 
     # ---- new method ---------------------------------------------------------
     $out{method_version}        = REMAP_MIXTURE_METHOD_VERSION();
@@ -11357,6 +11799,165 @@ sub parse_pileup_minor_af_metrics {
     $out{mixed_params}          = { %$P };
 
     return \%out;
+}
+
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## Streaming way, first half: runs inside the remap step (eurlc-wgs
+## --remap-summary=...), reading samtools output from a pipe.
+
+sub remap_write_json_atomic {
+    my ($data, $path) = @_;
+    open(my $fh, ">", "$path.part") or die "Cannot write [$path.part]: $!\n";
+    print {$fh} JSON::MaybeXS->new(utf8 => 1, pretty => 1, canonical => 1)->encode($data);
+    close($fh) or die "Cannot write [$path.part]: $!\n";
+    rename("$path.part", $path) or die "Cannot rename [$path.part]: $!\n";
+}
+
+sub remap_read_json_file {
+    my ($path) = @_;
+    return undef unless defined $path && -s $path;
+    open(my $fh, "<", $path) or return undef;
+    local $/;
+    my $txt = <$fh>;
+    close($fh);
+    return eval { JSON::MaybeXS->new(utf8 => 1)->decode($txt) };
+}
+
+## samtools depth -aa -> per-contig positions, depth sum and depth histogram
+## (capped at $cap, as depth_stats_from_file does).
+sub remap_summary_depth_stream {
+    my ($in, $out_path, $cap) = @_;
+    $cap //= 5000;
+    my (%n, %sum, %hist, @order);
+    while (my $ln = <$in>) {
+        chomp($ln);
+        next if $ln eq "";
+        my @f = split(/\t/, $ln);
+        next unless @f >= 3;
+        my ($c, $d) = @f[0, 2];
+        next unless defined $d && $d =~ /^\d+$/;
+        push @order, $c unless exists $n{$c};
+        $n{$c}++;
+        $sum{$c} += $d;
+        $d = $cap if $d > $cap;
+        $hist{$c}{$d}++;
+    }
+    my @contigs = map {
+        my $c = $_;
+        { name => $c, n => $n{$c}, sum => $sum{$c},
+          hist => [ map { [ $_ + 0, $hist{$c}{$_} ] } sort { $a <=> $b } keys %{ $hist{$c} } ] }
+    } @order;
+    remap_write_json_atomic({ format_version => 1, cap => $cap, contigs => \@contigs }, $out_path);
+    return scalar @order;
+}
+
+## samtools mpileup -> allele_counts.tsv.gz (sparse) and pileup_summary.json
+## (the earlier method's totals over all callable positions). The summary is
+## written last: it is the step's result file.
+sub remap_summary_pileup_stream {
+    my ($in, %o) = @_;
+    my $min_dp = $o{min_dp} // 20;
+    require IO::Compress::Gzip;
+    my $ac = $o{allele_counts};
+    my $z = IO::Compress::Gzip->new("$ac.part", Minimal => 1)
+        or die "Cannot write [$ac.part]\n";
+    my @cols = REMAP_ALLELE_COUNT_COLUMNS();
+    $z->print("# eurlc-wgs allele_counts format_version=1 min_dp=$min_dp\n");
+    $z->print(join("\t", @cols), "\n");
+
+    my ($lines, $callable, $stored) = (0, 0, 0);
+    my @bins = (0, 0, 0, 0);
+    my %af_hist;
+    while (my $ln = <$in>) {
+        $lines++;
+        my $r = remap_pileup_record($ln, $min_dp) or next;
+        $callable++;
+        my $bin = remap_record_derive($r);
+        $bins[$bin]++;
+        $af_hist{"$r->{disagree_count},$r->{dp}"}++;
+        next unless remap_record_is_stored($r, $bin);
+        $stored++;
+        $z->print(join("\t", $r->{chr}, $r->{pos}, $r->{ref}, $r->{dp},
+            @$r{qw(A_fwd A_rev C_fwd C_rev G_fwd G_rev T_fwd T_rev del indel_starts n)}), "\n");
+    }
+    $z->close() or die "Cannot write [$ac.part]\n";
+    rename("$ac.part", $ac) or die "Cannot rename [$ac.part]: $!\n";
+
+    my ($median, $p95) = remap_old_method_quantiles(\%af_hist);
+    remap_write_json_atomic({
+        format_version            => 1,
+        min_dp                    => $min_dp,
+        pileup_lines              => $lines,
+        callable                  => $callable,
+        old_method_bins           => [ @bins[1, 2, 3] ],     # 5-10 %, 10-20 %, >= 20 %
+        old_method_minoraf_median => $median,
+        old_method_minoraf_p95    => $p95,
+        allele_count_rows         => $stored,
+    }, $o{summary});
+    return $callable;
+}
+
+## Coverage values from depth_summary.json: the same keys and values as
+## depth_stats_from_file() + depth_stats_per_contig_from_file().
+sub depth_stats_from_summary {
+    my ($S) = @_;
+    return (undef, undef) unless ref $S eq 'HASH' && ref $S->{contigs} eq 'ARRAY';
+    my (%hist, %per);
+    my ($n, $sum) = (0, 0);
+    for my $c (@{ $S->{contigs} }) {
+        $n   += $c->{n};
+        $sum += $c->{sum};
+        my $cn = $c->{n};
+        my $target = int(0.50 * ($cn - 1));
+        my ($cum, $median) = (0, 0);
+        for my $e (@{ $c->{hist} }) {
+            $hist{ $e->[0] } += $e->[1];
+            next if $cum > $target;
+            $cum += $e->[1];
+            $median = $e->[0] if $cum > $target;
+        }
+        $per{ $c->{name} } = { median_depth => $median, positions => $cn } if $cn > 0;
+    }
+    return (undef, \%per) if $n < 1;
+
+    my @keys = sort { $a <=> $b } keys %hist;
+    my ($ge1, $ge10, $ge20, $ge30) = (0, 0, 0, 0);
+    for my $k (@keys) {
+        $ge1  += $hist{$k} if $k >= 1;
+        $ge10 += $hist{$k} if $k >= 10;
+        $ge20 += $hist{$k} if $k >= 20;
+        $ge30 += $hist{$k} if $k >= 30;
+    }
+    my $q = sub {
+        my $target = int($_[0] * ($n - 1));
+        my $cum = 0;
+        for my $k (@keys) { $cum += $hist{$k}; return $k if $cum > $target; }
+        return $keys[-1];
+    };
+    my $mean = $sum / $n;
+    my $ss = 0;
+    for my $k (@keys) { my $diff = $k - $mean; $ss += $hist{$k} * $diff * $diff; }
+    my $sd = sqrt($ss / $n);
+    my $cv = $mean > 0 ? ($sd / $mean) : undef;
+    my ($q1, $median, $q3) = map { $q->($_) } (0.25, 0.50, 0.75);
+    my $iqr = $q3 - $q1;
+    my %g = (
+        depth_positions_total => $n,
+        depth_mean            => sprintf("%.3f", $mean),
+        depth_sd              => sprintf("%.3f", $sd),
+        depth_cv              => defined($cv) ? sprintf("%.6f", $cv) : undef,
+        depth_q1              => $q1,
+        depth_median          => $median,
+        depth_q3              => $q3,
+        depth_iqr             => $iqr,
+        depth_iqr_over_median => ($median > 0) ? sprintf("%.6f", $iqr / $median) : undef,
+        breadth_1x_pct        => sprintf("%.5f", 100 * $ge1  / $n),
+        breadth_10x_pct       => sprintf("%.5f", 100 * $ge10 / $n),
+        breadth_20x_pct       => sprintf("%.5f", 100 * $ge20 / $n),
+        breadth_30x_pct       => sprintf("%.5f", 100 * $ge30 / $n),
+    );
+    return (\%g, \%per);
 }
 
 
@@ -20495,6 +21096,18 @@ sub file_age_days {
 ###################################################################################################
 ## wrap_cmd
 
+# Like wrap_cmd, but the commands are chained with && : the first one that
+# fails ends the step with its exit code. (wrap_cmd joins them with ; so only
+# the last command decides -- see planned §36.) A ; inside a quoted bash -c
+# string is left alone, since only __NEWCOMMAND__ markers are replaced.
+sub wrap_cmd_strict {
+    my ($cmd) = @_;
+    $cmd =~ s/__NEWCOMMAND__/&&/g;
+    $cmd =~ s/\s*\n\s*/ /g;
+    my $indir = getdir("in");
+    return "cd '$indir' && $cmd";
+}
+
 sub wrap_cmd {
     my ($cmd) = @_;
 
@@ -22271,6 +22884,7 @@ sub build_overview_contamination_cell {
         "Genus: " . $esc->($contam_genus_raw),
         "Genus level: " . $esc->($fmt_percent->($contam_numeric_genus, 1)),
         "Genus method: " . $esc->($contam_genus_method),
+        "Same-species mixture: " . $esc->(mixture_report_text($sample)),
     );
 
     append_report_issues_to_tooltip_lines($sample, 'contamination', \@tooltip_lines);
@@ -23004,6 +23618,26 @@ sub short_report_section_typing {
     return $html;
 }
 
+## Text for the intra-species mixture measure in the reports (planned §36,
+## småfel 1 and 6). Says why there is no value when there is none.
+sub mixture_report_text {
+    my ($sample) = @_;
+    my $type = uc( $sample->{type} // "" );
+    return "n/a, pre-assembled FASTA input" if $type eq "FASTA";
+    return "not run, single reads (re-mapping needs paired reads)" if $type eq "SE";
+    my $C = $sample->{main_results}{contamination} // {};
+    if ( defined $C->{mixed_windows} ) {
+        my $total = $sample->{results}{remap}{mixture}{mixed_windows_total};
+        my $txt   = "$C->{mixed_windows}" . ( defined $total ? " of $total" : "" ) . " 1-kb windows";
+        $txt .= " ($C->{mixed_windows_pct} %)" if defined $C->{mixed_windows_pct} && $C->{mixed_windows_pct} ne "";
+        return $txt;
+    }
+    my $M = $sample->{results}{remap}{mixture};
+    return "not calculated with this version (eurlc-wgs --resume updates it)"
+        if ref $M eq 'HASH' && %$M;
+    return "n/a (re-mapping not run)";
+}
+
 sub short_report_section_contamination {
     my ($sample, $H) = @_;
 
@@ -23017,6 +23651,17 @@ sub short_report_section_contamination {
     $html .= short_report_row("Genus contaminant", $sample->{main_results}{contamination}{genus} // "none");
     $html .= short_report_row("Genus contamination level", $H->{fmt_percent}->($sample->{main_results}{contamination}{genus_level}, 1));
     $html .= short_report_row("Genus contamination method", $sample->{main_results}{contamination}{genus_method} // "n/a");
+
+    # Second strain of the same species, from the re-mapping (method: architecture §20b)
+    my $C = $sample->{main_results}{contamination} // {};
+    $html .= short_report_row("Same-species mixture", mixture_report_text($sample));
+    if ( defined $C->{mixed_windows} ) {
+        $html .= short_report_row("Mixed positions (after filters)",
+            ( $C->{mixed_sites} // "n/a" ) . ( defined $C->{mixed_sites_isolated} ? ", $C->{mixed_sites_isolated} isolated" : "" ));
+        $html .= short_report_row("Median minor allele fraction", $H->{fmt_percent}->(
+            ( defined $C->{mixed_minoraf_median} && $C->{mixed_minoraf_median} =~ /^[\d.]+$/ ) ? 100 * $C->{mixed_minoraf_median} : undef, 1));
+        $html .= short_report_row("Mixture method", $C->{mixed_method} // "n/a");
+    }
 
     $html .= short_report_issue_rows($sample, "contamination");
 
@@ -23109,6 +23754,9 @@ sub short_report_section_coverage {
     my $R_cov = $sample->{results}{remap}{coverage} || {};
 
     $html .= short_report_raw_row("Re-mapping", "<b>Re-mapping</b>");
+    if ( uc( $sample->{type} // "" ) eq "SE" ) {
+        $html .= short_report_row("Re-mapping", "not run, single reads (needs paired reads)");
+    }
     $html .= short_report_row("Re-mapping rate", $H->{fmt_percent}->($R_map->{reads_mapped_pct}, 1));
     $html .= short_report_row("Properly paired", $H->{fmt_percent}->($R_map->{properly_paired_pct}, 1));
     $html .= short_report_row("Insert size", $H->{fmt_float}->($R_map->{insert_size_average}, 0));
@@ -25637,9 +26285,9 @@ sub print_result_table {
         "skesa_contigs500p",                
         "skesa_N50",
         "skesa_size",                
-        "variants_5",        
-        "variants_10",
-        "variants_20",
+        "mixed_windows",
+        "mixed_windows_pct",
+        "mixed_minoraf_median",
         "CDSs",                        
         "ST",           
         "CC",                   
@@ -25735,9 +26383,9 @@ sub print_result_table {
         $R_samples->[$i]{results}{quast}{spades_alt}{contigs}, #"skesa_contigs500p",                
         $R_samples->[$i]{results}{quast}{spades_alt}{n50}, #"skesa_N50",
         $R_samples->[$i]{results}{quast}{spades_alt}{total_length_0_bp}, #"skesa_size",                
-        $R_samples->[$i]{results}{remap}{mixture}->{"mixed_sites_minoraf_ge_0.05_dp20"}, #"variants_5",        
-        $R_samples->[$i]{results}{remap}{mixture}->{"mixed_sites_minoraf_ge_0.10_dp20"}, #"variants_10",
-        $R_samples->[$i]{results}{remap}{mixture}->{"mixed_sites_minoraf_ge_0.20_dp20"}, #"variants_20",
+        $R_samples->[$i]{main_results}{contamination}{mixed_windows},        #"mixed_windows",
+        $R_samples->[$i]{main_results}{contamination}{mixed_windows_pct},    #"mixed_windows_pct",
+        $R_samples->[$i]{main_results}{contamination}{mixed_minoraf_median}, #"mixed_minoraf_median",
         $R_samples->[$i]{results}{bakta}{annotation}{cdss}, #"CDSs",                        
         $R_samples->[$i]{main_results}{mlst}{st}, #"ST",           
         $R_samples->[$i]{main_results}{mlst}{cc}, #"CC",  

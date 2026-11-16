@@ -6,6 +6,9 @@
 #              manifest (TSV) with sizes and optionally MD5 checksums
 #   extract    a small .tar.gz with the tools' own result files, logs and
 #              report tables for chosen samples (no reads, no BAM)
+#   mixture    the intra-species mixture metric of every sample in one or more
+#              output folders, with species and QC status, and its spread per
+#              species (for choosing thresholds)
 #
 # Standard library only (Python >= 3.7). Reads the output folder, never
 # writes to it.
@@ -28,7 +31,7 @@ import urllib.parse
 import zlib
 from collections import defaultdict
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -234,12 +237,13 @@ HINTS = [
     ("bam",
      r"/remapping/[^/]+/[^/]+\.sorted\.bam(\.bai)?$",
      "BAM from the re-mapping; only read by samtools in the same step. "
-     "Removed by cleanup.bam=1"),
+     "Removed in the step since the streaming remap (cleanup.bam=1, the default); "
+     "rerun=remap cleanup.bam=0 makes it again"),
     ("remap-intermediate",
      r"/remapping/[^/]+/[^/]+\.(depth\.tsv|pileup\.gz)$",
-     "samtools depth / mpileup output; parsed into remap_qc.json + mixed_positions.tsv "
-     "and not read again (resume uses remap_qc.json). Could be removed, or depth.tsv "
-     "gzipped (pipeline change)"),
+     "samtools depth / mpileup output from before the streaming remap step. "
+     "eurlc-wgs --remap-check --convert <folder> checks that the new small files give "
+     "identical results and then removes these"),
     ("assembly-copy",
      r"/remapping/[^/]+/[^/]+\.fasta(\.fai)?$"
      r"|^results/assemblies/by_species/"
@@ -255,8 +259,8 @@ HINTS = [
      "SPAdes working files (k-mer folders, graphs, paths); only contigs.fasta, "
      "spades.log and params.txt are used afterwards"),
     ("other-assembler-work",
-     r"/alternative_assemblies/(Skesa|Shovill|Unicycler)/[^/]+/.*\.(gfa|fastg)$",
-     "assembly graph from SKESA/Shovill/Unicycler; not used afterwards"),
+     r"/alternative_assemblies/(Skesa|Shovill)/[^/]+/.*\.(gfa|fastg)$",
+     "assembly graph from SKESA/Shovill; not used afterwards"),
     ("blast-tmp",
      r"_blast/tmp/",
      "BLAST XML from ResFinder / VirulenceFinder (tmp folder); results are in the "
@@ -605,9 +609,10 @@ EXTRACT_INCLUDE = [
     r"/jellyfish/[^/]+\.(histo|txt|json|tsv)$",
     # stage 3
     r"/quast/(alternative_assemblies/)?[^/]+/(report\.tsv|transposed_report\.tsv|report\.txt|quast\.log)$",
-    r"/remapping/[^/]+/[^/]+\.(remap_qc\.json|coverage|flagstats|idxstats|stats|mixed_positions\.tsv)$",
+    r"/remapping/[^/]+/[^/]+\.(remap_qc\.json|coverage|flagstats|idxstats|stats|mixed_positions\.tsv"
+    r"|depth_summary\.json|pileup_summary\.json|allele_counts\.tsv\.gz)$",
     r"/alternative_assemblies/Spades/[^/]+/(spades\.log|params\.txt)$",
-    r"/alternative_assemblies/(Skesa|Shovill|Unicycler)/[^/]+/[^/]+\.(csv|log|txt)$",
+    r"/alternative_assemblies/(Skesa|Shovill)/[^/]+/[^/]+\.(csv|log|txt)$",
     r"/assembly_selection/",
     # typing and AMR (everything except BLAST tmp)
     r"^results/typing/",
@@ -841,6 +846,161 @@ def _add_text(tar, name, text):
     tar.addfile(ti, io.BytesIO(b))
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mixture
+# ─────────────────────────────────────────────────────────────────────────────
+
+MIX_REASONS = ["few_reads", "low_af", "one_strand", "depth", "short_contig", "contig_end", "indel", "neighbour"]
+OLD_KEYS = ("sites_minoraf_0_05_to_0_10_dp20", "sites_minoraf_0_10_to_0_20_dp20", "sites_minoraf_ge_0_20_dp20")
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _outdir_of(path):
+    """The eurlc-wgs output folder a results file belongs to."""
+    p = os.path.abspath(path)
+    i = p.find(os.sep + "results" + os.sep)
+    return p[:i] if i >= 0 else os.path.dirname(p)
+
+
+def _load_samples(outdir, cache):
+    """name/base -> (species, status) from data/rundata.json."""
+    if outdir in cache:
+        return cache[outdir]
+    info = {}
+    f = os.path.join(outdir, "data", "rundata.json")
+    try:
+        with open(f, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for smp in data.get("samples") or []:
+            if not isinstance(smp, dict):
+                continue
+            mr = smp.get("main_results") or {}
+            species = (mr.get("taxonomy") or {}).get("species") or ""
+            status = ((smp.get("report_issues") or {}).get("summary") or {}).get("status") \
+                or (smp.get("qc") or {}).get("status") or ""
+            for key in (smp.get("base"), smp.get("name")):
+                if key:
+                    info[key] = (species, status)
+    except (OSError, ValueError):
+        pass
+    cache[outdir] = info
+    return info
+
+
+def _quantile(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * q
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
+def cmd_mixture(a):
+    header = ["run", "sample", "species", "qc_status", "method", "depth_median", "windows", "windows_total",
+              "windows_pct", "sites", "isolated", "minor_af_median", "old_total_sites"] + \
+             ["set_aside_" + r for r in MIX_REASONS]
+    rows, old_runs = [], set()
+    cache = {}
+    seen = set()
+    for folder in a.folders:
+        if not os.path.isdir(folder):
+            die("not a folder: %s" % folder)
+        for dirpath, dirnames, filenames in os.walk(folder):
+            dirnames[:] = [d for d in dirnames if d not in ("large_files", "report", "K21", "K33", "K55", "K77", "K99", "K127")]
+            for fn in filenames:
+                if not fn.endswith(".remap_qc.json"):
+                    continue
+                path = os.path.join(dirpath, fn)
+                real = os.path.realpath(path)
+                if real in seen:
+                    continue
+                seen.add(real)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        d = json.load(fh)
+                except (OSError, ValueError) as e:
+                    warn("cannot read %s: %s" % (path, e))
+                    continue
+                name = fn[: -len(".remap_qc.json")]
+                outdir = _outdir_of(path)
+                species, status = _load_samples(outdir, cache).get(name, ("", ""))
+                m = d.get("mixture") or {}
+                old = sum(_num(m.get(k)) or 0 for k in OLD_KEYS)
+                run = os.path.basename(outdir.rstrip(os.sep))
+                if run == "eurlc-wgs":   # default out folder: name it after the data folder
+                    run = os.path.basename(os.path.dirname(outdir.rstrip(os.sep))) or run
+                base_row = [run, name, species, status]
+                depth = (d.get("coverage") or {}).get("depth_median", "")
+                if "mixed_windows" not in m:
+                    old_runs.add(outdir)
+                    rows.append(base_row + ["old", depth, "", "", "", "", "", "", int(old)] + [""] * len(MIX_REASONS))
+                    continue
+                fc = m.get("mixed_filter_counts") or {}
+                rows.append(base_row + [m.get("method_version", ""), depth, m["mixed_windows"],
+                                        m.get("mixed_windows_total", ""), m.get("mixed_windows_pct", ""),
+                                        m.get("mixed_sites", ""), m.get("mixed_sites_isolated", ""),
+                                        m.get("mixed_minoraf_median") or "", int(old)] +
+                            [fc.get(r, 0) for r in MIX_REASONS])
+    if not rows:
+        die("no *.remap_qc.json below %s" % ", ".join(a.folders), 1)
+    rows.sort(key=lambda r: (str(r[2]), str(r[0]), str(r[1])))
+
+    out = sys.stdout
+    if not a.summary_only:
+        widths = [max(len(str(x)) for x in col) for col in zip(header, *rows)]
+        for line in [header] + rows:
+            out.write("  ".join(str(x).ljust(w) for x, w in zip(line, widths)).rstrip() + "\n")
+    if a.tsv:
+        with open(a.tsv, "w", encoding="utf-8") as fh:
+            for line in [header] + rows:
+                fh.write("\t".join(str(x) for x in line) + "\n")
+
+    # spread per species (new method only)
+    by = defaultdict(list)
+    for r in rows:
+        if r[4] == "old":
+            continue
+        w = _num(r[6])
+        if w is None:
+            continue
+        by[r[2] or "(species unknown)"].append((w, _num(r[8])))
+    if by:
+        out.write("\n== Windows with mixed positions per species (new method)\n")
+        thr = a.threshold
+        cols = ["species", "n", "min", "median", "p90", "p95", "max", "median_pct", "p95_pct"]
+        if thr is not None:
+            cols.append("above_%g" % thr)
+        table = [cols]
+        for sp in sorted(by):
+            ws = sorted(v[0] for v in by[sp])
+            ps = sorted(v[1] for v in by[sp] if v[1] is not None)
+            fmt = lambda x: "" if x is None else ("%g" % round(x, 1))
+            line = [sp, len(ws), fmt(ws[0]), fmt(_quantile(ws, .5)), fmt(_quantile(ws, .9)),
+                    fmt(_quantile(ws, .95)), fmt(ws[-1]), fmt(_quantile(ps, .5)), fmt(_quantile(ps, .95))]
+            if thr is not None:
+                line.append(sum(1 for w in ws if w > thr))
+            table.append(line)
+        widths = [max(len(str(x)) for x in col) for col in zip(*table)]
+        for line in table:
+            out.write("  ".join(str(x).ljust(w) for x, w in zip(line, widths)).rstrip() + "\n")
+        out.write("(all samples as found, also mixed or failed ones: filter on qc_status or a list of clean\n"
+                  " samples before reading a threshold off this)\n")
+    if old_runs:
+        out.write("\n%d sample(s) have only the earlier method. To update them (no new mapping needed while\n"
+                  "<sample>.pileup.gz is still there):\n" % sum(1 for r in rows if r[4] == "old"))
+        for o in sorted(old_runs):
+            out.write("  eurlc-wgs outdir=%s --resume\n" % o)
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main(argv=None):
@@ -851,7 +1011,8 @@ def main(argv=None):
                "  eurlc-wgs-inspect inventory /data/run192/eurlc-wgs\n"
                "  eurlc-wgs-inspect inventory /data/run192/eurlc-wgs --md5 --manifest run192.manifest.tsv\n"
                "  eurlc-wgs-inspect inventory --from-listing listing.txt\n"
-               "  eurlc-wgs-inspect extract /data/run192/eurlc-wgs --samples 23SCA11,PT43-10 -o run192_review\n",
+               "  eurlc-wgs-inspect extract /data/run192/eurlc-wgs --samples 23SCA11,PT43-10 -o run192_review\n"
+               "  eurlc-wgs-inspect mixture /data/run*/eurlc-wgs --tsv mixture.tsv --threshold 30\n",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
     sub = p.add_subparsers(dest="cmd")
@@ -882,11 +1043,20 @@ def main(argv=None):
                    help="replace sample names (S01, S02 …) and folder paths; the key is written next to the package")
     e.add_argument("--max-file-mb", type=float, default=20, help="leave out files larger than this")
 
+    x = sub.add_parser("mixture", help="the intra-species mixture metric per sample, and per species",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    x.add_argument("folders", nargs="+", help="output folders, or folders above them (searched for *.remap_qc.json)")
+    x.add_argument("--tsv", metavar="FILE", help="also write the table as tab-separated text")
+    x.add_argument("--threshold", type=float, help="count the samples above this many windows, per species")
+    x.add_argument("--summary-only", action="store_true", help="only the per-species spread")
+
     a = p.parse_args(argv)
     if a.cmd == "inventory":
         return cmd_inventory(a)
     if a.cmd == "extract":
         return cmd_extract(a)
+    if a.cmd == "mixture":
+        return cmd_mixture(a)
     p.print_help()
     return 2
 

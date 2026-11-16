@@ -39,7 +39,7 @@ case "$*" in
   "env list"*)
     echo "# conda environments:"
     for e in fastp fastqc jellyfish illumina-interop bbmap bowtie2 kraken2 bracken \
-             krakentools krona mash spades shovill skesa unicycler checkm-genome quast \
+             krakentools krona mash spades shovill skesa checkm-genome quast \
              bakta mlst fastmlst weasyprint chewbbaca multiqc sistr seqsero2 ectyper \
              lissero virulencefinder plasmidfinder ncbi-amrfinderplus resfinder; do
       echo "eurlc-wgs-$e  /fake/envs/eurlc-wgs-$e"
@@ -137,6 +137,11 @@ run "$T/c3.out" datadir="$D" outdir="$T/out_c3" --assume-yes disable=chewbbaca e
 check "enable=shovill_skesa also switches on [shovill]" grep -q "Overriding from launch-arguments: shovill.enabled=1" "$T/c3.out"
 run "$T/c4.out" datadir="$D" outdir="$T/out_c4" --assume-yes disable=chewbbaca shovill_skesa.enabled=1
 check "shovill_skesa.enabled=1 without shovill: warning" grep -q "shovill_skesa switched on, but shovill.enabled=0" "$T/c4.out"
+cp "$CFG" "$T/cfg.bak"
+printf '\n[unicycler]\nenabled = 1\n' >> "$CFG"
+run "$T/c5.out" datadir="$D" outdir="$T/out_c5" --assume-yes disable=chewbbaca main_assembly=unicycler
+check "old config with Unicycler: notice, not an error" bash -c "grep -q 'unicycler. in the config file: Unicycler is no longer' '$T/c5.out' && grep -q 'main_assembly=unicycler: Unicycler is no longer' '$T/c5.out' && [ $RC -ne 2 ]"
+cp "$T/cfg.bak" "$CFG"
 
 # --- 5. samples, lanes, output folder --------------------------------------
 echo "Samples and output folder"
@@ -182,6 +187,14 @@ check "  ... and reports no new input files" bash -c "! grep -q 'are not part of
 mkdir -p "$T/out_logs/log"; echo x > "$T/out_logs/log/log.txt"
 run "$T/s4.out" datadir="$D" outdir="$T/out_logs" --assume-yes disable=chewbbaca
 check "output folder with only logs: started anew without asking" grep -q "holds only logs" "$T/s4.out"
+
+# --- remap step: streaming way and earlier way against a fixed reference -----
+if [[ -d "$REPO/tests/data/remap" ]]; then
+    check "remap: streaming and earlier way identical to the reference (tests/data/remap)" \
+          bash -c "perl '$SCRIPT' --remap-check '$REPO/tests/data/remap' > '$T/remapcheck.out' 2>&1"
+    check "remap: --remap-summary=depth writes a summary" \
+          bash -c "perl '$SCRIPT' --remap-summary=depth --out '$T/ds.json' < '$REPO/tests/data/remap/smoke/eurlc-wgs/results/qc/stage3_assemblies/remapping/T1/T1.depth.tsv' && grep -q format_version '$T/ds.json'"
+fi
 
 # --- scripts/eurlc-wgs-inspect (read-only, on the output folder above) ------
 INSPECT="$(dirname "$0")/../scripts/eurlc-wgs-inspect"

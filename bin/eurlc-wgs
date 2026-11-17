@@ -136,6 +136,13 @@ our %S_VALIDATION = ();                  # result of the validation against a da
 our %S_EFSA_EXPORT = ();                 # result of the EFSA export (run_efsa_export)
 our %S_VERIFICATION = ();                # result of the comparison with a reference run (run_reference_verification)
 our $S_FINGERPRINT_FORMAT_VERSION = 1;   # report/tables/eurlc_results_fingerprint.json.gz (write_results_fingerprint)
+# Built-in cgMLST QC thresholds per schema (cgmlst_threshold_value). NIPH +
+# NIPHEM: clean C. jejuni/C. coli at most 3 (Nov 2026); EURL-Campylobacter
+# accepts <= 10 (Inter-EURL Deliverable 10).
+our %CGMLST_SCHEMA_QC_DEFAULTS = (
+    "CAMPISO-PubMLST-8"       => { warning_typing_cgmlst_paralogous => ">5", critical_typing_cgmlst_paralogous => ">10" },
+    "chewie_ns_campylobacter" => { warning_typing_cgmlst_paralogous => ">5", critical_typing_cgmlst_paralogous => ">10" },
+);
 our %S_CLEANUP_REMOVED = ();
 our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
 our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
@@ -1185,6 +1192,42 @@ my %QC_MEASURE_DEF = (
         path     => [qw(typing cgmlst_call_rate)],
         label    => 'cgMLST call rate',
     },
+    # typing that did not work (typing_qc_values, in evaluate_sample_qc)
+    typing_mlst_incomplete_alleles => {
+        category => 'typing',
+        path     => [qw(typing qc mlst_incomplete_alleles)],
+        label    => 'MLST loci without an exact allele (missing, partial or several copies)',
+        flag     => "MLST: %s of the loci without an exact allele",
+    },
+    typing_mlst_st_disagree => {
+        category => 'typing',
+        path     => [qw(typing qc mlst_st_disagree)],
+        label    => 'mlst and fastMLST give different STs (1 = yes)',
+        flag     => "MLST: mlst and fastMLST give different STs",
+    },
+    typing_serotype_missing => {
+        category => 'typing',
+        path     => [qw(typing qc serotype_missing)],
+        label    => 'No serotype (Salmonella serovar, E. coli O and H type, Listeria serogroup; 1 = none)',
+        flag     => "No serotype",
+    },
+    typing_serotype_disagree => {
+        category => 'typing',
+        path     => [qw(typing qc serotype_disagree)],
+        label    => 'SISTR and SeqSero2 give different serovars (1 = yes)',
+        flag     => "SISTR and SeqSero2 give different serovars",
+    },
+    typing_serotype_tool_flag => {
+        category => 'typing',
+        path     => [qw(typing qc serotype_tool_flag)],
+        label    => "The serotyping tool's own QC is not PASS (SISTR; ECTyper, or ECTyper names another species)",
+        flag     => "The serotyping tool's own QC is not PASS",
+    },
+    typing_cgmlst_inferred_pct => {
+        category => 'typing',
+        path     => [qw(typing cgmlst_inferred_pct)],
+        label    => 'cgMLST alleles new to the schema (% of the called)',
+    },
     typing_cgmlst_paralogous => {
         category => 'typing',
         path     => [qw(typing cgmlst_paralogous)],   # set with cgmlst_call_rate, same schema
@@ -1924,9 +1967,6 @@ $rundata{config}{defaults} = {
             warning_assembly_size => "<1560000 >1980000",
             critical_assembly_size => "<1400000 >2300000",
             fail_assembly_size => "<1370000 >2600000",
-            warning_typing_cgmlst_call_rate   => "<95",
-            critical_typing_cgmlst_call_rate   => "<90",      
-            fail_typing_cgmlst_call_rate   => "<85",                    
             # Assembly (Nov 2026; clean C. jejuni: contigs >=500 bp at most 153,
             # N50 at least 18.5 kb, GC 30.21-30.54). Contigs: EURL-Campylobacter
             # says <=200 (Inter-EURL Deliverable 10); 250 leaves room above the
@@ -1960,9 +2000,6 @@ $rundata{config}{defaults} = {
             warning_assembly_size => "<1560000 >2060000",
             critical_assembly_size => "<1400000 >2300000",
             fail_assembly_size => "<1370000 >2600000",
-            warning_typing_cgmlst_call_rate   => "<95",
-            critical_typing_cgmlst_call_rate   => "<90",      
-            fail_typing_cgmlst_call_rate   => "<85",                     
             # Assembly (Nov 2026; clean C. coli: contigs >=500 bp at most 208,
             # N50 at least 14 kb, GC 30.86-31.95). See C. jejuni.
             warning_assembly_contigs_500 => ">250",
@@ -2047,7 +2084,35 @@ $rundata{config}{defaults} = {
             fail_coverage_trimmed_q30_coverage => "<30",          
             fail_contamination_species_level => ">5",                        
             fail_contamination_genus_level   => ">5",    # largest other genus (crossreactive_genus excluded)
-            warning_qscore_trimmed_average_read_length => "<50",
+            # Short reads after trimming (Nov 2026): reads under 36 bp are
+            # removed by fastp, which keeps every tool working (Kraken2 needs
+            # 35 bp, SPAdes/SKESA/Mash 21); the risk is poor assemblies.
+            # Clean 2x75 runs have a mean of at least 74 bp. No FAIL: CRITICAL
+            # already means "not reportable unless a bioinformatician approves".
+            # cgMLST call rate (Nov 2026): every schema the sample was typed
+            # with is judged; per schema, species or genus they can differ.
+            # Clean C. jejuni/C. coli at least 95.8 %. CRITICAL <90 = EFSA B15
+            # (more than 10 % missing loci stops an upload).
+            warning_typing_cgmlst_call_rate  => "<95",
+            critical_typing_cgmlst_call_rate => "<90",
+            fail_typing_cgmlst_call_rate     => "<80",
+            # Typing that did not work (Nov 2026): a warning, not a rejection --
+            # the other results stay valid. To be reviewed per species with
+            # more data (E. coli, Listeria).
+            warning_typing_mlst_incomplete_alleles => ">0",
+            warning_typing_mlst_st_disagree        => ">0",
+            warning_typing_serotype_missing        => ">0",
+            warning_typing_serotype_disagree       => ">0",
+            warning_typing_serotype_tool_flag      => ">0",
+            warning_qscore_trimmed_average_read_length  => "<60",
+            critical_qscore_trimmed_average_read_length => "<45",
+            # reads removed as too short (%): clean p95 11-12, max 20
+            warning_qscore_trimmed_too_short_pct        => ">25",
+            # adapter left after trimming (% of reads): clean at most 0.08;
+            # Inter-EURL Deliverable 10 (EURL-AR) <=0.1. CRITICAL: the
+            # trimming did not work (assemblers tolerate small amounts).
+            warning_qscore_trimmed_adapters             => ">0.1",
+            critical_qscore_trimmed_adapters            => ">2",
             # N bases in the raw reads (%): clean isolates p95 0.13-0.17,
             # a few runs 10-13 % (failed cycles). A sign that the sequencing
             # was not optimal, not a reason to reject (Nov 2026).
@@ -3311,6 +3376,16 @@ if ( exists $args{"summarize"} || exists $args{"summarise"} ) {
     $R_samples = $rundata{samples};   # RESET alias
 
     refresh_summary_derived_data();
+
+    # The QC was evaluated again (thresholds may have changed): keep
+    # rundata.json in step, as a full run does, so that eurlc-wgs-inspect
+    # and other programs see the same statuses as the report.
+    push @{ $rundata{summarize_history} }, {
+        time      => strftime( "%Y-%m-%d %H:%M:%S", localtime ),
+        version   => $PIPELINE_VERSION,
+        overrides => $rundata{config}{overrides} // "",
+    };
+    save_hash_as_json( $rundata_file, \%rundata );
 
     summarize_results();
     close_logfile();
@@ -5869,6 +5944,77 @@ sub q30_read_length_threshold {
              sprintf( "EFSA/EURL-AR limit for %.0f-bp reads", $len ) );
 }
 
+## cgMLST QC per schema (Nov 2026). The thresholds of the typing_cgmlst_*
+## measures depend more on the schema than on the species, so they are
+## looked up: the schema's config section [chewbbaca_schema_<name>] -> the
+## built-in schema defaults below -> the species -> its genus -> default.
+## Every schema the sample was typed with is judged against its own
+## thresholds, and the one with the worst status is reported
+## (main_results.typing.cgmlst_call_rate/_schema/paralogous/inferred_pct).
+# (%CGMLST_SCHEMA_QC_DEFAULTS is declared with the other globals at the top)
+
+sub cgmlst_schema_cfg {
+    my ($schema) = @_;
+    return undef unless defined $schema && $schema ne "";
+    for my $name ( keys %{ $R_cfg->{chewbbaca_schemas} // {} } ) {
+        my $s = $R_cfg->{chewbbaca_schemas}{$name};
+        next unless ref $s eq 'HASH';
+        my $dir = basename( $s->{path} // "" );
+        return $s if lc($name) eq lc($schema) || lc($dir) eq lc($schema);
+    }
+    return undef;
+}
+
+sub cgmlst_threshold_value {
+    my ($species, $schema, $key) = @_;
+    my $s = cgmlst_schema_cfg($schema);
+    return $s->{$key} if $s && defined $s->{$key} && $s->{$key} ne "";
+    if ( defined $schema ) {
+        for my $k ( keys %CGMLST_SCHEMA_QC_DEFAULTS ) {
+            return $CGMLST_SCHEMA_QC_DEFAULTS{$k}{$key}
+                if lc($k) eq lc($schema) && exists $CGMLST_SCHEMA_QC_DEFAULTS{$k}{$key};
+        }
+    }
+    return get_config_value_for_species($species, $key);
+}
+
+sub select_reported_cgmlst_schema {
+    my ($samplenr, $species) = @_;
+    my $T = $R_samples->[$samplenr]{main_results}{typing} // return;
+    my $recs = $T->{cgmlst_schemas};
+    return unless ref $recs eq 'ARRAY' && @$recs;
+    my %last;
+    $last{ $_->{scheme} // "" } = $_ for grep { ref $_ eq 'HASH' } @$recs;   # one per schema (the latest)
+    my %rank = ( PASS => 0, WARNING => 1, CRITICAL => 2, FAIL => 3 );
+    my $status = sub {
+        my ($schema, $measure, $value) = @_;
+        return 0 unless defined $value && $value =~ /^-?[\d.]+(?:[eE][-+]?\d+)?$/;
+        for my $lvl (qw(fail critical warning)) {
+            my $thr = parse_threshold_string( cgmlst_threshold_value( $species, $schema, "${lvl}_$measure" ) );
+            return $rank{ uc $lvl } if $thr && threshold_matches( $value, $thr );
+        }
+        return 0;
+    };
+    my ($best, $best_key);
+    for my $schema ( sort keys %last ) {
+        my $r  = $last{$schema};
+        my $cr = $r->{call_rate};
+        next unless defined $cr && $cr =~ /^-?[\d.]+/;
+        my $st = $status->( $schema, 'typing_cgmlst_call_rate', $cr );
+        my $sp = $status->( $schema, 'typing_cgmlst_paralogous', $r->{paralogous} );
+        my $key = [ ( $st > $sp ? $st : $sp ), -$cr ];      # worst status, then the lowest call rate
+        if ( !$best || $key->[0] > $best_key->[0] || ( $key->[0] == $best_key->[0] && $key->[1] > $best_key->[1] ) ) {
+            ( $best, $best_key ) = ( $r, $key );
+        }
+    }
+    return unless $best;
+    $T->{cgmlst_call_rate}        = $best->{call_rate};
+    $T->{cgmlst_call_rate_schema} = $best->{scheme};
+    $T->{cgmlst_paralogous}       = $best->{paralogous} // "n/a";
+    $T->{cgmlst_inferred_pct}     = $best->{inferred_pct} // "n/a";
+    return $best->{scheme};
+}
+
 sub load_expectations {
     my ($samplenr) = @_;
 
@@ -5877,12 +6023,18 @@ sub load_expectations {
     $R_samples->[$samplenr]{qc_expectations} = {};
     $R_samples->[$samplenr]{qc_checks}       = {};
 
+    # cgMLST: the schema whose status is worst is the one reported, and its
+    # thresholds apply (cgmlst_threshold_value)
+    my $cg_schema = select_reported_cgmlst_schema( $samplenr, $species );
+
     foreach my $measure (@measures) {
         my %raw;
 
         foreach my $level (qw(expected warning critical fail)) {
             my $key = "${level}_$measure";
-            $raw{$level} = get_config_value_for_species($species, $key);
+            $raw{$level} = $measure =~ /^typing_cgmlst_/
+                         ? cgmlst_threshold_value( $species, $cg_schema, $key )
+                         : get_config_value_for_species($species, $key);
         }
 
         # "efsa": the Q30 limit for the sample's read length (EFSA B8 / EURL-AR)
@@ -24527,6 +24679,21 @@ sub get_main_result_value {
 }
 
 
+## The message of a "flag" measure (%QC_MEASURE_DEF key flag: a sentence,
+## %s = the observed value), with the details typing_qc_values recorded
+## (main_results.typing.qc.<field>_detail), instead of "<label> is 1,
+## outside warning threshold (>0)".
+sub qc_flag_message {
+    my ($sample, $def, $observed) = @_;
+    my $msg = $def->{flag};
+    $msg =~ s/%s/$observed/g;
+    my @p = @{ $def->{path} // [] };
+    my $d = $sample->{main_results};
+    $d = ref $d eq 'HASH' ? $d->{$_} : undef for @p[ 0 .. $#p - 1 ];
+    my $detail = ref $d eq 'HASH' ? $d->{ $p[-1] . "_detail" } : undef;
+    return $msg . ( defined $detail && $detail ne "" ? ": $detail" : "" );
+}
+
 sub evaluate_qc_measure {
     my ($samplenr, $measure) = @_;
 
@@ -24579,18 +24746,21 @@ sub evaluate_qc_measure {
         my $thr_text = format_threshold_text($R_thresholds->{fail});
         $status  = "FAIL";
         $message = "$label is $observed_text, outside fail threshold ($thr_text)";
+        $message = qc_flag_message($sample, $def, $observed) if $def->{flag};
         set_report_issue($samplenr, $category, "fail", $message);
     }
     elsif (defined $R_thresholds->{critical} && threshold_matches($observed, $R_thresholds->{critical})) {
         my $thr_text = format_threshold_text($R_thresholds->{critical});
         $status  = "CRITICAL";
         $message = "$label is $observed_text, outside critical threshold ($thr_text)";
+        $message = qc_flag_message($sample, $def, $observed) if $def->{flag};
         set_report_issue($samplenr, $category, "critical", $message);
     }
     elsif (defined $R_thresholds->{warning} && threshold_matches($observed, $R_thresholds->{warning})) {
         my $thr_text = format_threshold_text($R_thresholds->{warning});
         $status  = "WARNING";
         $message = "$label is $observed_text, outside warning threshold ($thr_text)";
+        $message = qc_flag_message($sample, $def, $observed) if $def->{flag};
         set_report_issue($samplenr, $category, "warning", $message);
     }
     else {
@@ -24607,6 +24777,89 @@ sub evaluate_qc_measure {
 }
 
 
+## Typing QC (Nov 2026): small numeric measures for typing that did not
+## work, in main_results.typing.qc (typing_mlst_* / typing_serotype_* in
+## %QC_MEASURE_DEF; default WARNING >0). "n/a" where a check does not apply
+## (no MLST scheme, no serotyping for the species, the tool not run).
+sub typing_qc_values {
+    my ($samplenr) = @_;
+    my $s   = $R_samples->[$samplenr];
+    my $res = $s->{results} // {};
+    my $sp  = $s->{main_results}{taxonomy}{species} // "";
+    my %q   = map { $_ => "n/a" } qw(mlst_incomplete_alleles mlst_st_disagree serotype_missing serotype_disagree serotype_tool_flag);
+    my $none = qr/^\s*(?:|n\/a|na|-|none|unknown|nontypable|non-typable|not typable)\s*$/i;
+
+    # MLST: of the seven loci, those without an exact allele (missing "-",
+    # partial "?", several copies "1,2"); a new allele "~12" is information
+    my ($main) = grep { ref $_ eq 'HASH' && grep { /^allele_/ } keys %$_ }
+                 ( ( $res->{mlst} // {} )->{main}, ( $res->{fastmlst} // {} )->{main} );
+    if ($main) {
+        my @al = map { $main->{$_} // "" } grep { /^allele_/ } keys %$main;
+        my @bad = map { ( my $g = $_ ) =~ s/^allele_//; "$g($main->{$_})" } grep { ( $main->{$_} // "" ) !~ /^~?\d+$/ } sort grep { /^allele_/ } keys %$main;
+        $q{mlst_incomplete_alleles}        = scalar @bad;
+        $q{mlst_incomplete_alleles_detail} = join( ", ", @bad );
+    }
+    my ($st1, $st2) = ( ( ( $res->{mlst} // {} )->{main} // {} )->{st}, ( ( $res->{fastmlst} // {} )->{main} // {} )->{st} );
+    if ( defined $st1 && defined $st2 && $st1 =~ /^\d+$/ && $st2 =~ /^\d+$/ ) {
+        $q{mlst_st_disagree} = $st1 == $st2 ? 0 : 1;
+        $q{mlst_st_disagree_detail} = "mlst ST$st1, fastMLST ST$st2" if $st1 != $st2;
+    }
+    elsif ( ( defined $st1 && $st1 =~ /^\d+$/ ) || ( defined $st2 && $st2 =~ /^\d+$/ ) ) {
+        $q{mlst_st_disagree} = 0;
+    }
+
+    my $ran = sub { my $r = $res->{ $_[0] }; ref $r eq 'HASH' && ( $r->{status} // "" ) eq "done" };
+    if ( $sp =~ /^Salmonella\b/i ) {
+        my $si = $ran->("sistr")    ? $res->{sistr}    : undef;
+        my $ss = $ran->("seqsero2") ? $res->{seqsero2} : undef;
+        if ( $si || $ss ) {
+            my @got = grep { defined $_ && $_ !~ $none } ( $si ? $si->{serotype} : undef ), ( $ss ? $ss->{serotype} : undef );
+            $q{serotype_missing} = @got ? 0 : 1;
+            $q{serotype_missing_detail} = "neither SISTR nor SeqSero2 gave a serovar" unless @got;
+        }
+        if ( $si && $ss ) {
+            my $field = $si->{serotype_field} // "serovar";
+            my $sv = $si->{$field} // $si->{serovar} // "";
+            my $sq = $ss->{serotype} // "";
+            if ( $sv !~ $none && $sq !~ $none ) {
+                my $norm = sub { my $x = lc shift; $x =~ s/\s+//g; $x =~ s/^salmonella(enterica)?//; $x };
+                my %v = map { $norm->($_) => 1 } split /\|/, $sv;
+                my $same = grep { $v{ $norm->($_) } } split /\|/, $sq;
+                # SISTR's Typhimurium without h2 = the monophasic variant SeqSero2 names
+                $same ||= ( ( $si->{not_used_reason} // "" ) =~ /monophasic/i && $sq =~ /^I 4,\[5\],12:i:-$/ );
+                $q{serotype_disagree} = $same ? 0 : 1;
+                $q{serotype_disagree_detail} = "SISTR $sv, SeqSero2 $sq" unless $same;
+            }
+            else { $q{serotype_disagree} = 0; }
+        }
+        if ($si) {
+            my $qs = uc( $si->{qc_status} // "PASS" );
+            $q{serotype_tool_flag} = $qs eq "PASS" ? 0 : 1;
+            $q{serotype_tool_flag_detail} = "SISTR QC $qs" . ( ( $si->{qc_messages} // "" ) ne "" ? " ($si->{qc_messages})" : "" ) if $qs ne "PASS";
+        }
+    }
+    elsif ( $sp =~ /^(Escherichia|Shigella)\b/i ) {
+        if ( $ran->("ectyper") ) {
+            my $e = $res->{ectyper};
+            my ($o, $h) = ( $e->{o_type} // "", $e->{h_type} // "" );
+            $q{serotype_missing}   = ( $o =~ $none || $h =~ $none || $o =~ /^-|^O-$/ || $h =~ /^-|^H-$/ ) ? 1 : 0;
+            $q{serotype_missing_detail} = "ECTyper O type '$o', H type '$h'" if $q{serotype_missing};
+            my $flag = ( ( $e->{qc} // "" ) =~ /WARNING|FAIL/i ) ? 1 : 0;
+            $flag = 1 if ( $e->{species} // "" ) ne "" && ( $e->{species} // "" ) !~ /^(Escherichia|Shigella)\b/i;
+            $q{serotype_tool_flag} = $flag;
+            $q{serotype_tool_flag_detail} = "ECTyper QC '" . ( $e->{qc} // "" ) . "', species '" . ( $e->{species} // "" ) . "'" if $flag;
+        }
+    }
+    elsif ( $sp =~ /^Listeria monocytogenes/i ) {
+        if ( $ran->("lissero") ) {
+            my $g = $res->{lissero}{serogroup} // "";
+            $q{serotype_missing} = ( $g =~ $none || $g =~ /^non-?typ/i ) ? 1 : 0;
+            $q{serotype_missing_detail} = "LisSero serogroup '$g'" if $q{serotype_missing};
+        }
+    }
+    $s->{main_results}{typing}{qc} = { %q };     # fresh each time (details only where a check flags)
+}
+
 sub evaluate_sample_qc {
     my ($samplenr) = @_;
 
@@ -24616,6 +24869,9 @@ sub evaluate_sample_qc {
     }
 
     reset_report_issues($samplenr);
+
+    # typing that did not work (MLST, serotype)
+    typing_qc_values($samplenr);
 
     # re-mapping measures for runs analysed before they existed
     remap_qc_values($samplenr) if !exists $R_samples->[$samplenr]{main_results}{remap}
@@ -24647,6 +24903,29 @@ sub evaluate_sample_qc {
 ## note; CRITICAL and FAIL: no; an abandoned sample, or one where a step
 ## failed: no. Whether the species is inside a validation's target species
 ## is decided by the validation, not here.
+## Of the QC measures at a status, the one most likely to be the root cause,
+## for the reportable reason: reads and depth before species and
+## contamination, before the re-mapping, the assembly and the typing (low
+## coverage gives a small assembly and a low call rate, not the reverse).
+## Returns its message, with "(and N more)", or undef.
+sub qc_root_cause_message {
+    my ($s, $status) = @_;
+    my @hits = grep { ( ( $s->{qc_checks} // {} )->{$_}{status} // "" ) eq $status } keys %{ $s->{qc_checks} // {} };
+    return undef unless @hits;
+    my %cat_rank = ( coverage => 0, qscore => 1, taxonomy => 2, contamination => 3, assembly => 5, typing => 6 );
+    my $rank = sub {
+        my ($m) = @_;
+        return 4 if $m =~ /^remap_/;                                  # derived from the assembly and the reads
+        return -1 if $m =~ /^coverage_trimmed_q30_coverage$|pair_name_mismatch/;
+        my $c = ( $QC_MEASURE_DEF{$m} // {} )->{category} // "";
+        return $cat_rank{$c} // 7;
+    };
+    my ($best) = sort { $rank->($a) <=> $rank->($b) || $a cmp $b } @hits;
+    my $msg = $s->{qc_checks}{$best}{message} // $best;
+    $msg .= " (and " . ( @hits - 1 ) . " more)" if @hits > 1;
+    return $msg;
+}
+
 sub set_reportable {
     my ($samplenr) = @_;
     my $s = $R_samples->[$samplenr] or return;
@@ -24659,14 +24938,14 @@ sub set_reportable {
         ( $value, $reason ) = ( "no", "abandoned" . ( defined $m && $m ne "" ? ": $m" : "" ) );
     }
     elsif ( $status eq "FAIL" || $status eq "CRITICAL" ) {
-        my $i = $first->( lc $status );
+        my $i = qc_root_cause_message( $s, $status ) // $first->( lc $status );
         ( $value, $reason ) = ( "no", "QC $status" . ( $i ne "" ? ": $i" : "" ) );
     }
     elsif ( @{ $s->{failed_steps} // [] } ) {
         ( $value, $reason ) = ( "no", "step(s) failed: " . join(", ", @{ $s->{failed_steps} }) );
     }
     elsif ( $status eq "WARNING" ) {
-        my $i = $first->("warning");
+        my $i = qc_root_cause_message( $s, "WARNING" ) // $first->("warning");
         $note = "reportable with a QC WARNING" . ( $i ne "" ? ": $i" : "" );
     }
     $s->{main_results}{reportable} = { value => $value, reason => $reason, note => $note };

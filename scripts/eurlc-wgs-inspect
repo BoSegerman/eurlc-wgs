@@ -1256,8 +1256,9 @@ def cmd_summarize(a):
 
     # ── spread per species and measure ──────────────────────────────────────
     w("\n== Spread of each measure per species%s\n"
-      % (" (spread and W/C/F over the samples listed as clean; 'problems flagged' = how many of the\n"
-         "   other listed samples get WARNING or worse on this measure, 'problem values' = their values)"
+      % (" (spread and W/C/F over the samples listed as clean; 'problems flagged' = per label in --expected,\n"
+         "   how many of its samples get WARNING or worse on this measure (e.g. contaminated 3/4);\n"
+         "   'problem values' = their values, per label; samples not listed, or listed as unknown, are left out)"
          if expected else ""))
     w("(n = samples with a value; the thresholds are the ones in force in these runs)\n")
     by_sp = defaultdict(list)
@@ -1272,22 +1273,25 @@ def cmd_summarize(a):
         for m in mnames:
             if a.measures and not re.search(a.measures, m):
                 continue
-            vals, lv, flag, pvals = [], defaultdict(int), [0, 0], []
+            vals, lv = [], defaultdict(int)
+            flag = defaultdict(lambda: [0, 0])      # label -> [flagged, with a value]
+            pvals = defaultdict(list)               # label -> values
             for r, meas in by_sp[sp]:
                 obs, st = meas.get(m, (None, ""))
                 v = _num(obs)
                 if v is None:
                     continue
                 if expected and r.get("expected") not in ("clean",):
-                    if r.get("expected") and r.get("expected") != "unknown":
-                        flag[1] += 1
+                    lab = r.get("expected")
+                    if lab and lab != "unknown":
+                        flag[lab][1] += 1
                         if st in ("WARNING", "CRITICAL", "FAIL"):
-                            flag[0] += 1
-                        pvals.append(v)
+                            flag[lab][0] += 1
+                        pvals[lab].append(v)
                     continue
                 vals.append(v)
                 lv[st] += 1
-            if not vals and not flag[1]:
+            if not vals and not flag:
                 continue
             vals.sort()
             t = thresholds.get(sp, {}).get(m, {})
@@ -1297,8 +1301,10 @@ def cmd_summarize(a):
                     t.get("warning", ""), t.get("critical", ""), t.get("fail", ""),
                     "%d/%d/%d" % (lv["WARNING"], lv["CRITICAL"], lv["FAIL"])]
             if expected:
-                line.append("%d of %d" % tuple(flag) if flag[1] else "")
-                line.append(",".join(_fmt_num(v) for v in sorted(pvals)[:6]) + (",..." if len(pvals) > 6 else ""))
+                labs = sorted(flag)
+                line.append("; ".join("%s %d/%d" % (l, flag[l][0], flag[l][1]) for l in labs))
+                line.append("; ".join("%s: %s%s" % (l, ",".join(_fmt_num(v) for v in sorted(pvals[l])[:5]),
+                                                     ",..." if len(pvals[l]) > 5 else "") for l in labs))
             table.append(line)
         if len(table) == 1:
             w("  (no values%s)\n" % (" from samples listed as clean -- add them to --expected, or run without it"

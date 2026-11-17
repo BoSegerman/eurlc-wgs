@@ -1175,7 +1175,10 @@ def cmd_summarize(a):
             measure_names.update(meas)
             sp = row["species"] or "(species unknown)"
             for m, t in _thresholds_of(smp).items():
-                thresholds[sp].setdefault(m, t)
+                cur = thresholds[sp].setdefault(m, {lvl: [] for lvl in ("warning", "critical", "fail")})
+                for lvl in ("warning", "critical", "fail"):     # e.g. Q30 limits by read length differ per sample
+                    if t.get(lvl) and t[lvl] not in cur[lvl]:
+                        cur[lvl].append(t[lvl])
             for blk in ("qc", "runtime_issues"):
                 for lvl, txt in _issue_texts(smp.get(blk)):
                     key = (blk, re.sub(r"(?<![A-Za-z])-?\d+(?:\.\d+)?", "#", txt))
@@ -1298,7 +1301,7 @@ def cmd_summarize(a):
             f = _fmt_num
             line = [m, len(vals), f(vals[0] if vals else None), f(_quantile(vals, .05)), f(_quantile(vals, .5)),
                     f(_quantile(vals, .95)), f(vals[-1] if vals else None),
-                    t.get("warning", ""), t.get("critical", ""), t.get("fail", ""),
+                    "/".join(t.get("warning", [])), "/".join(t.get("critical", [])), "/".join(t.get("fail", [])),
                     "%d/%d/%d" % (lv["WARNING"], lv["CRITICAL"], lv["FAIL"])]
             if expected:
                 labs = sorted(flag)

@@ -1010,6 +1010,11 @@ my %QC_MEASURE_DEF = (
         path     => [qw(qscore raw gc)],
         label    => 'Raw read GC content',
     },
+    qscore_raw_gc_delta => {
+        category => 'qscore',
+        path     => [qw(qscore raw gc_delta)],      # set in evaluate_sample_qc
+        label    => 'Raw read GC minus assembly GC (percentage points)',
+    },
     qscore_raw_n_rate => {
         category => 'qscore',
         path     => [qw(qscore raw n_pct)],      # was n_rate, which is never filled
@@ -1132,6 +1137,42 @@ my %QC_MEASURE_DEF = (
         category => 'assembly',
         path     => [qw(assembly contigs_500)],
         label    => 'Assembly number of contigs (500 bp or longer)',
+    },
+    # from the re-mapping of the reads to the assembly (postprocess_remap)
+    remap_reads_mapped_pct => {
+        category => 'coverage',
+        path     => [qw(remap reads_mapped_pct)],
+        label    => 'Reads mapping back to the assembly (%)',
+    },
+    remap_properly_paired_pct => {
+        category => 'coverage',
+        path     => [qw(remap properly_paired_pct)],
+        label    => 'Properly paired reads in the re-mapping (%; falls with inserts > 500 bp)',
+    },
+    remap_pairs_diff_contig_pct => {
+        category => 'coverage',
+        path     => [qw(remap pairs_diff_contig_pct)],
+        label    => 'Mapped pairs with the mates on different contigs (%)',
+    },
+    remap_breadth_10x_pct => {
+        category => 'coverage',
+        path     => [qw(remap breadth_10x_pct)],
+        label    => 'Assembly covered at >=10x (%)',
+    },
+    remap_depth_iqr_over_median => {
+        category => 'coverage',
+        path     => [qw(remap depth_iqr_over_median)],
+        label    => 'Depth unevenness along the assembly (IQR / median)',
+    },
+    remap_error_rate_pct => {
+        category => 'coverage',
+        path     => [qw(remap error_rate_pct)],
+        label    => 'Mismatches against the assembly (% of mapped bases)',
+    },
+    remap_low_depth_contig_pct => {
+        category => 'contamination',
+        path     => [qw(remap low_depth_contig_pct)],
+        label    => 'Assembly in contigs >=1 kb at <20 % of the median depth (%)',
     },
     assembly_gc => {
         category => 'assembly',
@@ -1873,6 +1914,9 @@ $rundata{config}{defaults} = {
             fatal_q30_mindepth   => 30,
             gc         => 30,
             crossreactive_species => "Campylobacter coli",
+            # Another species: clean C. jejuni at most 0.45 % (Nov 2026, 135
+            # clean samples); 2 % Salmonella (D3 007/017) gives 2.1 %.
+            warning_contamination_species_level => ">1",
             # Assembly size: WARNING = the narrower, CRITICAL = the wider of
             # (the EURL recommendation, the range holding >99 % of the GenBank
             # assemblies of the species); FAIL = NCBI's limits. From the SVA
@@ -1883,6 +1927,21 @@ $rundata{config}{defaults} = {
             warning_typing_cgmlst_call_rate   => "<95",
             critical_typing_cgmlst_call_rate   => "<90",      
             fail_typing_cgmlst_call_rate   => "<85",                    
+            # Assembly (Nov 2026; clean C. jejuni: contigs >=500 bp at most 153,
+            # N50 at least 18.5 kb, GC 30.21-30.54). Contigs: EURL-Campylobacter
+            # says <=200 (Inter-EURL Deliverable 10); 250 leaves room above the
+            # clean samples. GC: FAIL as a sanity check (another species in the assembly).
+            warning_assembly_contigs_500 => ">250",
+            warning_assembly_n50         => "<15000",
+            warning_assembly_gc          => "<30.0 >30.8",
+            fail_assembly_gc             => "<28.5 >32.5",
+        },
+        # Genus section: every Campylobacter species (and samples identified
+        # only to genus). Another genus: clean C. jejuni/C. coli at most 0.45 %,
+        # other Campylobacter species at most 0.57 % (Nov 2026); 2 % Salmonella
+        # (D3 007/017) gives 2.1 %. FAIL >5 comes from default.
+        "Campylobacter" => {
+            warning_contamination_genus_level => ">1",
         },
         "Campylobacter coli" => {
             genomesize => 1750000,
@@ -1891,6 +1950,9 @@ $rundata{config}{defaults} = {
             fatal_q30_mindepth   => 30,
             gc         => 30,
             crossreactive_species => "Campylobacter jejuni",
+            # Another species: clean C. coli up to 1.46 % (Nov 2026, 116 clean
+            # samples; Bracken spreads some reads over other Campylobacter species).
+            warning_contamination_species_level => ">2",
             # Assembly size: WARNING = the narrower, CRITICAL = the wider of
             # (the EURL recommendation, the range holding >99 % of the GenBank
             # assemblies of the species); FAIL = NCBI's limits. From the SVA
@@ -1901,7 +1963,12 @@ $rundata{config}{defaults} = {
             warning_typing_cgmlst_call_rate   => "<95",
             critical_typing_cgmlst_call_rate   => "<90",      
             fail_typing_cgmlst_call_rate   => "<85",                     
-                      
+            # Assembly (Nov 2026; clean C. coli: contigs >=500 bp at most 208,
+            # N50 at least 14 kb, GC 30.86-31.95). See C. jejuni.
+            warning_assembly_contigs_500 => ">250",
+            warning_assembly_n50         => "<15000",
+            warning_assembly_gc          => "<30.6 >32.2",
+            fail_assembly_gc             => "<29 >34",
         },
         "Escherichia coli" => {
             genomesize => 5150000,
@@ -1968,13 +2035,23 @@ $rundata{config}{defaults} = {
             maxdepth   => 100,
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
-            warning_qscore_raw_q30_rate => "<0.80",
-            critical_qscore_raw_q30_rate => "<0.70",   
-            fail_qscore_raw_q30_rate => "<0.50",              
+            # Q30 (Nov 2026): judged after trimming, with the limit for the
+            # read length ("efsa" = 0.85 / 0.80 / 0.75 / 0.70 for reads up to
+            # 75 / 150 / 250 / above 250 bp; EFSA B8, EURL-AR in the Inter-EURL
+            # Deliverable 10): CRITICAL below it, FAIL below 0.70 (EFSA stops
+            # an upload). Raw Q30 only warns, with the same limits: a sign
+            # that something in the sequencing was not optimal.
+            warning_qscore_raw_q30_rate      => "efsa",
+            critical_qscore_trimmed_q30_rate => "efsa",
+            fail_qscore_trimmed_q30_rate     => "<0.70",
             fail_coverage_trimmed_q30_coverage => "<30",          
             fail_contamination_species_level => ">5",                        
             fail_contamination_genus_level   => ">5",    # largest other genus (crossreactive_genus excluded)
             warning_qscore_trimmed_average_read_length => "<50",
+            # N bases in the raw reads (%): clean isolates p95 0.13-0.17,
+            # a few runs 10-13 % (failed cycles). A sign that the sequencing
+            # was not optimal, not a reason to reject (Nov 2026).
+            warning_qscore_raw_n_rate => ">1",
             # R1/R2 read names that differ, pair by pair (% of the pairs
             # scanned by the prescan): a few can occur in usable data
             # (WARNING); more than 1 % is a strong sign of files that do
@@ -5233,6 +5310,14 @@ sub validate_species_settings {
                 }
                 next if $level eq 'expected';
                 next if !defined $value || $value =~ /^\s*(?:n\/a)?\s*$/i;
+                if ( $value =~ /^\s*efsa\s*$/i ) {     # Q30 limit by read length (q30_read_length_threshold)
+                    unless ( $measure =~ /_q30_rate$/ ) {
+                        log_message("WARNING: $where $key=[efsa]: \"efsa\" (the Q30 limit by read length) only works for "
+                                  . "the Q30 rate measures, so this threshold has no effect", "red");
+                        $n++;
+                    }
+                    next;
+                }
                 my $thr = parse_threshold_string($value);
                 if ( !$thr ) {
                     log_message("WARNING: $where $key=[$value] cannot be read as a threshold and is ignored -- "
@@ -5768,6 +5853,22 @@ sub estimate_genomesize {
 ##
 
 
+## Q30 limit by read length, the value "efsa" in a Q30 threshold: EFSA's
+## business rule B8 (fastp after filtering) and EURL-AR (Inter-EURL WG on
+## NGS, Deliverable 10: after trimming): >= 0.85 for reads up to 75 bp,
+## 0.80 up to 150, 0.75 up to 250, 0.70 above. The read length is the mean
+## after trimming (as EFSA's ReadMeanLength), else the raw mean. Returns
+## (threshold string, note) or (undef, note) when the length is unknown.
+sub q30_read_length_threshold {
+    my ($samplenr) = @_;
+    my $q = $R_samples->[$samplenr]{main_results}{qscore} // {};
+    my ($len) = grep { defined $_ && $_ =~ /^[\d.]+$/ && $_ > 0 } ( $q->{trimmed}{av_read_len}, $q->{raw}{av_read_len} );
+    return ( undef, "read length unknown: no Q30 limit" ) unless defined $len;
+    my $lim = $len <= 75 ? 0.85 : $len <= 150 ? 0.80 : $len <= 250 ? 0.75 : 0.70;
+    return ( "<" . sprintf( "%.2f", $lim ),
+             sprintf( "EFSA/EURL-AR limit for %.0f-bp reads", $len ) );
+}
+
 sub load_expectations {
     my ($samplenr) = @_;
 
@@ -5784,10 +5885,23 @@ sub load_expectations {
             $raw{$level} = get_config_value_for_species($species, $key);
         }
 
+        # "efsa": the Q30 limit for the sample's read length (EFSA B8 / EURL-AR)
+        my %tier_note;
+        for my $level (qw(warning critical fail)) {
+            next unless defined $raw{$level} && $raw{$level} =~ /^\s*efsa\s*$/i;
+            if ( $measure !~ /_q30_rate$/ ) { $raw{$level} = undef; next; }
+            my ($thr, $note) = q30_read_length_threshold($samplenr);
+            $raw{$level}       = $thr;      # undef when the read length is unknown: no threshold
+            $tier_note{$level} = $note;
+        }
+
         my $expected = parse_expected_string($raw{expected});
         my $warning  = parse_threshold_string($raw{warning});
         my $critical = parse_threshold_string($raw{critical});
         my $fail     = parse_threshold_string($raw{fail});
+        for ( [ warning => $warning ], [ critical => $critical ], [ fail => $fail ] ) {
+            $_->[1]{note} = $tier_note{ $_->[0] } if $tier_note{ $_->[0] } && ref $_->[1] eq 'HASH';
+        }
 
 
         
@@ -10457,6 +10571,63 @@ sub remap_params_differ {
     return 0;
 }
 
+## QC measures from the re-mapping, main_results.remap (remap_* in
+## %QC_MEASURE_DEF), from results.remap. Called by postprocess_remap, and by
+## evaluate_sample_qc for runs whose remap was read before these existed
+## (summarize does not read the steps again). No default thresholds yet
+## (Nov 2026): first the spread.
+sub remap_qc_values {
+    my ($samplenr) = @_;
+    my $result_ref = $R_samples->[$samplenr]{results}{remap};
+    return unless ref $result_ref eq 'HASH';
+    my $picked = ( $result_ref->{mapping} // {} )->{samtools_stats_sn_picked} // {};
+    my $cov    = $result_ref->{coverage} // {};
+    {
+        my $M   = $result_ref->{mapping} // {};
+        my $num = sub { my $v = shift; ( defined $v && $v =~ /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/ ) ? $v + 0 : undef };
+        my %q;
+        $q{reads_mapped_pct}      = $num->( $picked->{reads_mapped_pct} // $M->{reads_mapped_pct} );
+        $q{properly_paired_pct}   = $num->( $picked->{properly_paired_pct} // $M->{properly_paired_pct} );
+        # mapped pairs whose mates are on different contigs: a few percent at
+        # contig ends; most pairs when R1 and R2 come from different samples.
+        # (properly_paired_pct also falls with long inserts: Bowtie2's default
+        # maximum insert is 500 bp, so it is not comparable between libraries.)
+        my $mp = $num->( $picked->{reads_mapped_and_paired} // $M->{reads_mapped_and_paired} );
+        my $dc = $num->( $picked->{pairs_diff_chromosomes} // $M->{pairs_diff_chromosomes} );
+        $q{pairs_diff_contig_pct} = ( defined $mp && $mp > 0 && defined $dc ) ? sprintf( "%.3f", 100 * $dc / ( $mp / 2 ) ) : undef;
+        $q{breadth_10x_pct}       = $num->( $cov->{breadth_10x_pct} );
+        $q{depth_iqr_over_median} = $num->( $cov->{depth_iqr_over_median} );
+        my $er = $num->( $M->{error_rate} // $picked->{error_rate} );
+        $q{error_rate_pct}        = defined $er ? sprintf( "%.4f", 100 * $er ) : undef;
+        # Bases of the assembly in contigs of >= 1 kb whose median depth is
+        # below 20 % of the genome's: a contaminant at low abundance makes
+        # its own contigs, at a much lower depth than the sample's genome
+        # (independent of Kraken; plasmids and repeats are deeper, not shallower).
+        my $per = $cov->{depth_per_contig};
+        my $gm  = $num->( $cov->{depth_median} );
+        if ( ref $per eq 'HASH' && %$per && defined $gm && $gm > 0 ) {
+            my ( $tot, $low, $n ) = ( 0, 0, 0 );
+            for my $c ( values %$per ) {
+                my $len = $c->{positions} // 0;
+                $tot += $len;
+                my $md = $num->( $c->{median_depth} );
+                next unless $len >= 1000 && defined $md && $md < 0.2 * $gm;
+                $low += $len;
+                $n++;
+            }
+            if ($tot) {
+                $q{low_depth_contig_pct} = sprintf( "%.3f", 100 * $low / $tot );
+                $q{low_depth_contig_bp}  = $low;
+                $q{low_depth_contigs}    = $n;
+            }
+        }
+        $R_samples->[$samplenr]{main_results}{remap}{$_} = $q{$_} // "n/a" for keys %q;
+        for (qw(reads_mapped_pct properly_paired_pct pairs_diff_contig_pct breadth_10x_pct depth_iqr_over_median error_rate_pct low_depth_contig_pct)) {
+            $R_samples->[$samplenr]{main_results}{remap}{$_} //= "n/a";
+        }
+    }
+}
+
 sub postprocess_remap {
     my ($samplenr) = @_;
 
@@ -10548,6 +10719,9 @@ sub postprocess_remap {
         $A->{breadth_20x}       = $cov->{breadth_20x_pct}   // "n/a";
         $A->{breadth_30x}       = $cov->{breadth_30x_pct}   // "n/a";
     }
+
+    # QC measures from the re-mapping (main_results.remap)
+    remap_qc_values($samplenr);
 
     my $fmt = sub {
         my ($value, $suffix) = @_;
@@ -24442,6 +24616,21 @@ sub evaluate_sample_qc {
     }
 
     reset_report_issues($samplenr);
+
+    # re-mapping measures for runs analysed before they existed
+    remap_qc_values($samplenr) if !exists $R_samples->[$samplenr]{main_results}{remap}
+                                && ref $R_samples->[$samplenr]{results}{remap} eq 'HASH';
+
+    # GC of the raw reads minus GC of the assembly (percentage points): a
+    # library GC bias under-represents AT-rich regions and raises the reads'
+    # GC (EURL-AR in the Inter-EURL Deliverable 10 uses a delta of 4).
+    {
+        my $mr = $R_samples->[$samplenr]{main_results};
+        my ($rg, $ag) = ( $mr->{qscore}{raw}{gc}, $mr->{assembly}{gc} );
+        $mr->{qscore}{raw}{gc_delta} =
+            ( defined $rg && defined $ag && $rg =~ /^-?[\d.]+$/ && $ag =~ /^-?[\d.]+$/ && $ag > 0 )
+            ? sprintf( "%.2f", $rg - $ag ) : "n/a";
+    }
 
     foreach my $measure (@measures) {
         evaluate_qc_measure($samplenr, $measure);

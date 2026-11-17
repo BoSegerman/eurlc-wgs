@@ -880,7 +880,7 @@ def _add_text(tar, name, text):
 LEVELS = ("PASS", "WARNING", "CRITICAL", "FAIL")
 
 
-def _find_runs(folders):
+def _find_runs(folders, all_outdirs=False):
     """eurlc-wgs output folders (with data/rundata.json) below the given folders."""
     runs = []
     seen = set()
@@ -895,13 +895,41 @@ def _find_runs(folders):
                 if real not in seen:
                     seen.add(real)
                     runs.append(out)
-    return sorted(runs)
+    if all_outdirs:
+        return sorted(runs)
+    # One run per run folder: when a folder holds an output folder called
+    # eurlc-wgs, that is the run; siblings (eurlc-wgs_qcscreen, a renamed
+    # earlier analysis such as eurlc_wgs_1) are left out.
+    by_parent = defaultdict(list)
+    for out in runs:
+        by_parent[os.path.dirname(os.path.abspath(out))].append(out)
+    keep, skipped = [], []
+    for parent, outs in by_parent.items():
+        main = [o for o in outs if os.path.basename(o.rstrip(os.sep)) == "eurlc-wgs"]
+        if main and len(outs) > 1:
+            keep += main
+            skipped += [o for o in outs if o not in main]
+        else:
+            keep += outs
+    if skipped:
+        sys.stderr.write("eurlc-wgs-inspect: left out %d output folder(s) next to an eurlc-wgs folder "
+                         "(QC screens, renamed earlier analyses; --all-outdirs takes them too): %s\n"
+                         % (len(skipped), ", ".join(os.path.relpath(o) for o in sorted(skipped)[:6])
+                            + (" ..." if len(skipped) > 6 else "")))
+    return sorted(keep)
 
 
 def _run_label(outdir):
+    """The run's name: the folder above eurlc-wgs/ (MiSeq_192). Other output
+    folders named like it (eurlc-wgs_qcscreen, a renamed eurlc_wgs_1) get the
+    folder above and their own name (MiSeq_192/eurlc_wgs_1), so that they
+    cannot be mistaken for the run; any other output folder its own name."""
     b = os.path.basename(outdir.rstrip(os.sep))
-    if b in ("eurlc-wgs", "eurlc-wgs_qcscreen"):
-        b = os.path.basename(os.path.dirname(outdir.rstrip(os.sep))) or b
+    parent = os.path.basename(os.path.dirname(outdir.rstrip(os.sep)))
+    if b == "eurlc-wgs":
+        return parent or b
+    if re.match(r"(?i)^eurlc[-_]?wgs", b) and parent:
+        return parent + "/" + b
     return b
 
 
@@ -1030,7 +1058,7 @@ def cmd_known_template(a):
     if a.runs and a.all:
         die("give runs, or --all FOLDER, not both")
     if a.all:
-        runs = _find_runs(a.all)
+        runs = _find_runs(a.all, a.all_outdirs)
         if not runs:
             die("no runs (folders with eurlc-wgs/data/rundata.json) below %s" % ", ".join(a.all), 1)
     elif a.runs:
@@ -1119,7 +1147,7 @@ def cmd_known_template(a):
 
 
 def cmd_summarize(a):
-    runs = _find_runs(a.folders)
+    runs = _find_runs(a.folders, a.all_outdirs)
     if not runs:
         die("no data/rundata.json below %s" % ", ".join(a.folders), 1)
     expected = _read_expected(a.expected) if a.expected else {}
@@ -1837,6 +1865,8 @@ def main(argv=None):
     sm.add_argument("--measures", metavar="REGEX", help="only matching measures in the spread tables")
     sm.add_argument("--min-samples", type=int, default=1, help="leave out species with fewer samples")
     sm.add_argument("--top", type=int, default=40, help="issue groups to show")
+    sm.add_argument("--all-outdirs", action="store_true",
+                    help="also output folders next to an eurlc-wgs folder (eurlc-wgs_qcscreen, renamed copies)")
 
     k = sub.add_parser("known-template", help="a table of the samples of one or more runs, to fill in what is known "
                                                "about them (for summarize --expected)",
@@ -1852,6 +1882,8 @@ def main(argv=None):
     k.add_argument("--update", metavar="FILE", help="add the samples of these runs to an existing table, keeping "
                                                    "what is filled in (and your own columns); the old file is kept as .bak")
     k.add_argument("--force", action="store_true", help="overwrite --out if it exists")
+    k.add_argument("--all-outdirs", action="store_true",
+                   help="with --all: also output folders next to an eurlc-wgs folder (eurlc-wgs_qcscreen, renamed copies)")
 
     x = sub.add_parser("mixture", help="the intra-species mixture metric per sample, and per species",
                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)

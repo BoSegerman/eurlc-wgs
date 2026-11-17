@@ -1020,6 +1020,12 @@ my %QC_MEASURE_DEF = (
         path     => [qw(qscore raw q30_rate)],
         label    => 'Raw read Q30 rate',
     },
+    # read pairs whose names differ between R1 and R2 (prescan, first reads)
+    qscore_raw_pair_name_mismatch_pct => {
+        category => 'qscore',
+        path     => [qw(qscore raw pair_name_mismatch_pct)],
+        label    => 'Read pairs with different names in R1 and R2 (%)',
+    },
     qscore_raw_average_read_length => {
         category => 'qscore',
         path     => [qw(qscore raw av_read_len)],
@@ -1969,6 +1975,14 @@ $rundata{config}{defaults} = {
             fail_contamination_species_level => ">5",                        
             fail_contamination_genus_level   => ">5",    # largest other genus (crossreactive_genus excluded)
             warning_qscore_trimmed_average_read_length => "<50",
+            # R1/R2 read names that differ, pair by pair (% of the pairs
+            # scanned by the prescan): a few can occur in usable data
+            # (WARNING); more than 1 % is a strong sign of files that do
+            # not belong together (CRITICAL); more than half: two samples'
+            # files mixed up, the analysis is meaningless (FAIL).
+            warning_qscore_raw_pair_name_mismatch_pct  => ">0",
+            critical_qscore_raw_pair_name_mismatch_pct => ">1",
+            fail_qscore_raw_pair_name_mismatch_pct     => ">50",
         },
     },
     
@@ -4115,6 +4129,71 @@ sub parse_machine_aliases {
     return \%aliases;
 }
 
+## R1/R2 read-name check (used by the prescan, and by its postprocess for
+## prescan results made before the check existed). The reads of a pair must
+## have the same name in R1 and R2, record by record: Illumina "@<id> 1:N:..."
+## and "@<id> 2:N:...", older "@<id>/1" and "@<id>/2", SRA "@<acc>.<n>.1" and
+## ".2". Files from two different samples (renamed or mixed up when submitted)
+## differ in (nearly) every pair even when they come from the same run and
+## flowcell, which the instrument/flowcell check cannot see. A few differing
+## names can happen in usable data; many mean the files do not belong together.
+## Returns { compared, mismatched, mismatch_pct, examples => [[r1, r2], ...],
+##           mates_swapped => 0|1 } or undef when it cannot be checked.
+sub fastq_pair_name_check {
+    my ($fq1, $fq2, $max) = @_;
+    $max ||= 5000;
+    return undef unless defined $fq1 && defined $fq2 && $fq1 ne "" && $fq2 ne "" && -f $fq1 && -f $fq2;
+    my @fh;
+    for my $f ($fq1, $fq2) {
+        my $h;
+        if ($f =~ /\.gz$/i) { open($h, "-|", "gzip", "-dc", $f) or return undef; }
+        else                { open($h, "<", $f) or return undef; }
+        push @fh, $h;
+    }
+    my $norm = sub {
+        my ($hdr) = @_;
+        $hdr =~ s/^\@//;
+        my ($id, $comment) = split /\s+/, $hdr, 2;
+        $id //= "";
+        $id =~ s{/[123]$}{};
+        my ($mate) = ( ($comment // "") =~ /^([123]):[YN]:/ );
+        return ($id, $mate // "");
+    };
+    my ($n, $bad, $r1_says2, $r2_says1, @ex) = (0, 0, 0, 0);
+    while ($n < $max) {
+        my @rec;
+        for my $h (@fh) {
+            my @l = map { scalar <$h> } 1 .. 4;
+            last unless defined $l[3];
+            chomp @l;
+            push @rec, $l[0];
+        }
+        last unless @rec == 2;
+        next unless $rec[0] =~ /^\@/ && $rec[1] =~ /^\@/;
+        $n++;
+        my ($ia, $ma) = $norm->($rec[0]);
+        my ($ib, $mb) = $norm->($rec[1]);
+        $r1_says2++ if $ma eq "2";
+        $r2_says1++ if $mb eq "1";
+        next if $ia eq $ib;
+        ( my $a2 = $ia ) =~ s/\.[12]$//;           # SRA --readids: <acc>.<n>.1 / .2
+        ( my $b2 = $ib ) =~ s/\.[12]$//;
+        next if $a2 eq $b2;
+        $bad++;
+        push @ex, [ $ia, $ib ] if @ex < 3;
+    }
+    close $_ for @fh;
+    return undef unless $n;
+    return {
+        compared      => $n,
+        mismatched    => $bad,
+        mismatch_pct  => sprintf("%.3f", 100 * $bad / $n),
+        examples      => \@ex,
+        # R1 says read 2 and R2 says read 1 in most pairs: the R1 and R2 files are swapped
+        mates_swapped => ( $r1_says2 > $n / 2 && $r2_says1 > $n / 2 ) ? 1 : 0,
+    };
+}
+
 $INTERNAL_SUB{fastq_prescan_internal} = sub {
     my ($fq1, $fq2, $outfolder, $samplenr) = @_;
 
@@ -4509,6 +4588,11 @@ $INTERNAL_SUB{fastq_prescan_internal} = sub {
         }
     }
 
+    # R1/R2 read names, pair by pair (fastq_pair_name_check)
+    if ($fq2 ne "") {
+        $res{total}{pair_check} = fastq_pair_name_check($fq1, $fq2, $MAX_SCAN_READS);
+    }
+
     # Outfolder must be defined -- if not, it's a bug in the caller.
     # Don't graceful_die (we're in a fork -- it would kill just the fork
     # process); instead warn to STDERR and return 1 (failure exit code).
@@ -4621,6 +4705,34 @@ sub postprocess_sample_prescan {
         for my $w (@{ $prescan_ref->{$bucket_key}{warnings} // [] }) {
             log_message("WARNING: sample_prescan [$sample_name] $bucket_key: $w", "yellow");
             set_runtime_issue($samplenr, "warning", "sample_prescan $bucket_key: $w");
+        }
+    }
+
+    # R1/R2 read names: the QC measure qscore_raw_pair_name_mismatch_pct
+    # (thresholds in the config), and a runtime warning with examples.
+    # Prescan results made before the check existed: check now.
+    my $raw = $R_samples->[$samplenr]{paths}{raw} // {};
+    if ( ( $raw->{R2} // "" ) ne "" && !exists $prescan_ref->{total}{pair_check} ) {
+        $prescan_ref->{total}{pair_check} = fastq_pair_name_check( $raw->{R1}, $raw->{R2},
+                                                                   $R_cfg->{sample_prescan}{max_scan_reads} // 5000 );
+    }
+    my $pc = $prescan_ref->{total}{pair_check};
+    if ( ref $pc eq 'HASH' ) {
+        $R_samples->[$samplenr]{main_results}{qscore}{raw}{pair_name_mismatch_pct} = $pc->{mismatch_pct};
+        if ( $pc->{mismatched} ) {
+            my $ex = join( "; ", map { "R1 '$_->[0]' / R2 '$_->[1]'" } @{ $pc->{examples} // [] } );
+            my $msg = "read names differ between R1 and R2 in $pc->{mismatched} of $pc->{compared} pairs scanned"
+                    . " ($pc->{mismatch_pct} %)"
+                    . ( $pc->{mismatched} * 2 > $pc->{compared}
+                        ? " -- the R1 and R2 files probably do not belong together (renamed or mixed up?)" : "" )
+                    . ( $ex ne "" ? "; e.g. $ex" : "" );
+            log_message( "WARNING: sample_prescan [$sample_name]: $msg", "yellow" );
+            set_runtime_issue( $samplenr, "warning", "sample_prescan: $msg" );
+        }
+        if ( $pc->{mates_swapped} ) {
+            my $msg = "the reads in the R1 file are marked as read 2, and those in R2 as read 1: the R1 and R2 files look swapped";
+            log_message( "WARNING: sample_prescan [$sample_name]: $msg", "yellow" );
+            set_runtime_issue( $samplenr, "warning", "sample_prescan: $msg" );
         }
     }
 

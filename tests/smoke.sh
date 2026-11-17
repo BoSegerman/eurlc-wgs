@@ -259,6 +259,22 @@ if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
           bash -c "python3 '$INSP' compare '$VDATA/eurlc-wgs' '$FPF' > /dev/null"
 fi
 
+# --- R1/R2 read names (prescan) ------------------------------------------------
+fqx() { # fqx <file> <n reads> <x offset> <mate>: like fq, other read coordinates
+    local f="$1" n="$2" off="$3" m="$4" i
+    for ((i=1; i<=n; i++)); do
+        printf '@M01137:1:000000000-ABCDE:1:1101:%d:1000 %s:N:0:1\nACGTACGTACGTACGTACGTACGTACGTACGT\n+\nIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\n' "$((i+off))" "$m"
+    done | gzip -c > "$f"
+}
+PN="$T/pairnames"; mkdir -p "$PN"
+fqx "$PN/P_S1_L001_R1_001.fastq.gz" 20 0 1;    fqx "$PN/P_S1_L001_R2_001.fastq.gz" 20 0 2
+fqx "$PN/Q_S2_L001_R1_001.fastq.gz" 20 0 1;    fqx "$PN/Q_S2_L001_R2_001.fastq.gz" 20 5000 2
+run "$T/pn.out" datadir="$PN" outdir="$T/pn_out" --assume-yes disable=chewbbaca
+check "prescan: R1/R2 files whose read names differ are reported" \
+      grep -q "read names differ between R1 and R2 in 20 of 20 pairs" "$T/pn.out"
+check "  ... as the QC measure (100 %), and not for the matching pair" \
+      python3 -c "import json,sys; d={s['name']:s for s in json.load(open('$T/pn_out/data/rundata.json'))['samples']}; r=lambda n: float(d[n]['main_results']['qscore']['raw'].get('pair_name_mismatch_pct','nan')); sys.exit(not (r('Q')==100 and r('P')==0))"
+
 # --- EFSA export ---------------------------------------------------------------
 EFX="$REPO/scripts/eurlc-efsa-export"
 if command -v python3 > /dev/null && [[ -f "$EFX" ]]; then

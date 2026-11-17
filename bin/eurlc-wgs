@@ -133,6 +133,7 @@ our @S_DATA_ROOTS_OLD = ();              # data folders recorded by earlier runs
 our %S_RELOCATED = ();                   # recorded raw file path => where it was found now (moved analysis)
 our %S_RAW_MISSING = ();                 # sample base => [recorded raw paths not found now]
 our %S_VALIDATION = ();                  # result of the validation against a dataset (run_dataset_validation)
+our %S_EFSA_EXPORT = ();                 # result of the EFSA export (run_efsa_export)
 our %S_VERIFICATION = ();                # result of the comparison with a reference run (run_reference_verification)
 our $S_FINGERPRINT_FORMAT_VERSION = 1;   # report/tables/eurlc_results_fingerprint.json.gz (write_results_fingerprint)
 our %S_CLEANUP_REMOVED = ();
@@ -1233,6 +1234,22 @@ $rundata{config}{defaults} = {
         # not count. Writes report/verification/.
         verify_reference => "auto",
         verify_expect    => "",
+
+        # export_efsa: files for programmatic submission to the EFSA WGS
+        # System (scripts/eurlc-efsa-export; docs/eurlc-efsa-export.md):
+        # results/export/efsa/. auto = when the run has reportable samples of
+        # Salmonella, E. coli, Listeria or Campylobacter; off = never.
+        # Nothing is sent. efsa_metadata: TSV with instrument codes and
+        # sampling data (default: efsa_metadata.tsv in the data folder, when
+        # there). efsa_dir: EFSA's locus lists and locus-name maps (default
+        # <database>/efsa_export). efsa_locus_suffix: added to the locus names
+        # in allelicProfile.tsv (open question: ".fasta" or nothing).
+        # efsa_pipeline_tag: AnalyticalPipelineInfoTag (default EURLC-WGS <version>).
+        export_efsa       => "auto",
+        efsa_metadata     => "",
+        efsa_dir          => "",
+        efsa_locus_suffix => "",
+        efsa_pipeline_tag => "",
 
         # Companion config files. Relative paths are resolved against the
         # DATABASE directory (falling back to the config file's directory
@@ -16012,6 +16029,8 @@ sub preprocess_chewbbaca {
             my $filtercommand = ($filter && $filter ne "unfiltered")
                 ? "--genes-list $filter"
                 : "";
+            # per-schema AlleleCall options, e.g. arguments=--st 0.05 (EFSA's value)
+            $filtercommand .= " $schema->{arguments}" if defined $schema->{arguments} && $schema->{arguments} =~ /\S/;
            
             $schema_path = fill_placeholders($schema_path);
 
@@ -17299,6 +17318,7 @@ sub matching_chewbbaca_schemas_for_species {
 
         my $schema_dirname = basename($schema_path);
         my $filtercommand  = ($filter && $filter ne "unfiltered") ? "--genes-list $filter" : "";
+        $filtercommand    .= " $schema->{arguments}" if defined $schema->{arguments} && $schema->{arguments} =~ /\S/;
 
         push @matches, {
             schema_name    => $schema_name,
@@ -21582,6 +21602,8 @@ sub summarize_results(){
   # one is found (verify_reference)
   my $fingerprint = write_results_fingerprint();
   run_reference_verification($fingerprint);
+  # files for the EFSA WGS System (export_efsa)
+  run_efsa_export();
 
   print_main_html_report();
   
@@ -30635,6 +30657,9 @@ sub print_run_summary {
         $add->(sprintf( "  %-12s %s: %s", "Reference:", $S_VERIFICATION{reference}, $S_VERIFICATION{verdict} ),
                $S_VERIFICATION{same} ? "green" : "yellow");
     }
+    if (%S_EFSA_EXPORT) {
+        $add->(sprintf( "  %-12s %s", "EFSA export:", $S_EFSA_EXPORT{text} ), $S_EFSA_EXPORT{stopped} ? "yellow" : "green");
+    }
 
     # cgMLST not run: no schema installed for a species that has one
     if (%S_CGMLST_NO_SCHEMA) {
@@ -32310,7 +32335,7 @@ sub seal_relevant_overrides {
         timeout cache_max_age_days cleanup trimmed_fastq downsampled_fastq
         archive_results chewbbaca_write_md5 machine_aliases
         seal db_freeze_config conda_manifest frozen_dbs_root validate
-        verify_reference verify_expect
+        verify_reference verify_expect export_efsa efsa_metadata efsa_dir efsa_locus_suffix efsa_pipeline_tag
     );
     my @relevant;
     for my $line ( split /\n/, $rundata{config}{overrides} // "" ) {
@@ -36774,6 +36799,64 @@ sub get_verification_html_for_report {
   <span class="seal-label">$txt<br><small style='opacity:0.75'><a href="verification/comparison.html">Comparison</a> (per area and sample; also comparison.tsv)</small></span>
 </div>
 HTML
+}
+
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## EFSA WGS System export (export_efsa=auto|off): scripts/eurlc-efsa-export
+## writes results/export/efsa/ -- per sample the files of EFSA's programmatic
+## submission, a check against EFSA's business rules (preflight.tsv), a
+## manifest and upload_cli.sh. Nothing is sent. docs/eurlc-efsa-export.md.
+
+sub run_efsa_export {
+    %S_EFSA_EXPORT = ();
+    my $g = $R_cfg->{general} // {};
+    my $mode = $g->{export_efsa} // "auto";
+    return if $mode =~ /^(off|no|0|false)$/i;
+    my %efsa_species = map { $_ => 1 } ( "Salmonella enterica", "Escherichia coli", "Listeria monocytogenes",
+                                          "Campylobacter jejuni", "Campylobacter coli" );
+    my $n = grep { $efsa_species{ $_->{main_results}{taxonomy}{species} // "" } } @$R_samples;
+    return unless $n;
+    my $self = eval { abs_path($0) } // $0;
+    my ($tool) = grep { -f $_ } ( dirname($self) . "/eurlc-efsa-export", dirname($self) . "/../scripts/eurlc-efsa-export" );
+    $tool //= `command -v eurlc-efsa-export 2>/dev/null`;
+    chomp $tool if defined $tool;
+    unless ( defined $tool && $tool ne "" && -f $tool ) {
+        log_message("WARNING: EFSA export: eurlc-efsa-export is not installed -- no files for the EFSA WGS System", "yellow");
+        return;
+    }
+    my $in   = eval { abs_path( getdir("in") ) } // getdir("in");
+    my $meta = ( $g->{efsa_metadata} // "" ) ne "" ? $g->{efsa_metadata} : ( -f "$in/efsa_metadata.tsv" ? "$in/efsa_metadata.tsv" : "" );
+    my $edir = ( $g->{efsa_dir} // "" ) ne "" ? $g->{efsa_dir} : ( peekdir("db") ? peekdir("db") . "/efsa_export" : "" );
+    my $out  = getdir("out") . "/results/export/efsa";
+    File::Path::make_path($out);
+    # the run as it is now (in summarize mode, thresholds may have been changed since rundata.json was written)
+    my $snap = "$out/.rundata_snapshot.json";
+    save_hash_as_json( $snap, \%rundata );
+    my @cmd = ( "python3", $tool, "export", getdir("out"), "--out", $out, "--rundata", $snap,
+                ( $meta ne "" ? ( "--metadata", $meta ) : () ),
+                ( $edir ne "" && -d $edir ? ( "--efsa-dir", $edir ) : () ),
+                ( ( $g->{efsa_locus_suffix} // "" ) ne "" ? ( "--locus-suffix", $g->{efsa_locus_suffix} ) : () ),
+                ( ( $g->{efsa_pipeline_tag} // "" ) ne "" ? ( "--pipeline-tag", $g->{efsa_pipeline_tag} )
+                  : ( "--pipeline-tag", "EURLC-WGS $PIPELINE_VERSION"
+                      . ( ref $S_SEAL_RESULT eq 'HASH' && $S_SEAL_RESULT->{name} ? " ($S_SEAL_RESULT->{name})" : "" ) ) ) );
+    my $txt = "";
+    if ( open( my $p, '-|', @cmd ) ) { local $/; $txt = <$p> // ""; close $p; }
+    my $rc = $? >> 8;
+    unlink $snap;
+    log_message("INFO: EFSA export:\n$txt");
+    my $j = eval { read_json_file("$out/summary.json") } // {};
+    unless ( %$j ) {
+        log_message("WARNING: EFSA export failed (exit $rc) -- see the log", "yellow");
+        return;
+    }
+    my $ready = ( $j->{ready} // 0 ) + ( $j->{ready_with_warnings} // 0 );
+    %S_EFSA_EXPORT = (
+        stopped => $j->{stopped} // 0,
+        text    => "$ready ready" . ( $j->{ready_with_warnings} ? " ($j->{ready_with_warnings} with warnings)" : "" )
+                 . ( $j->{stopped} ? ", $j->{stopped} stopped by the checks" : "" ) . " -- results/export/efsa/",
+    );
+    $rundata{efsa_export} = { %$j };
+    log_message( "NOTICE: EFSA export: $S_EFSA_EXPORT{text}", $S_EFSA_EXPORT{stopped} ? "yellow" : "green" );
 }
 
 ## The folder of the validation dataset to use, or "" (validate=auto|off|<folder>).

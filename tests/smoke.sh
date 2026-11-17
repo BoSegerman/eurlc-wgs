@@ -259,8 +259,27 @@ if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
           bash -c "python3 '$INSP' compare '$VDATA/eurlc-wgs' '$FPF' > /dev/null"
 fi
 
+# --- EFSA export ---------------------------------------------------------------
+EFX="$REPO/scripts/eurlc-efsa-export"
+if command -v python3 > /dev/null && [[ -f "$EFX" ]]; then
+    python3 "$REPO/tests/data/efsa/make_run.py" "$T/efsa_run"
+    python3 "$EFX" export "$T/efsa_run" --out "$T/efsa_out" > "$T/efx.out" 2>&1
+    check "efsa export: the C. jejuni sample is ready (CAMPISO, with warnings)" \
+          grep -q "^CJ1	Campylobacter jejuni	READY" "$T/efsa_out/manifest.tsv"
+    check "  ... profile: EFSA header, missing loci as 0" \
+          bash -c "head -1 '$T/efsa_out/CJ1/allelicProfile.tsv' | grep -q '^FILE	CAMP0001	' && [[ \$(sed -n 2p '$T/efsa_out/CJ1/allelicProfile.tsv' | tr '\t' '\n' | grep -cx 0) -eq 5 ]]"
+    check "  ... the E. coli sample without an EFSA schema or locus map is stopped" \
+          bash -c "grep -q '^EC1	Escherichia coli	STOPPED' '$T/efsa_out/manifest.tsv' && grep -q 'EC1	B14	STOP' '$T/efsa_out/preflight.tsv'"
+    check "  ... E. coli pathotype in the B11 form" \
+          python3 -c "import json,sys; p=json.load(open('$T/efsa_out/EC1/typingData.json'))['Results']['ParamCode']; sys.exit(not (p['PredictedPathotype']['Pathotype']=='STEC' and p['PredictedStxType']=='stx2a' and {g['GeneName'] for g in p['PredictedPathotype']['GeneList']}=={'eae','stx2'}))"
+    check "  ... upload_cli.sh has a line for the ready sample only" \
+          bash -c "grep -c '^wgs upload' '$T/efsa_out/upload_cli.sh' | grep -qx 1"
+    check "efsa compat: an identical profile is Perfect" \
+          bash -c "python3 '$EFX' compat --base '$T/efsa_out/CJ1/allelicProfile.tsv' --test '$T/efsa_out/CJ1/allelicProfile.tsv' --thresholds 5,10,15 | grep -q Perfect"
+fi
+
 # --- scripts/eurlc-wgs-inspect (read-only, on the output folder above) ------
-INSPECT="$(dirname "$0")/../scripts/eurlc-wgs-inspect"
+INSPECT="$(cd "$(dirname "$0")/.." && pwd)/scripts/eurlc-wgs-inspect"
 if command -v python3 > /dev/null && [[ -f "$INSPECT" ]]; then
     check "inspect inventory runs and writes a manifest" \
           bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m.tsv' > '$T/inv.out' && grep -q '^path	size' '$T/m.tsv'"
@@ -268,6 +287,12 @@ if command -v python3 > /dev/null && [[ -f "$INSPECT" ]]; then
           bash -c "python3 '$INSPECT' extract '$OUT' --all-samples --anonymize -o '$T/pkg' > /dev/null && tar tzf '$T/pkg.tar.gz' | grep -q MANIFEST.tsv"
     check "inspect summarize reads the run" \
           bash -c "python3 '$INSPECT' summarize '$OUT' --tsv '$T/sum.tsv' > '$T/sum.out' && grep -q '^run	sample' '$T/sum.tsv'"
+    check "inspect known-template: one row per sample, from inside the run" \
+          bash -c "cd '$OUT/data' && python3 '$INSPECT' known-template -o '$T/known.tsv' 2> /dev/null && head -1 '$T/known.tsv' | grep -q '^run	sample	expected	note' && [[ \$(wc -l < '$T/known.tsv') -gt 1 ]]"
+    check "  ... --update keeps what was filled in, summarize reads it" \
+          bash -c "awk -F'\t' -v OFS='\t' 'NR==2{\$3=\"clean\"; \$4=\"filled in\"} 1' '$T/known.tsv' > '$T/k2.tsv' && python3 '$INSPECT' known-template '$OUT' --update '$T/k2.tsv' 2> /dev/null && grep -q 'clean	filled in' '$T/k2.tsv' && python3 '$INSPECT' summarize '$OUT' --expected '$T/k2.tsv' | grep -q '^clean '"
+    check "  ... and refuses to scan a folder that is not a run without --all" \
+          bash -c "cd '$T' && ! python3 '$INSPECT' known-template -o '$T/k3.tsv' 2> /dev/null"
     check "  ... and leaves the output folder unchanged" \
           bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m2.tsv' > /dev/null && cmp -s <(cut -f1,2,9 '$T/m.tsv') <(cut -f1,2,9 '$T/m2.tsv')"
 fi

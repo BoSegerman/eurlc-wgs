@@ -1,0 +1,839 @@
+#!/usr/bin/env python3
+# eurlc-efsa-export -- prepare EURLC-WGS results for the EFSA WGS System.
+#
+#   export   for every sample of a run: the files EFSA's programmatic submission
+#            takes (experimentalData.json, typingData.json, allelicProfile.tsv,
+#            optionally epidemiologicalData.json, and sampleData.json for the
+#            API), a check of each sample against EFSA's business rules
+#            (preflight.tsv), a manifest and a script with one `wgs upload`
+#            line per sample that is ready
+#   compat   EFSA's compatibility report: allelic profiles from this pipeline
+#            against profiles from the EFSA Analytical Pipeline for the same
+#            samples (perfect / acceptable / warning / fail)
+#
+# Nothing is ever sent: the upload is done by an appointed Data Provider.
+# Reads the output folder; writes only to --out. Standard library only
+# (Python >= 3.7).
+#
+# Sources: EFSA (2025) EN-9830; EFSA WGS System User Manual, "Programmatic
+# submission" (business rules B1-B20) and "Analytical pipeline"; the EFSA
+# One Health pipeline code (efsa.wgs.onehealth). Open questions are listed in
+# docs/eurlc-efsa-export.md.
+#
+# Part of EURLC-WGS. GPL-3.0-or-later.
+
+import argparse
+import csv
+import datetime
+import gzip
+import json
+import os
+import re
+import sys
+from collections import OrderedDict
+
+VERSION = "0.1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What EFSA expects, per species
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPECIES = OrderedDict([
+    ("Salmonella enterica", dict(
+        key="salmonella", code="RF-00003200-PAR",
+        mlst_genes={"aroC", "sucA", "thrA", "hemD", "dnaN", "purE", "hisD"},
+        min_assembly_coverage=30, loci=3255, max_missing=325,
+        size=(4.3e6, 5.3e6), max_contigs=300,
+        efsa_schemas=["senterica_INNUENDO_cgMLST"])),
+    ("Escherichia coli", dict(
+        key="ecoli", code="RF-00003072-PAR",
+        mlst_genes={"purA", "mdh", "recA", "adk", "gyrB", "icd", "fumC"},
+        min_assembly_coverage=40, loci=2360, max_missing=236,
+        size=(4.5e6, 5.9e6), max_contigs=500,
+        efsa_schemas=["ecoli_INNUENDO_wgMLST"])),
+    ("Listeria monocytogenes", dict(
+        key="listeria", code="RF-00000251-MCG",
+        mlst_genes={"bglA", "abcZ", "dat", "cat", "ldh", "lhkA", "dapE"},
+        min_assembly_coverage=20, loci=1748, max_missing=174,
+        size=(2.7e6, 3.2e6), max_contigs=300,
+        efsa_schemas=["lmonocytogenes_Pasteur_cgMLST"])),
+    # Campylobacter is not in the business rules of the manual (November
+    # 2026); the values are those of EFSA's pipeline code (params_campylobacter-*.config)
+    ("Campylobacter jejuni", dict(
+        key="campylobacter", code="RF-00000061-MCG",
+        mlst_genes={"aspA", "glnA", "gltA", "glyA", "pgm", "tkt", "uncA"},
+        min_assembly_coverage=30, loci=1142, max_missing=None,
+        size=(1.37e6, 2.6e6), max_contigs=300, rules_from_code=True,
+        efsa_schemas=["CAMPISO-PubMLST-8"])),
+    ("Campylobacter coli", dict(
+        key="campylobacter", code="RF-00000054-MCG",
+        mlst_genes={"aspA", "glnA", "gltA", "glyA", "pgm", "tkt", "uncA"},
+        min_assembly_coverage=30, loci=1142, max_missing=None,
+        size=(1.37e6, 2.6e6), max_contigs=300, rules_from_code=True,
+        efsa_schemas=["CAMPISO-PubMLST-8"])),
+])
+
+# B8: Q30 rate after filtering, by mean read length: (upper length, minimum Q30)
+Q30_TIERS = [(75, 0.85), (150, 0.80), (250, 0.75), (10 ** 9, 0.70)]
+Q30_STOP = 0.70
+
+# compatibility report thresholds (User Manual): MIN_ALLELES_DIFF, MAX_ALLELES_DIFF, MAX_DIFF
+COMPAT = {"listeria": (4, 7, 10), "salmonella": (5, 10, 15), "stec": (5, 10, 15), "ecoli": (5, 10, 15)}
+
+STOP, WARN, OK, INFO = "STOP", "WARNING", "OK", "INFO"
+
+
+def die(msg, code=2):
+    sys.stderr.write("eurlc-efsa-export: %s\n" % msg)
+    sys.exit(code)
+
+
+def num(v):
+    try:
+        if v is None or (isinstance(v, str) and v.strip() in ("", "n/a", "NA", "-")):
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def get(d, *path, default=None):
+    for k in path:
+        if not isinstance(d, dict):
+            return default
+        d = d.get(k)
+    return default if d is None else d
+
+
+def read_tsv(path):
+    with open(path, encoding="utf-8") as fh:
+        rows = [l.rstrip("\n").rstrip("\r").split("\t") for l in fh if l.strip() and not l.startswith("#")]
+    if not rows:
+        return [], []
+    return rows[0], rows[1:]
+
+
+def write_json(path, data):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reading the run
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_run(outdir, rundata=None):
+    if rundata:
+        with open(rundata, encoding="utf-8") as fh:
+            return outdir, json.load(fh)
+    rd = os.path.join(outdir, "data", "rundata.json")
+    if not os.path.isfile(rd):
+        sub = os.path.join(outdir, "eurlc-wgs", "data", "rundata.json")
+        if os.path.isfile(sub):
+            outdir, rd = os.path.join(outdir, "eurlc-wgs"), sub
+        else:
+            die("no data/rundata.json in %s" % outdir)
+    with open(rd, encoding="utf-8") as fh:
+        return outdir, json.load(fh)
+
+
+def read_md5s(outdir, sample):
+    """basename -> md5, from results/qc/stage1_rawdata/md5/md5-<sample>.txt"""
+    out = {}
+    for name in ("md5-%s.txt" % sample, "all_md5sums.txt"):
+        p = os.path.join(outdir, "results", "qc", "stage1_rawdata", "md5", name)
+        if not os.path.isfile(p):
+            continue
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r"^([0-9a-fA-F]{32})\s+\*?(.+?)\s*$", line)
+                if m:
+                    out.setdefault(os.path.basename(m.group(2)), m.group(1).lower())
+    return out
+
+
+def read_metadata(path):
+    """sample -> {column: value}; the first column (sample or sample_id) names the sample."""
+    if not path:
+        return {}
+    if not os.path.isfile(path):
+        die("metadata file not found: %s" % path)
+    head, rows = read_tsv(path)
+    if not head:
+        return {}
+    key = head[0]
+    out = {}
+    for r in rows:
+        r = r + [""] * (len(head) - len(r))
+        rec = {h.strip(): v.strip() for h, v in zip(head, r)}
+        out[rec[key]] = rec
+    return out
+
+
+def assembly_stats(path, minlen=200):
+    """N50, size and number of contigs >= minlen bp, as EFSA counts them (Shovill --minlen 200)."""
+    if not path or not os.path.isfile(path):
+        return None
+    lens, cur = [], 0
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as fh:
+        for line in fh:
+            if line.startswith(">"):
+                if cur:
+                    lens.append(cur)
+                cur = 0
+            else:
+                cur += len(line.strip())
+    if cur:
+        lens.append(cur)
+    lens = sorted((l for l in lens if l >= minlen), reverse=True)
+    if not lens:
+        return None
+    total, acc, n50 = sum(lens), 0, 0
+    for l in lens:
+        acc += l
+        if acc * 2 >= total:
+            n50 = l
+            break
+    return {"N50Contigs": n50, "GenomeSize": total, "NumberOfContigs": len(lens)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Allelic profile
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_profiles(outdir, sample):
+    """[(species_dir, schema, path)] of the sample's per-sample profiles."""
+    base = os.path.join(outdir, "results", "clustering", "chewbbaca")
+    out = []
+    if not os.path.isdir(base):
+        return out
+    for sp in sorted(os.listdir(base)):
+        d = os.path.join(base, sp)
+        if not os.path.isdir(d):
+            continue
+        for schema in sorted(os.listdir(d)):
+            p = os.path.join(d, schema, "per_sample", "tsv", "%s.profile.tsv" % sample)
+            if os.path.isfile(p):
+                out.append((sp, schema, p))
+    return out
+
+
+def read_efsa_dir(efsa_dir, schema):
+    """EFSA locus order (<schema>.loci.txt) and our -> EFSA name map (<schema>.locus_map.tsv), when there."""
+    loci, lmap, files = None, None, []
+    if not efsa_dir:
+        return loci, lmap, files
+    p = os.path.join(efsa_dir, schema + ".loci.txt")
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as fh:
+            loci = [re.sub(r"\.fasta$", "", l.strip()) for l in fh if l.strip() and not l.startswith("#")]
+        files.append(p)
+    p = os.path.join(efsa_dir, schema + ".locus_map.tsv")
+    if os.path.isfile(p):
+        head, rows = read_tsv(p)
+        lmap = {}
+        if head and not re.search(r"locus|name|id", head[0], re.I):
+            rows = [head] + rows      # no header line
+        for r in rows:
+            if len(r) >= 2 and r[0].strip() and r[1].strip():
+                lmap[re.sub(r"\.fasta$", "", r[0].strip())] = re.sub(r"\.fasta$", "", r[1].strip())
+        files.append(p)
+    return loci, lmap, files
+
+
+def build_profile(path, schema, spec, efsa_dir, check):
+    """(header loci, values) in EFSA names and order, or None; problems go to check()."""
+    with open(path, encoding="utf-8") as fh:
+        head = fh.readline().rstrip("\n").split("\t")
+        row = fh.readline().rstrip("\n").split("\t")
+    ours = OrderedDict()
+    for locus, val in zip(head[1:], row[1:]):
+        ours[re.sub(r"\.fasta$", "", locus)] = val.strip()
+    loci, lmap, files = read_efsa_dir(efsa_dir, schema)
+    native = schema in spec["efsa_schemas"]
+
+    if lmap is not None:
+        if len(set(lmap.values())) != len(lmap):
+            check("B14", STOP, "locus map %s is not one-to-one" % files[-1])
+            return None
+        tr = OrderedDict()
+        for k, v in ours.items():
+            if k in lmap:
+                tr[lmap[k]] = v
+        ours = tr
+    elif not native:
+        check("B14", STOP, "schema %s is not EFSA's and there is no %s.locus_map.tsv in the EFSA folder "
+              "(locus names would not match EFSA's)" % (schema, schema))
+        return None
+
+    if loci is None:
+        if native and spec["key"] == "campylobacter":
+            loci = list(ours.keys())
+            check("B14", INFO, "locus order from the profile (CAMPISO-PubMLST-8 is EFSA's own schema)")
+        else:
+            loci = list(ours.keys())
+            check("B14", WARN, "no %s.loci.txt in the EFSA folder: locus names and order not checked "
+                  "against EFSA's list" % schema)
+    missing_cols = [l for l in loci if l not in ours]
+    if missing_cols:
+        check("B14", STOP, "%d of EFSA's loci are not in the profile (e.g. %s): wrong schema, filter or map"
+              % (len(missing_cols), ", ".join(missing_cols[:3])))
+        return None
+    if spec.get("loci") and len(loci) != spec["loci"]:
+        check("B14", WARN, "%d loci; EFSA's schema has %d" % (len(loci), spec["loci"]))
+    else:
+        check("B14", OK, "%d loci" % len(loci))
+    vals = []
+    for l in loci:
+        v = ours[l]
+        vals.append(v if re.fullmatch(r"\d+", v) and v != "0" else "0")   # B13: missing = 0
+    return loci, vals, files
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Typing data
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tool_version(run, tool):
+    v = get(run, "provenance", "run", "tools", tool, "version")
+    return v if isinstance(v, str) else ""
+
+
+def mlst_block(s, run, spec, check):
+    m = get(s, "results", "mlst", "main") or {}
+    if not m:
+        m = get(s, "results", "fastmlst", "main") or {}
+        software = "fastmlst " + tool_version(run, "fastmlst")
+    else:
+        software = "mlst " + tool_version(run, "mlst")
+    genes = {k[len("allele_"):]: str(v) for k, v in m.items() if k.startswith("allele_")}
+    st = str(m.get("st", ""))
+    st_int = int(st) if re.fullmatch(r"\d+", st) else None
+    if set(genes) != spec["mlst_genes"]:
+        check("B7", STOP, "MLST genes %s, EFSA expects %s" % (",".join(sorted(genes)) or "none",
+                                                               ",".join(sorted(spec["mlst_genes"]))))
+    else:
+        check("B7", OK, "ST %s" % (st_int if st_int is not None else "not determined"))
+    if st_int is None:
+        check("MLST", WARN, "no ST: sent as null")
+    return {"ST": st_int, "Software": software.strip(), "GeneList": [genes]}
+
+
+def serotype_block(s, run, spec, check):
+    res = get(s, "results") or {}
+    if spec["key"] == "salmonella":
+        for tool, label in (("seqsero2", "SeqSero2"), ("sistr", "SISTR")):
+            v = get(res, tool, "serotype") or get(res, tool, "predicted_serotype")
+            if v and v not in ("n/a", "-"):
+                if tool != "seqsero2":
+                    check("Serotype", INFO, "serovar from %s (EFSA uses SeqSero2)" % label)
+                return {"Serotype": v, "Software": ("%s %s" % (label, tool_version(run, tool))).strip()}
+        check("B5", STOP, "no serovar (mandatory for Salmonella)")
+        return None
+    if spec["key"] == "ecoli":
+        v = get(res, "ectyper", "serotype")
+        if v and v not in ("n/a", "-"):
+            return {"Serotype": v, "Software": ("ECTyper " + tool_version(run, "ectyper")).strip()}
+        check("B5", STOP, "no serotype (mandatory for E. coli)")
+        return None
+    return None
+
+
+def ecoli_pathotype(s, run, check):
+    res = get(s, "results") or {}
+    hits = get(res, "virulencefinder", "hits") or []
+    # B11 names: stx1, stx2, eae, aat, aggr, aaic (one entry each, the best hit)
+    adhesion = OrderedDict([("eae", ("eae", "eaePositive")), ("aata", ("aat", "aatPositive")),
+                            ("aggr", ("aggr", "aggRPositive")), ("aaic", ("aaic", "aaiCPositive"))])
+    ad = {v[1]: False for v in adhesion.values()}
+    vt = {"VT1Positive": False, "VT2Positive": False}
+    best = {}
+    seen = set()
+    for h in hits:
+        gl = str(h.get("gene", "")).lower()
+        seen.add(gl.split("-")[0])
+        name = None
+        for prefix, (b11, key) in adhesion.items():
+            if gl.startswith(prefix):
+                ad[key] = True
+                name = b11
+                break
+        if name is None:
+            m = re.match(r"stx([12])", gl)
+            if not m:
+                continue
+            vt["VT%sPositive" % m.group(1)] = True
+            name = "stx" + m.group(1)
+        idt, cv = num(h.get("identity")), num(h.get("coverage"))
+        if name not in best or (idt or 0, cv or 0) > (best[name]["Identity"] or 0, best[name]["Coverage"] or 0):
+            best[name] = {"GeneName": name, "Identity": idt, "Coverage": cv}
+    genes = list(best.values())
+    # stx from AMRFinderPlus (stxtyper) as well
+    subtypes = set()
+    for h in get(res, "amrfinderplus", "amr_hits") or []:
+        sym = str(h.get("element_symbol", ""))
+        m = re.match(r"stx([12])([a-z])?", sym, re.I)
+        if not m:
+            continue
+        vt["VT%sPositive" % m.group(1)] = True
+        if (h.get("subtype") or "").upper() == "STX_TYPE" and m.group(2):
+            subtypes.add("stx%s%s" % (m.group(1), m.group(2).lower()))
+    for t in re.split(r"[,;\s]+", str(get(res, "ectyper", "stx_subtypes", default=""))):
+        if re.fullmatch(r"stx[12][a-z]", t.strip(), re.I):
+            subtypes.add(t.strip().lower())
+    for g in seen:
+        if re.fullmatch(r"stx[12][a-z]", g):
+            subtypes.add(g)
+    stec = vt["VT1Positive"] or vt["VT2Positive"]
+    for n in ("1", "2"):
+        if vt["VT%sPositive" % n] and not any(x["GeneName"].startswith("stx" + n) for x in genes):
+            genes.append({"GeneName": "stx" + n, "Identity": None, "Coverage": None})
+            check("B11", INFO, "stx%s found by AMRFinderPlus only: listed without identity/coverage" % n)
+    block = {
+        "Pathotype": "STEC" if stec else "non-STEC",
+        "VeroToxin": vt, "AdhesionGenes": ad,
+        "Software": ("VirulenceFinder %s; AMRFinderPlus %s" % (tool_version(run, "virulencefinder"),
+                                                                tool_version(run, "amrfinderplus"))).strip(),
+        "GeneList": [{k: v for k, v in g.items() if v is not None} for g in genes],
+    }
+    stx_type = ",".join(sorted(subtypes)) if stec else ""
+    if stec and not stx_type:
+        check("B11", WARN, "stx found but no subtype")
+    check("B11", OK, "%s%s" % (block["Pathotype"], (", " + stx_type) if stx_type else ""))
+    return block, stx_type
+
+
+def amr_block(s, run, check):
+    res = get(s, "results") or {}
+    hits = None
+    for tool in ("resfinder_fasta", "resfinder"):
+        if isinstance(get(res, tool, "resfinder_hits"), list):
+            hits = get(res, tool, "resfinder_hits")
+            break
+    if hits is None:
+        check("AMR", INFO, "no ResFinder result: AMRProfile left out")
+        return None
+    genes, pheno = [], set()
+    for h in hits:
+        name = h.get("resistance_gene", "?")
+        genes.append({name: {"name": name, "identity": num(h.get("identity")),
+                             "coverage": num(h.get("coverage")),
+                             "ref_database": ("ResFinder " + str(get(run, "provenance", "run", "databases", "resfinder", "version_label", default=""))).strip()}})
+        for p in re.split(r",\s*", str(h.get("phenotype", ""))):
+            if p.strip() and p.strip().lower() not in ("n/a", "none"):
+                pheno.add(p.strip().lower())
+    return {"Software": ("ResFinder " + tool_version(run, "resfinder")).strip(),
+            "NumberPredictedAMResistance": len(pheno), "GeneList": genes}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# export
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reportable_of(s):
+    r = get(s, "main_results", "reportable")
+    if isinstance(r, dict) and r.get("value") in ("yes", "no"):
+        return r["value"] == "yes", r.get("reason") or ""
+    st = get(s, "qc", "status", default="")
+    ok = st in ("PASS", "WARNING") and not s.get("fatal_error")
+    return ok, "derived from QC status %s (run made before reportability was recorded)" % (st or "?")
+
+
+def export_sample(s, run, outdir, a, meta):
+    name = s.get("name", "?")
+    checks = []
+    check = lambda rule, status, msg: checks.append((rule, status, msg))
+    species = get(s, "main_results", "taxonomy", "species", default="")
+    spec = SPECIES.get(species)
+    info = {"sample": name, "species": species, "files": {}}
+    if not spec:
+        return info, [("species", "SKIP", "not one of EFSA's five species")]
+    ok, why = reportable_of(s)
+    if not ok:
+        return info, [("reportable", "SKIP", "not reportable" + (": " + why if why else ""))]
+    if why:
+        check("reportable", INFO, why)
+    md = meta.get(name, {})
+    rrid = md.get("localRawReadId") or name
+    if len(rrid) > 50:
+        check("B1", STOP, "localRawReadId longer than 50 characters: %s" % rrid)
+    if spec.get("rules_from_code"):
+        check("rules", INFO, "Campylobacter is not in the manual's business rules; limits from EFSA's pipeline code")
+
+    # ── experimental data ──
+    raw = get(s, "paths", "raw") or {}
+    md5s = read_md5s(outdir, name)
+    pe = bool(raw.get("R1") and raw.get("R2"))
+    exp = OrderedDict([("localRawReadId", rrid), ("instrumentModelCode", md.get("instrumentModelCode") or None),
+                       ("isolateSpecieCode", spec["code"]), ("libraryLayoutCode", 2 if pe else 1)])
+    files = [raw.get("R1"), raw.get("R2")] if pe else [raw.get("SE") or raw.get("R1")]
+    for i, f in enumerate(files, 1):
+        b = os.path.basename(f or "")
+        exp["fastQ%dFileName" % i] = b or None
+        exp["fastQ%dMd5" % i] = md5s.get(b)
+        if not b:
+            check("B1", STOP, "FASTQ %d unknown (assembly input?): EFSA needs the reads' names and MD5" % i)
+        elif not md5s.get(b):
+            check("B1", STOP, "no MD5 for %s" % b)
+    if not exp["instrumentModelCode"]:
+        guess = get(s, "main_results", "run_data", "instrument_type_guess", default="")
+        check("B1", WARN, "instrumentModelCode empty (catalogue INSTRUM; the guidelines make it mandatory for "
+              "typing results)%s: add it to the metadata table" % ((", instrument looks like " + guess) if guess else ""))
+    if md.get("serotypeId"):
+        exp["serotypeId"] = md["serotypeId"]
+
+    # ── typing data ──
+    fp = get(s, "results", "fastp_rawdata", "summary", "after_filtering") or {}
+    l1, l2 = num(fp.get("read1_mean_length")), num(fp.get("read2_mean_length"))
+    rml = round((l1 + l2) / 2) if l1 is not None and l2 is not None else (round(l1) if l1 is not None else None)
+    q30 = num(fp.get("q30_rate"))
+    q30 = round(q30, 2) if q30 is not None else None
+    tb = num(fp.get("total_bases"))
+    fastp = OrderedDict([("ReadMeanLength", rml), ("Q30Rate", q30), ("TotalBases", int(tb) if tb is not None else None)])
+    if None in fastp.values():
+        check("B5", STOP, "fastp values missing (%s)" % ", ".join(k for k, v in fastp.items() if v is None))
+    elif pe:
+        lim = next(q for lmax, q in Q30_TIERS if rml <= lmax)
+        if q30 < Q30_STOP:
+            check("B8", STOP, "Q30 %.2f < %.2f" % (q30, Q30_STOP))
+        elif q30 <= lim:
+            check("B8", WARN, "Q30 %.2f, EFSA warns at <= %.2f for %d-bp reads" % (q30, lim, rml))
+        else:
+            check("B8", OK, "Q30 %.2f, mean read length %d" % (q30, rml))
+    cov = num(get(s, "main_results", "assembly", "remap_mean_depth"))
+    if cov is None:   # runs from before main_results.assembly had it
+        cov = num(get(s, "results", "remap", "coverage", "depth_mean"))
+    asm_cov = int(round(cov)) if cov is not None else None
+    if asm_cov is None:
+        check("B9", STOP, "no assembly coverage (re-mapping of the reads against the assembly not run)")
+    elif asm_cov < spec["min_assembly_coverage"]:
+        check("B9", WARN if spec.get("rules_from_code") else STOP,
+              "assembly coverage %dx < %dx" % (asm_cov, spec["min_assembly_coverage"]))
+    else:
+        check("B9", OK, "assembly coverage %dx" % asm_cov)
+    asm_file = None
+    for c in (os.path.join(outdir, "results", "assemblies", name + ".fasta"),
+              os.path.join(outdir, "results", "assemblies", name + ".fasta.gz")):
+        if os.path.isfile(c):
+            asm_file = c
+            break
+    stats = assembly_stats(asm_file)
+    if stats:
+        check("stats", INFO, "assembly statistics from contigs >= 200 bp (as EFSA's Shovill --minlen 200)")
+    else:
+        A = get(s, "main_results", "assembly") or {}
+        stats = {"N50Contigs": num(A.get("N50")), "GenomeSize": num(A.get("size")), "NumberOfContigs": num(A.get("contigs"))}
+        stats = {k: (int(v) if v is not None else None) for k, v in stats.items()}
+        check("stats", WARN if None not in stats.values() else STOP,
+              "assembly file not found: statistics from the run (all contigs), not from contigs >= 200 bp")
+    if None not in stats.values():
+        w = []
+        lo, hi = spec["size"]
+        if not lo <= stats["GenomeSize"] <= hi:
+            w.append("genome size %.2f Mb outside %.2f-%.2f" % (stats["GenomeSize"] / 1e6, lo / 1e6, hi / 1e6))
+        if stats["N50Contigs"] <= 30000:
+            w.append("N50 %d <= 30 000" % stats["N50Contigs"])
+        if stats["NumberOfContigs"] >= spec["max_contigs"]:
+            w.append("%d contigs >= %d" % (stats["NumberOfContigs"], spec["max_contigs"]))
+        check("B10", WARN if w else OK, "; ".join(w) if w else "size, N50 and contigs within EFSA's ranges")
+    qc = OrderedDict([("Fastp", fastp), ("AssemblyQualityStatistics", OrderedDict([
+        ("AssemblyCoverage", asm_cov), ("AssemblyStatistics", stats)]))])
+
+    pc = OrderedDict()
+    pc["MLSTSequenceType"] = mlst_block(s, run, spec, check)
+    st = serotype_block(s, run, spec, check)
+    if st:
+        pc["PredictedSerotype"] = st
+    if spec["key"] == "ecoli":
+        pc["PredictedPathotype"], pc["PredictedStxType"] = ecoli_pathotype(s, run, check)
+    amr = amr_block(s, run, check)
+    if amr:
+        pc["AMRProfile"] = amr
+    typing = OrderedDict([("localRawReadId", rrid), ("AnalyticalPipelineInfoTag", a.pipeline_tag),
+                          ("QualityCheck", qc), ("Results", {"ParamCode": pc})])
+
+    # ── allelic profile ──
+    profiles = find_profiles(outdir, name)
+    override = dict(x.split("=", 1) for x in (a.schema or []))
+    chosen = None
+    want = override.get(spec["key"])
+    for sp_dir, schema, path in profiles:
+        if want and schema != want:
+            continue
+        if want or schema in spec["efsa_schemas"]:
+            chosen = (schema, path)
+            break
+    if not chosen and not want:
+        for sp_dir, schema, path in profiles:
+            if read_efsa_dir(a.efsa_dir, schema)[1] is not None:
+                chosen = (schema, path)
+                break
+    profile = None
+    if not chosen:
+        check("B14", STOP, "no profile in EFSA's schema (%s) and no locus map for another; profiles found: %s"
+              % ("/".join(spec["efsa_schemas"]), ", ".join(p[1] for p in profiles) or "none"))
+    else:
+        info["schema"] = chosen[0]
+        profile = build_profile(chosen[1], chosen[0], spec, a.efsa_dir, check)
+    if profile:
+        loci, vals, used = profile
+        missing = sum(1 for v in vals if v == "0")
+        lim = spec["max_missing"]
+        if lim is None:
+            lim10 = int(len(loci) * 0.10)
+            check("B15", WARN if missing > lim10 else OK, "%d missing loci (%d%% of %d)%s" % (
+                missing, round(100 * missing / len(loci)), len(loci), "; above 10 %" if missing > lim10 else ""))
+        else:
+            check("B15", STOP if missing > lim else OK, "%d missing loci (limit %d)" % (missing, lim))
+        info["missing_loci"] = missing
+        info["loci"] = len(loci)
+        info["profile_from"] = os.path.relpath(chosen[1], outdir)
+        info["efsa_files"] = used
+
+    # ── epidemiological data (only when the metadata table has it) ──
+    epi = None
+    if md.get("sampling_local_id") and md.get("isolation_local_id"):
+        def v(k, integer=False):
+            x = md.get(k, "")
+            if x == "":
+                return None
+            return int(x) if integer and re.fullmatch(r"\d+", x) else x
+        epi = OrderedDict([("localRawReadId", rrid), ("samplingData", OrderedDict([
+            ("sampling_local_id", v("sampling_local_id")), ("programme_type_id", v("programme_type_id")),
+            ("programme_info_id", v("programme_info_id")), ("sampler_id", v("sampler_id")),
+            ("sampling_point_id", v("sampling_point_id")), ("sampling_country_id", v("sampling_country_id")),
+            ("sampling_country_origin_id", v("sampling_country_origin_id")), ("sampling_area_id", v("sampling_area_id")),
+            ("sampling_year", v("sampling_year", True)), ("sampling_month", v("sampling_month", True)),
+            ("sampling_day", v("sampling_day", True)), ("sampling_matrix_code", v("sampling_matrix_code")),
+            ("sampling_matrix_free_text", v("sampling_matrix_free_text"))])),
+            ("IsolationData", OrderedDict([("isolation_local_id", v("isolation_local_id")),
+                                           ("isolation_year", v("isolation_year", True)),
+                                           ("isolation_month", v("isolation_month", True)),
+                                           ("isolation_day", v("isolation_day", True))]))])
+        yr = epi["samplingData"]["sampling_year"]
+        if not isinstance(yr, int) or not 1900 <= yr <= datetime.date.today().year:
+            check("B19", STOP, "sampling_year missing or outside 1900-%d" % datetime.date.today().year)
+        else:
+            check("B19", OK, "epidemiological data included (catalogue codes not checked)")
+
+    # ── write ──
+    stopped = any(c[1] == STOP for c in checks)
+    sdir = os.path.join(a.out, name)
+    os.makedirs(sdir, exist_ok=True)
+    write_json(os.path.join(sdir, "experimentalData.json"), exp)
+    write_json(os.path.join(sdir, "typingData.json"), typing)
+    payload = OrderedDict([("publicRawReadCreate", exp), ("result", typing)])
+    if epi:
+        write_json(os.path.join(sdir, "epidemiologicalData.json"), epi)
+        payload["publicEpidemiologicalDataCreate"] = epi
+    write_json(os.path.join(sdir, "sampleData.json"), {"payload": payload})
+    info["files"] = {"experimental": "experimentalData.json", "typing": "typingData.json",
+                     "epidemiological": "epidemiologicalData.json" if epi else "", "api": "sampleData.json"}
+    if profile:
+        loci, vals, _ = profile
+        suffix = a.locus_suffix
+        with open(os.path.join(sdir, "allelicProfile.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("\t".join(["FILE"] + [l + suffix for l in loci]) + "\n")
+            fh.write("\t".join([rrid] + vals) + "\n")
+        info["files"]["profile"] = "allelicProfile.tsv"
+    info["localRawReadId"] = rrid
+    info["status"] = "STOPPED" if stopped else ("READY, WITH WARNINGS" if any(c[1] == WARN for c in checks) else "READY")
+    return info, checks
+
+
+def cmd_export(a):
+    outdir, run = load_run(a.outdir, a.rundata)
+    a.out = a.out or os.path.join(outdir, "results", "export", "efsa")
+    meta = read_metadata(a.metadata)
+    if not a.pipeline_tag:
+        v = get(run, "pipeline_info", "version", default="")
+        a.pipeline_tag = ("EURLC-WGS " + v).strip()
+    os.makedirs(a.out, exist_ok=True)
+    wanted = set(x.strip() for x in (a.samples or "").split(",") if x.strip())
+    manifest, pre = [], []
+    for s in run.get("samples", []):
+        if wanted and s.get("name") not in wanted:
+            continue
+        info, checks = export_sample(s, run, outdir, a, meta)
+        skip = next((c for c in checks if c[1] == "SKIP"), None)
+        if skip:
+            manifest.append([info["sample"], info["species"], "NOT EXPORTED", skip[2], "", "", "", ""])
+            continue
+        for rule, status, msg in checks:
+            pre.append([info["sample"], rule, status, msg])
+        stops = [c[2] for c in checks if c[1] == STOP]
+        warns = [c[2] for c in checks if c[1] == WARN]
+        manifest.append([info["sample"], info["species"], info["status"],
+                         "; ".join(stops or warns), info.get("localRawReadId", ""), info.get("schema", ""),
+                         "%s of %s" % (info.get("missing_loci", ""), info.get("loci", "")) if "loci" in info else "",
+                         info.get("profile_from", "")])
+
+    with open(os.path.join(a.out, "manifest.tsv"), "w", encoding="utf-8") as fh:
+        fh.write("sample\tspecies\tstatus\tissues\tlocalRawReadId\tschema\tmissing_loci\tprofile_source\n")
+        for r in manifest:
+            fh.write("\t".join(str(x).replace("\t", " ") for x in r) + "\n")
+    with open(os.path.join(a.out, "preflight.tsv"), "w", encoding="utf-8") as fh:
+        fh.write("sample\trule\tstatus\tmessage\n")
+        for r in pre:
+            fh.write("\t".join(str(x).replace("\t", " ") for x in r) + "\n")
+    ready = [r for r in manifest if r[2].startswith("READY")]
+    with open(os.path.join(a.out, "upload_cli.sh"), "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\n# EFSA WGS System, programmatic submission with the EFSA `wgs` CLI.\n"
+                 "# To be run by an appointed Data Provider, after checking preflight.tsv and the files.\n"
+                 "# Each line creates and RELEASES an entry. Made by eurlc-efsa-export %s, %s.\n"
+                 "cd \"$(dirname \"$0\")\" || exit 1\n" % (VERSION, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+        for r in ready:
+            d = r[0]
+            e = " -E '%s/epidemiologicalData.json'" % d if os.path.isfile(os.path.join(a.out, d, "epidemiologicalData.json")) else ""
+            fh.write("wgs upload -RR '%s/experimentalData.json' -R '%s/typingData.json' -A '%s/allelicProfile.tsv'%s\n" % (d, d, d, e))
+    with open(os.path.join(a.out, "README.txt"), "w", encoding="utf-8") as fh:
+        fh.write(README % {"version": VERSION, "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                           "suffix": a.locus_suffix or "(none)", "tag": a.pipeline_tag,
+                           "efsa_dir": a.efsa_dir or "(none)", "metadata": a.metadata or "(none)"})
+    n_stop = sum(1 for r in manifest if r[2] == "STOPPED")
+    n_skip = sum(1 for r in manifest if r[2] == "NOT EXPORTED")
+    summary = {"ready": sum(1 for r in ready if r[2] == "READY"),
+               "ready_with_warnings": sum(1 for r in ready if r[2] != "READY"),
+               "stopped": n_stop, "not_exported": n_skip, "out": a.out}
+    write_json(os.path.join(a.out, "summary.json"), summary)
+    print("EFSA export: %d ready, %d ready with warnings, %d stopped by the checks, %d not exported "
+          "(species or not reportable) -> %s" % (summary["ready"], summary["ready_with_warnings"], n_stop, n_skip, a.out))
+    for r in manifest:
+        if r[2] != "READY":
+            print("  %-20s %-22s %s" % (r[0], r[2], r[3][:150]))
+    return 0 if n_stop == 0 else 1
+
+
+README = """EFSA WGS System -- files for programmatic submission
+Made by eurlc-efsa-export %(version)s, %(date)s. Nothing has been sent.
+
+Per sample folder:
+  experimentalData.json, typingData.json, allelicProfile.tsv
+  [epidemiologicalData.json]       when the metadata table has sampling data
+  sampleData.json                  the same, as one payload for the WGS API
+  (the API takes sampleData.json with UploadResults, then allelicProfile.tsv
+   with UploadResultsAllelicProfiles, passing the "id" of the first answer as
+   analyticalPipelineRunId)
+
+manifest.tsv   one row per sample: READY / READY, WITH WARNINGS / STOPPED / NOT EXPORTED
+preflight.tsv  every check per sample (EFSA business rules B1-B19 where they can be
+               checked here; uniqueness in EFSA's database, B2/B3/B18, cannot)
+upload_cli.sh  one `wgs upload` line per ready sample (EFSA CLI; run by an
+               appointed Data Provider -- each line creates and releases an entry)
+
+Settings used: locus-name suffix %(suffix)s; AnalyticalPipelineInfoTag "%(tag)s";
+EFSA folder %(efsa_dir)s; metadata %(metadata)s.
+Open questions and how the values are made: docs/eurlc-efsa-export.md.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# compat
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_profiles(paths):
+    """id -> {locus: allele} from chewBBACA-style TSVs (several rows per file allowed)."""
+    out = {}
+    for p in paths:
+        head, rows = read_tsv(p)
+        loci = [re.sub(r"\.fasta$", "", h) for h in head[1:]]
+        for r in rows:
+            out[r[0]] = {l: (v.strip() if re.fullmatch(r"\d+", v.strip()) else "0") for l, v in zip(loci, r[1:])}
+    return out
+
+
+def cmd_compat(a):
+    base = read_profiles(a.base)
+    test = read_profiles(a.test)
+    idmap = {}
+    if a.id_map:
+        _, rows = read_tsv(a.id_map)
+        idmap = {r[1]: r[0] for r in rows if len(r) >= 2}   # test id -> base id
+    if a.thresholds:
+        mn, mx, md = (int(x) for x in a.thresholds.split(","))
+    elif a.species in COMPAT:
+        mn, mx, md = COMPAT[a.species]
+    else:
+        mn = mx = md = None
+    rows = []
+    for tid, tp in sorted(test.items()):
+        bid = idmap.get(tid, tid)
+        bp = base.get(bid)
+        if bp is None:
+            rows.append([bid, tid, "", "", "", "", "no base profile"])
+            continue
+        common = set(bp) & set(tp)
+        miss = sum(1 for l in common if bp[l] != "0" and tp[l] == "0")
+        diff = sum(1 for l in common if bp[l] != "0" and tp[l] != "0" and bp[l] != tp[l])
+        if md is None:
+            verdict = ""
+        elif diff >= mx or miss + diff > md:
+            verdict = "Fail"
+        elif mn < diff < mx:
+            verdict = "Warning"
+        elif miss + diff == 0:
+            verdict = "Perfect"
+        else:
+            verdict = "Acceptable"
+        note = "" if len(common) == len(bp) == len(tp) else "loci: %d common, %d base, %d test" % (len(common), len(bp), len(tp))
+        rows.append([bid, tid, len(common), miss, diff, verdict, note])
+    w = sys.stdout.write
+    w("eurlc-efsa-export %s compat%s\n" % (VERSION, " (thresholds MIN_ALLELES_DIFF %s, MAX_ALLELES_DIFF %s, MAX_DIFF %s)" % (mn, mx, md) if md is not None else " (no thresholds: give --species or --thresholds)"))
+    w("%-24s %-24s %6s %8s %8s %-11s %s\n" % ("base", "test", "loci", "missing", "alleles", "verdict", "note"))
+    for r in rows:
+        w("%-24s %-24s %6s %8s %8s %-11s %s\n" % tuple(str(x) for x in r))
+    if a.tsv:
+        with open(a.tsv, "w", encoding="utf-8") as fh:
+            fh.write("base_id\ttest_id\tcommon_loci\tNumMissingLociTest\tAllelesDiff\tverdict\tnote\n")
+            for r in rows:
+                fh.write("\t".join(str(x) for x in r) + "\n")
+    bad = [r for r in rows if r[5] == "Fail" or r[6] == "no base profile"]
+    return 1 if bad else 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="eurlc-efsa-export",
+                                description="Prepare EURLC-WGS results for the EFSA WGS System (nothing is sent).",
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog="Examples:\n"
+                                       "  eurlc-efsa-export export /data/run192/eurlc-wgs --metadata efsa_metadata.tsv\n"
+                                       "  eurlc-efsa-export compat --base efsa_profiles.tsv --test ours/*/allelicProfile.tsv --species salmonella\n")
+    p.add_argument("--version", action="version", version="%(prog)s " + VERSION)
+    sub = p.add_subparsers(dest="cmd")
+    e = sub.add_parser("export", help="files for programmatic submission, with a check against EFSA's rules",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    e.add_argument("outdir", help="eurlc-wgs output folder")
+    e.add_argument("--out", help="where the files go (default <outdir>/results/export/efsa)")
+    e.add_argument("--metadata", help="TSV, one row per sample: sample, localRawReadId, instrumentModelCode, "
+                                      "serotypeId, and the epidemiological fields (docs/eurlc-efsa-export.md)")
+    e.add_argument("--efsa-dir", help="folder with <schema>.loci.txt (EFSA's loci, in order) and "
+                                      "<schema>.locus_map.tsv (our name -> EFSA name)")
+    e.add_argument("--schema", action="append", metavar="SPECIES=SCHEMA",
+                   help="use this schema for a species (salmonella, ecoli, listeria, campylobacter)")
+    e.add_argument("--locus-suffix", default="", help="added to every locus name in allelicProfile.tsv (e.g. .fasta)")
+    e.add_argument("--pipeline-tag", help="AnalyticalPipelineInfoTag (default: EURLC-WGS <version>)")
+    e.add_argument("--samples", help="only these samples (comma-separated)")
+    e.add_argument("--rundata", help="read the run from this file instead of <outdir>/data/rundata.json")
+    c = sub.add_parser("compat", help="EFSA compatibility report: our profiles against the EFSA pipeline's",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    c.add_argument("--base", nargs="+", required=True, help="profiles from the EFSA Analytical Pipeline (TSV)")
+    c.add_argument("--test", nargs="+", required=True, help="profiles from this pipeline (TSV)")
+    c.add_argument("--species", choices=sorted(COMPAT) + ["campylobacter"], help="for the thresholds")
+    c.add_argument("--thresholds", metavar="MIN,MAX,MAXDIFF", help="MIN_ALLELES_DIFF,MAX_ALLELES_DIFF,MAX_DIFF")
+    c.add_argument("--id-map", help="TSV base_id<TAB>test_id when the sample IDs differ")
+    c.add_argument("--tsv", help="write the table to this file")
+    a = p.parse_args(argv)
+    if a.cmd == "export":
+        return cmd_export(a)
+    if a.cmd == "compat":
+        return cmd_compat(a)
+    p.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

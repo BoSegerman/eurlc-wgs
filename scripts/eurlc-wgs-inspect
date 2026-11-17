@@ -10,6 +10,8 @@
 #              status, species, typing), the spread of each measure per
 #              species, how the thresholds fall out against what is known
 #              about the samples, and the issues found across runs
+#   known-template  a table of a run's samples (or several runs') to fill in what
+#              is known about them, for summarize --expected
 #   compare    the results of one or more runs against a reference run, area by
 #              area (after an update: what changed?; the same data run again:
 #              repeatability), from the runs' results fingerprints
@@ -38,7 +40,7 @@ import urllib.parse
 import zlib
 from collections import defaultdict
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -960,20 +962,160 @@ def _thresholds_of(smp):
     return out
 
 
+def _read_text_any(path):
+    """Text of a file written by hand or saved from Excel: UTF-8 (with or without BOM), else Windows-1252."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+KNOWN_COLUMNS = ["run", "sample", "expected", "note"]
+KNOWN_INFO = ["species", "qc_status", "st", "qc_issues"]
+
+
+def _read_known(path):
+    """(header, rows as dicts) of a known-samples table; the header names the columns when it starts with 'run'."""
+    head, rows = None, []
+    for i, line in enumerate(_read_text_any(path).splitlines()):
+        if not line.strip() or line.startswith("#"):
+            continue
+        c = [x.strip().strip('"').strip() for x in line.split("\t")]
+        if head is None:
+            if c[0].lower() == "run":
+                head = [x.lower() for x in c]
+                continue
+            head = KNOWN_COLUMNS + KNOWN_INFO
+        rec = dict(zip(head, c + [""] * (len(head) - len(c))))
+        rec["_line"] = i + 1
+        rows.append(rec)
+    return head or KNOWN_COLUMNS + KNOWN_INFO, rows
+
+
 def _read_expected(path):
     exp = {}
-    with open(path, encoding="utf-8") as fh:
-        for i, line in enumerate(fh):
-            if not line.strip() or line.startswith("#"):
-                continue
-            c = line.rstrip("\n").split("\t")
-            if i == 0 and c[0].lower() == "run":
-                continue
-            if len(c) < 3:
-                warn("%s line %d: needs run, sample, expected (tab-separated)" % (path, i + 1))
-                continue
-            exp[(c[0], c[1])] = (c[2].strip().lower(), c[3] if len(c) > 3 else "")
+    _, rows = _read_known(path)
+    for r in rows:
+        if not r.get("run") or not r.get("sample"):
+            warn("%s line %d: needs run and sample" % (path, r["_line"]))
+            continue
+        e = (r.get("expected") or "").strip().lower()
+        if not e:
+            continue        # not filled in (yet)
+        exp[(r["run"], r["sample"])] = (e, r.get("note", ""))
     return exp
+
+
+def _resolve_run(arg):
+    """An output folder for a run folder, an output folder, or a folder inside one; None if none."""
+    p = os.path.abspath(arg)
+    for c in (p, os.path.join(p, "eurlc-wgs"), os.path.join(p, "eurlc-wgs_qcscreen")):
+        if os.path.isfile(os.path.join(c, "data", "rundata.json")):
+            return c
+    q = p
+    while True:                     # standing somewhere inside an output folder (report/, results/...)
+        parent = os.path.dirname(q)
+        if parent == q:
+            return None
+        q = parent
+        if os.path.isfile(os.path.join(q, "data", "rundata.json")):
+            return q
+
+
+def cmd_known_template(a):
+    if a.runs and a.all:
+        die("give runs, or --all FOLDER, not both")
+    if a.all:
+        runs = _find_runs(a.all)
+        if not runs:
+            die("no runs (folders with eurlc-wgs/data/rundata.json) below %s" % ", ".join(a.all), 1)
+    elif a.runs:
+        runs = []
+        for r in a.runs:
+            out = _resolve_run(r)
+            if not out:
+                die("%s is not a run (no eurlc-wgs/data/rundata.json); to search below a folder use --all %s" % (r, r))
+            runs.append(out)
+    else:
+        out = _resolve_run(os.getcwd())
+        if not out:
+            die("this folder is not a run (no eurlc-wgs/ here or above); give a run folder, "
+                "or --all <folder> to take every run below a folder")
+        runs = [out]
+        sys.stderr.write("eurlc-wgs-inspect: the run here: %s\n" % _run_label(out))
+
+    labels = defaultdict(list)
+    for out in runs:
+        labels[_run_label(out)].append(out)
+    for lab, outs in labels.items():
+        if len(outs) > 1:
+            warn("%d runs are all called '%s' (%s): their rows cannot be told apart in the table; "
+                 "rename a run folder" % (len(outs), lab, ", ".join(outs)))
+
+    new_rows = []
+    for out in runs:
+        try:
+            with open(os.path.join(out, "data", "rundata.json"), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:
+            warn("cannot read %s: %s" % (out, e))
+            continue
+        run = _run_label(out)
+        for smp in data.get("samples", []):
+            row, _ = _sample_row(run, smp)
+            issues = row["qc_issues"]
+            new_rows.append({"run": run, "sample": row["sample"], "expected": "", "note": "",
+                             "species": row["species"], "qc_status": row["qc_status"], "st": row["st"],
+                             "qc_issues": issues[:200] + (" ..." if len(issues) > 200 else "")})
+
+    target = a.update or a.out
+    head, old = (None, [])
+    if a.update:
+        if not os.path.isfile(a.update):
+            die("--update: %s not found" % a.update)
+        head, old = _read_known(a.update)
+    elif target != "-" and os.path.exists(target) and not a.force:
+        die("%s exists: --update %s adds the new runs and keeps what you filled in; --force overwrites" % (target, target))
+
+    columns = list(KNOWN_COLUMNS)
+    for h in (head or []):
+        if h not in columns and h not in KNOWN_INFO and not h.startswith("_"):
+            columns.append(h)           # your own columns are kept
+    columns += KNOWN_INFO
+    rows, index = [], {}
+    for r in old:
+        rows.append(r)
+        index[(r.get("run"), r.get("sample"))] = r
+    added = 0
+    for r in new_rows:
+        k = (r["run"], r["sample"])
+        if k in index:                  # keep expected/note; refresh the information columns
+            for c in KNOWN_INFO:
+                index[k][c] = r[c]
+        else:
+            rows.append(r)
+            index[k] = r
+            added += 1
+
+    text = "\t".join(columns) + "\n" + "".join(
+        "\t".join(str(r.get(c, "") or "").replace("\t", " ") for c in columns) + "\n" for r in rows)
+    if target == "-":
+        sys.stdout.write(text)
+    else:
+        if a.update:
+            import shutil
+            shutil.copy2(a.update, a.update + ".bak")
+        with open(target, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        filled = sum(1 for r in rows if (r.get("expected") or "").strip())
+        sys.stderr.write("eurlc-wgs-inspect: %s: %d sample rows (%d new, from %d run(s)); %d have 'expected' filled in%s\n"
+                         % (target, len(rows), added, len(runs), filled,
+                            " (previous version: %s.bak)" % a.update if a.update else ""))
+    return 0
 
 
 def cmd_summarize(a):
@@ -1650,6 +1792,8 @@ def main(argv=None):
                "  eurlc-wgs-inspect inventory --from-listing listing.txt\n"
                "  eurlc-wgs-inspect extract /data/run192/eurlc-wgs --samples 23SCA11,PT43-10 -o run192_review\n"
                "  eurlc-wgs-inspect mixture /data/run*/eurlc-wgs --tsv mixture.tsv --threshold 30\n"
+               "  eurlc-wgs-inspect known-template /data/run192        (then fill in known.tsv)\n"
+               "  eurlc-wgs-inspect known-template /data/run201 --update known.tsv\n"
                "  eurlc-wgs-inspect summarize /data/run*/eurlc-wgs --expected known.tsv --tsv all_samples.tsv\n"
                "  eurlc-wgs-inspect compare reference/2026-11-16_v0.1.0.json.gz /data/verif/eurlc-wgs --expect amr\n",
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1694,6 +1838,21 @@ def main(argv=None):
     sm.add_argument("--min-samples", type=int, default=1, help="leave out species with fewer samples")
     sm.add_argument("--top", type=int, default=40, help="issue groups to show")
 
+    k = sub.add_parser("known-template", help="a table of the samples of one or more runs, to fill in what is known "
+                                               "about them (for summarize --expected)",
+                       formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+                       description="One row per sample: run, sample, expected (empty), note (empty), and species, "
+                                   "QC status, ST and QC issues to go by. Fill in 'expected' (clean, contaminated, "
+                                   "low_quality, ...) and 'note', e.g. in Excel (save as tab-separated text). "
+                                   "Without runs: the run you are standing in. Rows with an empty 'expected' are "
+                                   "ignored by summarize.")
+    k.add_argument("runs", nargs="*", help="run folders (a folder with eurlc-wgs/ in it, or the eurlc-wgs folder)")
+    k.add_argument("--all", nargs="+", metavar="FOLDER", help="every run found below these folders")
+    k.add_argument("-o", "--out", default="known.tsv", help="the table to write ('-' = standard output)")
+    k.add_argument("--update", metavar="FILE", help="add the samples of these runs to an existing table, keeping "
+                                                   "what is filled in (and your own columns); the old file is kept as .bak")
+    k.add_argument("--force", action="store_true", help="overwrite --out if it exists")
+
     x = sub.add_parser("mixture", help="the intra-species mixture metric per sample, and per species",
                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     x.add_argument("folders", nargs="+", help="output folders, or folders above them (searched for *.remap_qc.json)")
@@ -1722,6 +1881,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     if a.cmd == "compare":
         return cmd_compare(a)
+    if a.cmd == "known-template":
+        return cmd_known_template(a)
     if a.cmd == "inventory":
         return cmd_inventory(a)
     if a.cmd == "extract":

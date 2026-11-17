@@ -243,6 +243,12 @@ if [[ -f "${SRC_DIR}/scripts/eurlc-validate" ]]; then
     echo ">>> Installed: eurlc-validate"
 fi
 
+if [[ -f "${SRC_DIR}/scripts/eurlc-efsa-export" ]]; then
+    cp -p "${SRC_DIR}/scripts/eurlc-efsa-export" "${TARGET_BIN}/eurlc-efsa-export"
+    chmod +x "${TARGET_BIN}/eurlc-efsa-export"
+    echo ">>> Installed: eurlc-efsa-export"
+fi
+
 if [[ -f "${SRC_DIR}/scripts/eurlc-wgs-inspect" ]]; then
     cp -p "${SRC_DIR}/scripts/eurlc-wgs-inspect" "${TARGET_BIN}/eurlc-wgs-inspect"
     chmod +x "${TARGET_BIN}/eurlc-wgs-inspect"

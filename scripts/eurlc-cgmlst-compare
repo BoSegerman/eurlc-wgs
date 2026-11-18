@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""eurlc-cgmlst-compare -- compare chewBBACA results and schemas.
+
+Finds out why two cgMLST analyses of the same isolate differ: the schema
+(which alleles and representatives it holds, its training file and
+settings), the assembly, or the call itself.
+
+  profiles A B      compare two AlleleCall results, locus by locus
+  schemas  SA SB    compare two schemas (allele content, training file)
+  explain  A B --schema-a SA --schema-b SB
+                    for the loci where A and B differ: is the allele that
+                    one side called present in the other side's schema?
+
+A and B are chewBBACA output folders (results_alleles.tsv, and a hashed
+profile: results_alleles_hashed.tsv from --hash-profile crc32, or
+eurlc-wgs's results_alleles_crc32.tsv), or a results_alleles.tsv file.
+Locus names can differ between the two (chewie-NS names against INNUENDO
+names): give --map with two columns, a name in A and the same locus in B.
+
+Only the Python standard library. Reads the schemas' FASTA files; does not
+load the schemas' .schema_config (a pickle) unless --read-config is given.
+"""
+
+import argparse
+import collections
+import csv
+import glob
+import hashlib
+import os
+import sys
+import zlib
+
+VERSION = "0.1.0"
+CLASSES = ("EXC", "INF", "LNF", "PLOT3", "PLOT5", "LOTSC", "NIPH", "NIPHEM", "ALM", "ASM", "PAMA")
+
+
+def die(msg, code=2):
+    print("eurlc-cgmlst-compare: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+# --- reading ------------------------------------------------------------------
+
+def _read_tsv(path):
+    with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+        rows = [r for r in csv.reader(fh, delimiter="\t") if r]
+    if len(rows) < 2:
+        die("%s: no sample row" % path)
+    return rows
+
+
+def _find(folder, names):
+    for n in names:
+        hits = sorted(glob.glob(os.path.join(folder, "**", n), recursive=True))
+        if hits:
+            return hits[0]
+    return None
+
+
+def read_profile(path, sample=None):
+    """-> dict(name, loci{locus: (class, allele id or None)}, hashes{locus: hash or None}, files)."""
+    if os.path.isdir(path):
+        alleles = _find(path, ["results_alleles.tsv"])
+        hashed = _find(path, ["results_alleles_hashed.tsv", "results_alleles_crc32.tsv"])
+        if not alleles and not hashed:
+            die("%s: no results_alleles.tsv or hashed profile" % path)
+    else:
+        alleles, hashed = path, None
+        d = os.path.dirname(path) or "."
+        for n in ("results_alleles_hashed.tsv", "results_alleles_crc32.tsv"):
+            if os.path.isfile(os.path.join(d, n)):
+                hashed = os.path.join(d, n)
+                break
+
+    def pick(rows, label):
+        hdr = rows[0]
+        body = rows[1:]
+        if sample is not None:
+            body = [r for r in body if r[0] == sample or os.path.splitext(r[0])[0] == sample]
+            if not body:
+                die("%s: sample %s not found (there: %s)" % (label, sample, ", ".join(r[0] for r in rows[1:6])))
+        elif len(body) > 1:
+            die("%s holds %d samples; choose one with --sample-a/--sample-b" % (label, len(body)))
+        return hdr, body[0]
+
+    loci, hashes, name = {}, {}, None
+    if alleles:
+        hdr, row = pick(_read_tsv(alleles), alleles)
+        name = row[0]
+        for locus, v in zip(hdr[1:], row[1:]):
+            locus = _norm_locus(locus)
+            v = v.strip()
+            if v.isdigit():
+                loci[locus] = ("EXC", v)
+            elif v.startswith("INF-"):
+                loci[locus] = ("INF", v[4:].lstrip("*"))
+            elif v.startswith("*") and v[1:].isdigit():   # chewBBACA 2: *12 = inferred
+                loci[locus] = ("INF", v[1:])
+            else:
+                loci[locus] = (v if v in CLASSES else (v or "?"), None)
+    if hashed:
+        hdr, row = pick(_read_tsv(hashed), hashed)
+        name = name or row[0]
+        for locus, v in zip(hdr[1:], row[1:]):
+            v = v.strip()
+            hashes[_norm_locus(locus)] = v if v not in ("", "-", "0", "LNF", "NA") and not v.isalpha() else None
+        if not loci:   # hashed profile only: called or not
+            loci = {l: ("called" if h else "-", None) for l, h in hashes.items()}
+    return {"name": name, "loci": loci, "hashes": hashes, "files": [f for f in (alleles, hashed) if f]}
+
+
+def _norm_locus(x):
+    x = x.strip()
+    for suf in (".fasta", ".fa", ".fna"):
+        if x.endswith(suf):
+            return x[: -len(suf)]
+    return x
+
+
+def read_map(path):
+    m = {}
+    if not path:
+        return m
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            p = line.rstrip("\n").split("\t")
+            if len(p) >= 2 and p[0] and not p[0].startswith("#"):
+                m[_norm_locus(p[0])] = _norm_locus(p[1])
+    return m
+
+
+def read_fasta(path):
+    seqs, name, buf = [], None, []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith(">"):
+                if name is not None:
+                    seqs.append((name, "".join(buf).upper()))
+                name, buf = line[1:].split()[0], []
+            elif line:
+                buf.append(line)
+    if name is not None:
+        seqs.append((name, "".join(buf).upper()))
+    return seqs
+
+
+def allele_id(header, locus):
+    """'INNUENDO_cgMLST-00031971_108' -> '108'; '*12' -> '12'."""
+    h = header
+    if h.startswith(locus + "_"):
+        h = h[len(locus) + 1:]
+    else:
+        h = h.rsplit("_", 1)[-1]
+    return h.lstrip("*")
+
+
+def crc(seq):
+    return str(zlib.crc32(seq.encode()) & 0xffffffff)
+
+
+class Schema:
+    def __init__(self, folder):
+        if not os.path.isdir(folder):
+            die("not a folder: %s" % folder)
+        self.dir = folder
+        self.files = {}
+        for f in glob.glob(os.path.join(folder, "*.fasta")):
+            self.files[_norm_locus(os.path.basename(f))] = f
+        if not self.files:
+            die("%s: no <locus>.fasta files (is it a chewBBACA schema folder?)" % folder)
+        self._cache = {}
+
+    def alleles(self, locus):
+        if locus not in self._cache:
+            f = self.files.get(locus)
+            self._cache[locus] = read_fasta(f) if f else None
+        return self._cache[locus]
+
+    def short(self, locus):
+        f = os.path.join(self.dir, "short", locus + "_short.fasta")
+        return read_fasta(f) if os.path.isfile(f) else None
+
+    def info(self):
+        out = {}
+        trn = sorted(glob.glob(os.path.join(self.dir, "*.trn")))
+        out["training_files"] = [(os.path.basename(t), _md5(t)) for t in trn]
+        for n in (".schema_config", ".genes_list", "schema.ini", ".ns_config"):
+            p = os.path.join(self.dir, n)
+            if os.path.isfile(p):
+                out[n] = _md5(p)
+        return out
+
+
+def _md5(path):
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for b in iter(lambda: fh.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def read_loci_list(path):
+    if not path:
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return [_norm_locus(os.path.basename(l.strip())) for l in fh if l.strip() and not l.startswith("#")]
+
+
+# --- profiles -------------------------------------------------------------------
+
+def compare_profiles(a, b, amap):
+    """-> list of rows (locus_a, locus_b, class_a, class_b, hash_a, hash_b, verdict)."""
+    rows = []
+    seen_b = set()
+    for la in sorted(a["loci"]):
+        lb = amap.get(la, la)
+        if lb not in b["loci"]:
+            rows.append((la, lb, a["loci"][la][0], "absent", a["hashes"].get(la), None, "locus only in A"))
+            continue
+        seen_b.add(lb)
+        ca, cb = a["loci"][la][0], b["loci"][lb][0]
+        ha, hb = a["hashes"].get(la), b["hashes"].get(lb)
+        called_a = ca in ("EXC", "INF", "called")
+        called_b = cb in ("EXC", "INF", "called")
+        if called_a and called_b:
+            if ha and hb:
+                v = "same allele" if ha == hb else "different allele"
+            else:
+                v = "both called (no hash)"
+        elif called_a:
+            v = "only A called"
+        elif called_b:
+            v = "only B called"
+        else:
+            v = "neither called"
+        rows.append((la, lb, ca, cb, ha, hb, v))
+    for lb in sorted(set(b["loci"]) - seen_b):
+        rows.append(("", lb, "absent", b["loci"][lb][0], None, b["hashes"].get(lb), "locus only in B"))
+    return rows
+
+
+def cmd_profiles(args):
+    a = read_profile(args.a, args.sample_a)
+    b = read_profile(args.b, args.sample_b)
+    rows = compare_profiles(a, b, read_map(args.map))
+    report_profiles(a, b, rows, args)
+    return rows
+
+
+def report_profiles(a, b, rows, args):
+    print("A: %s (%s)" % (a["name"], ", ".join(a["files"])))
+    print("B: %s (%s)" % (b["name"], ", ".join(b["files"])))
+    for lab, p in (("A", a), ("B", b)):
+        c = collections.Counter(v[0] for v in p["loci"].values())
+        called = c["EXC"] + c["INF"] + c["called"]
+        n = len(p["loci"])
+        print("  %s: %d loci, called %d (%.2f %%): %s" % (lab, n, called, 100.0 * called / n if n else 0,
+              ", ".join("%s %d" % (k, c[k]) for k in sorted(c, key=lambda x: -c[x]))))
+    v = collections.Counter(r[6] for r in rows)
+    print("\nPer locus:")
+    for k in ("same allele", "different allele", "both called (no hash)", "only A called", "only B called",
+              "neither called", "locus only in A", "locus only in B"):
+        if v[k]:
+            print("  %-24s %5d" % (k, v[k]))
+    both = v["same allele"] + v["different allele"]
+    if both and v["same allele"] == 0:
+        print("  NOTE: no locus has the same hash in A and B -- the two hashed profiles are probably not "
+              "made the same way (CRC32 of the DNA sequence, decimal); compare with 'explain' instead.")
+    if v["locus only in A"] + v["locus only in B"] > len(rows) / 2:
+        print("  NOTE: most loci are only on one side -- the locus names differ; give --map.")
+    x = collections.Counter((r[2], r[3]) for r in rows if r[6] in ("only A called", "only B called", "different allele"))
+    if x:
+        print("\nWhere they differ (class in A -> class in B):")
+        for (ca, cb), n in x.most_common():
+            print("  %-7s -> %-7s %5d" % (ca, cb, n))
+    if args.tsv:
+        with open(args.tsv, "w", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+            w.writerow(["locus_a", "locus_b", "class_a", "class_b", "hash_a", "hash_b", "verdict"])
+            for r in rows:
+                w.writerow([x if x is not None else "" for x in r])
+        print("\nPer locus table: %s" % args.tsv)
+    if args.list_loci:
+        with open(args.list_loci, "w") as fh:
+            for r in rows:
+                if r[6] in ("only A called", "only B called", "different allele"):
+                    fh.write((r[0] or r[1]) + "\n")
+        print("Loci that differ: %s (for 'schemas --loci' or 'explain')" % args.list_loci)
+
+
+# --- schemas --------------------------------------------------------------------
+
+def cmd_schemas(args):
+    sa, sb = Schema(args.schema_a), Schema(args.schema_b)
+    amap = read_map(args.map)
+    loci = read_loci_list(args.loci)
+    print("Schema A: %s, %d loci" % (sa.dir, len(sa.files)))
+    print("Schema B: %s, %d loci" % (sb.dir, len(sb.files)))
+    ia, ib = sa.info(), sb.info()
+    print("\nTraining file (Prodigal) and settings files (md5):")
+    for k in sorted(set(ia) | set(ib)):
+        va, vb = ia.get(k), ib.get(k)
+        same = "same" if va == vb else "DIFFERENT"
+        print("  %-16s %s\n    A %s\n    B %s" % (k, same, va, vb))
+    if args.read_config:
+        for lab, s in (("A", sa), ("B", sb)):
+            p = os.path.join(s.dir, ".schema_config")
+            if os.path.isfile(p):
+                import pickle   # only for schemas you trust (--read-config)
+                with open(p, "rb") as fh:
+                    print("  %s .schema_config: %r" % (lab, pickle.load(fh)))
+    names = loci if loci is not None else sorted(sa.files)
+    rows, agg = [], collections.Counter()
+    for la in names:
+        lb = amap.get(la, la)
+        A, B = sa.alleles(la), sb.alleles(lb)
+        if A is None or B is None:
+            agg["locus missing in A" if A is None else "locus missing in B"] += 1
+            continue
+        ha = {crc(s) for _, s in A}
+        hb = {crc(s) for _, s in B}
+        ra, rb = sa.short(la), sb.short(lb)
+        reps_a = {crc(s) for _, s in ra} if ra else set()
+        reps_b = {crc(s) for _, s in rb} if rb else set()
+        la_len = [len(s) for _, s in A]
+        lb_len = [len(s) for _, s in B]
+        row = {"locus_a": la, "locus_b": lb, "alleles_a": len(ha), "alleles_b": len(hb),
+               "shared": len(ha & hb), "only_a": len(ha - hb), "only_b": len(hb - ha),
+               "reps_a": len(reps_a), "reps_b": len(reps_b), "reps_same": int(reps_a == reps_b),
+               "len_a": "%d-%d" % (min(la_len), max(la_len)), "len_b": "%d-%d" % (min(lb_len), max(lb_len))}
+        rows.append(row)
+        agg["loci compared"] += 1
+        agg["identical allele set"] += int(ha == hb)
+        agg["A has alleles B lacks"] += int(bool(ha - hb))
+        agg["B has alleles A lacks"] += int(bool(hb - ha))
+        agg["representatives differ"] += int(reps_a != reps_b)
+    print("\nAllele content:")
+    for k in ("loci compared", "identical allele set", "A has alleles B lacks", "B has alleles A lacks",
+              "representatives differ", "locus missing in A", "locus missing in B"):
+        if agg[k]:
+            print("  %-26s %6d" % (k, agg[k]))
+    if rows:
+        tot = lambda k: sum(r[k] for r in rows)
+        print("  alleles in total: A %d, B %d, shared %d" % (tot("alleles_a"), tot("alleles_b"), tot("shared")))
+    if args.tsv:
+        with open(args.tsv, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()) if rows else ["locus_a"], delimiter="\t",
+                               lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows)
+        print("\nPer locus table: %s" % args.tsv)
+
+
+# --- explain --------------------------------------------------------------------
+
+def cmd_explain(args):
+    a = read_profile(args.a, args.sample_a)
+    b = read_profile(args.b, args.sample_b)
+    amap = read_map(args.map)
+    rows = compare_profiles(a, b, amap)
+    sa = Schema(args.schema_a) if args.schema_a else None
+    sb = Schema(args.schema_b) if args.schema_b else None
+    report_profiles(a, b, rows, argparse.Namespace(tsv=None, list_loci=None))
+
+    # Is the hash convention the same as the schemas'? (EXC alleles: the
+    # schema's sequence for the called ID must give the profile's hash.)
+    def check_convention(p, s, lab, key):
+        ok = bad = 0
+        for r in rows:
+            locus = r[0] if key == 0 else r[1]
+            cls = r[2] if key == 0 else r[3]
+            h = r[4] if key == 0 else r[5]
+            if cls != "EXC" or not h or not s:
+                continue
+            aid = p["loci"].get(locus, (None, None))[1]
+            al = s.alleles(locus)
+            if not al:
+                continue
+            seq = next((q for n, q in al if allele_id(n, locus) == aid), None)
+            if seq is None:
+                continue
+            ok += crc(seq) == h
+            bad += crc(seq) != h
+            if ok + bad >= 50:
+                break
+        if ok + bad:
+            print("  hash check %s: %d of %d EXC alleles give the profile's hash%s" % (
+                lab, ok, ok + bad, "" if bad == 0 else " -- the hashes are made differently; 'present in' below is unreliable"))
+    print("\nHashes against the schemas:")
+    check_convention(a, sa, "A", 0)
+    check_convention(b, sb, "B", 1)
+
+    out = []
+    why = collections.Counter()
+    for r in rows:
+        la, lb, ca, cb, ha, hb, v = r
+        if v not in ("only A called", "only B called", "different allele"):
+            continue
+        rec = {"locus_a": la, "locus_b": lb, "class_a": ca, "class_b": cb, "verdict": v}
+        # the allele one side called: in the other side's schema?
+        if ha and sb:
+            al = sb.alleles(lb)
+            rec["a_allele_in_schema_b"] = "yes" if al and ha in {crc(q) for _, q in al} else "no"
+        if hb and sa:
+            al = sa.alleles(la)
+            rec["b_allele_in_schema_a"] = "yes" if al and hb in {crc(q) for _, q in al} else "no"
+        if v == "only B called":
+            k = "B's allele %s in schema A" % ("IS" if rec.get("b_allele_in_schema_a") == "yes" else "is NOT")
+        elif v == "only A called":
+            k = "A's allele %s in schema B" % ("IS" if rec.get("a_allele_in_schema_b") == "yes" else "is NOT")
+        else:
+            k = "different alleles"
+        rec["reading"] = k
+        why["%s; %s (%s -> %s)" % (v, k, ca, cb)] += 1
+        out.append(rec)
+    print("\nWhy they differ:")
+    for k, n in why.most_common():
+        print("  %5d  %s" % (n, k))
+    print("""
+How to read this:
+  - 'only B called; B's allele IS in schema A': schema A knows the allele, but
+    A did not find it -- not the allele content, look at the assembly (is the
+    locus there? split over two contigs? PLOT/LOTSC), the CDS prediction
+    (training file, ASM/ALM) or the settings (--st, BSR).
+  - 'only B called; B's allele is NOT in schema A': schema B holds an allele
+    schema A lacks (for instance alleles added locally by earlier runs
+    without --no-inferred). With --no-inferred, A then needs a BSR >= 0.6
+    to a representative to call INF; LNF means no close representative.
+  - The same in the other direction for 'only A called'.""")
+    if args.tsv:
+        keys = ["locus_a", "locus_b", "class_a", "class_b", "verdict", "a_allele_in_schema_b",
+                "b_allele_in_schema_a", "reading"]
+        with open(args.tsv, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=keys, delimiter="\t", lineterminator="\n", extrasaction="ignore")
+            w.writeheader()
+            w.writerows(out)
+        print("\nPer locus table: %s" % args.tsv)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="eurlc-cgmlst-compare", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version="eurlc-cgmlst-compare " + VERSION)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(p):
+        p.add_argument("a", help="chewBBACA output folder or results_alleles.tsv (A)")
+        p.add_argument("b", help="chewBBACA output folder or results_alleles.tsv (B)")
+        p.add_argument("--sample-a", help="sample name in A, when A holds several")
+        p.add_argument("--sample-b", help="sample name in B, when B holds several")
+        p.add_argument("--map", help="two columns: locus name in A, the same locus in B")
+        p.add_argument("--tsv", help="write the per-locus table here")
+
+    p = sub.add_parser("profiles", help="compare two AlleleCall results locus by locus")
+    common(p)
+    p.add_argument("--list-loci", help="write the loci that differ to this file")
+    p.set_defaults(func=cmd_profiles)
+
+    p = sub.add_parser("schemas", help="compare two schemas")
+    p.add_argument("schema_a")
+    p.add_argument("schema_b")
+    p.add_argument("--loci", help="only these loci (one per line, e.g. from profiles --list-loci)")
+    p.add_argument("--map", help="two columns: locus name in A, the same locus in B")
+    p.add_argument("--tsv", help="write the per-locus table here")
+    p.add_argument("--read-config", action="store_true",
+                   help="also print .schema_config (a Python pickle: only for schemas you trust)")
+    p.set_defaults(func=cmd_schemas)
+
+    p = sub.add_parser("explain", help="for the loci that differ: is the called allele in the other schema?")
+    common(p)
+    p.add_argument("--schema-a", help="schema folder used for A")
+    p.add_argument("--schema-b", help="schema folder used for B")
+    p.set_defaults(func=cmd_explain)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

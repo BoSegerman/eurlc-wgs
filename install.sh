@@ -248,6 +248,11 @@ if [[ -f "${SRC_DIR}/scripts/eurlc-efsa-export" ]]; then
     chmod +x "${TARGET_BIN}/eurlc-efsa-export"
     echo ">>> Installed: eurlc-efsa-export"
 fi
+if [[ -f "${SRC_DIR}/scripts/eurlc-cgmlst-compare" ]]; then
+    cp -p "${SRC_DIR}/scripts/eurlc-cgmlst-compare" "${TARGET_BIN}/eurlc-cgmlst-compare"
+    chmod +x "${TARGET_BIN}/eurlc-cgmlst-compare"
+    echo ">>> Installed: eurlc-cgmlst-compare"
+fi
 
 if [[ -f "${SRC_DIR}/scripts/eurlc-wgs-inspect" ]]; then
     cp -p "${SRC_DIR}/scripts/eurlc-wgs-inspect" "${TARGET_BIN}/eurlc-wgs-inspect"

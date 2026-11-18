@@ -313,6 +313,35 @@ if command -v python3 > /dev/null && [[ -f "$INSPECT" ]]; then
           bash -c "python3 '$INSPECT' inventory '$OUT' --md5 --manifest '$T/m2.tsv' > /dev/null && cmp -s <(cut -f1,2,9 '$T/m.tsv') <(cut -f1,2,9 '$T/m2.tsv')"
 fi
 
+# --- steps that fail on data that already failed: notes, not errors ------
+echo "Expected failures"
+KF=$(perl "$(dirname "$0")/unit/known_data_fail.pl" "$SCRIPT" 2>&1)
+check "data that already failed is recognised (low Q30 coverage, swapped files, abandoned)" \
+      bash -c "grep -qP '^low\tQC FAIL on the data: Trimmed read Q30' <<<'$KF' && grep -qP '^swap\tQC FAIL' <<<'$KF' && grep -qP '^ab\tsample abandoned' <<<'$KF'"
+check "  ... and good data or data without values is not" \
+      bash -c "grep -qP '^ok\t$' <<<'$KF' && grep -qP '^none\t$' <<<'$KF'"
+
+# --- serovar comparison and MLST loci ------------------------------------
+echo "Typing QC"
+SC=$(perl "$(dirname "$0")/unit/serotype_compare.pl" "$SCRIPT" 2>&1)
+check "SeqSero2 'A or B' agrees with SISTR A; formula-only calls are compared on antigens" \
+      bash -c "[[ \$(grep -c 'disagree=0' <<<'$SC') -eq 7 ]] && grep -q '^Infantis .*disagree=1' <<<'$SC' && grep -q '^Typhimurium .*disagree=1' <<<'$SC'"
+check "  ... '-:-:-' from both tools is a missing serovar, not a disagreement" \
+      bash -c "grep -q '^-:-:- .*disagree=0 missing=1' <<<'$SC'"
+check "  ... MLST: the list allele_names is not taken for a locus" \
+      bash -c "! grep -q 'ARRAY' <<<'$SC' && grep -q '^Infantis .*mlst=1 dnaN(2?)' <<<'$SC'"
+check "  ... SISTR not used (its QC): no disagreement; fastMLST's two alleles count" \
+      bash -c "grep -q '^NotUsed|Berta .*disagree=0 .*mlst=2 dnaN(2?) \[mlst\], aroC(5|7) \[fastMLST\]' <<<'$SC'"
+
+# --- eurlc-cgmlst-compare -------------------------------------------------
+echo "cgMLST comparison"
+CGC="$(cd "$(dirname "$0")/.." && pwd)/scripts/eurlc-cgmlst-compare"
+python3 "$(dirname "$0")/data/cgmlst/make.py" "$T/cg"
+python3 -I "$CGC" explain "$T/cg/pA" "$T/cg/pB" --schema-a "$T/cg/sA" --schema-b "$T/cg/sB" > "$T/cg/explain.out" 2>&1
+check "explain: the hashes match the schemas' sequences" bash -c "grep -q 'hash check A: 2 of 2' '$T/cg/explain.out' && grep -q 'hash check B: 3 of 3' '$T/cg/explain.out'"
+check "  ... an allele only schema B holds is named as the reason" grep -q "only B called; B's allele is NOT in schema A (LNF -> EXC)" "$T/cg/explain.out"
+check "schemas: the extra allele is found" bash -c "python3 -I '$CGC' schemas '$T/cg/sA' '$T/cg/sB' | grep -q 'B has alleles A lacks *1'"
+
 # --- result ----------------------------------------------------------------
 echo
 echo "$PASS passed, $FAIL failed"

@@ -134,6 +134,7 @@ our %S_RELOCATED = ();                   # recorded raw file path => where it wa
 our %S_RAW_MISSING = ();                 # sample base => [recorded raw paths not found now]
 our %S_VALIDATION = ();                  # result of the validation against a dataset (run_dataset_validation)
 our %S_EFSA_EXPORT = ();                 # result of the EFSA export (run_efsa_export)
+our $S_EXPECTED_FAIL_REASON;              # set (local) while a step runs on a sample whose data already failed: a failing command is a NOTICE, not an ERROR
 our %S_VERIFICATION = ();                # result of the comparison with a reference run (run_reference_verification)
 our $S_FINGERPRINT_FORMAT_VERSION = 1;   # report/tables/eurlc_results_fingerprint.json.gz (write_results_fingerprint)
 # Built-in cgMLST QC thresholds per schema (cgmlst_threshold_value). NIPH +
@@ -142,6 +143,12 @@ our $S_FINGERPRINT_FORMAT_VERSION = 1;   # report/tables/eurlc_results_fingerpri
 our %CGMLST_SCHEMA_QC_DEFAULTS = (
     "CAMPISO-PubMLST-8"       => { warning_typing_cgmlst_paralogous => ">5", critical_typing_cgmlst_paralogous => ">10" },
     "chewie_ns_campylobacter" => { warning_typing_cgmlst_paralogous => ">5", critical_typing_cgmlst_paralogous => ">10" },
+    # Salmonella, 18 Nov 2026 (SVA Salmonella validation Dataset_1-4): clean
+    # samples down to 94.2-94.9 % (Choleraesuis ST145 94.8, where SVA's
+    # INNUENDO schema gives 97.7 -- planned section 44); paralogous clean up to 15
+    # (one 64), WARNING >20 as the SVA Salmonella pipeline.
+    "chewie_ns_salmonella"    => { warning_typing_cgmlst_call_rate => "<94", critical_typing_cgmlst_call_rate => "<90",
+                                   fail_typing_cgmlst_call_rate => "<80", warning_typing_cgmlst_paralogous => ">20" },
 );
 our %S_CLEANUP_REMOVED = ();
 our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
@@ -1818,8 +1825,11 @@ $rundata{config}{defaults} = {
             serovar_field => "serovar",
             # SISTR qc_status values for which its serotype is used; for any
             # other status select_main_serotype falls back to SeqSero2.
-            # "PASS,WARNING" (default) or "PASS" (SVA Salmonella pipeline).
-            use_if_qc => "PASS,WARNING",
+            # "PASS" (default, as the validated SVA Salmonella pipeline: a
+            # SISTR QC WARNING such as "only matched 76 cgMLST330 loci" for
+            # S. Gallinarum gives a wrong serovar, SeqSero2 is right) or
+            # "PASS,WARNING".
+            use_if_qc => "PASS",
             env       => "eurlc-wgs-sistr",
             yml       => "optional/eurlc-wgs-sistr.yml",
             package_name  => "sistr_cmd",
@@ -1982,6 +1992,28 @@ $rundata{config}{defaults} = {
         # (D3 007/017) gives 2.1 %. FAIL >5 comes from default.
         "Campylobacter" => {
             warning_contamination_genus_level => ">1",
+            # Remapping of the reads onto the sample's own assembly (Nov 2026,
+            # 249 clean C. jejuni/C. coli against the known problem samples
+            # of D1-D3 and PT28-PT43). All WARNING: a sign that the data
+            # deviates, the other measures decide whether it is usable.
+            # Breadth at 10x: clean at least 91.2; bad data / GC bias 78-84.
+            warning_remap_breadth_10x_pct       => "<90",
+            # Depth spread (IQR/median): clean at most 1.9; GC bias 2.3-3.5.
+            # Detects GC bias better than qscore_raw_gc_delta, which overlaps.
+            warning_remap_depth_iqr_over_median => ">2",
+            # Mismatches against the own assembly: clean at most 0.62.
+            warning_remap_error_rate_pct        => ">0.7",
+            # Reads that map: clean at least 93.5; contamination with a close
+            # species that Kraken2 misses 79-91.
+            warning_remap_reads_mapped_pct      => "<92",
+            # Pairs whose mates land on different contigs: clean at most 6.6;
+            # R1/R2 from two different samples ~100 (backs up the name check).
+            warning_remap_pairs_diff_contig_pct  => ">10",
+            critical_remap_pairs_diff_contig_pct => ">50",
+            # Bases in contigs with low depth: clean at most 1.65.
+            warning_remap_low_depth_contig_pct  => ">2",
+            # Mixed windows: clean at most 69; contaminated 189-272.
+            warning_contamination_mixed_windows => ">100",
         },
         "Campylobacter coli" => {
             genomesize => 1750000,
@@ -2030,28 +2062,33 @@ $rundata{config}{defaults} = {
             fatal_mindepth   => 30,
             fatal_q30_mindepth   => 30,
             gc         => 52,   # was 30 (copied from Campylobacter); S. enterica ~52.1 %
-            # Starting points for testing (November 2026). The EURL-Salmonella
-            # recommendations (N50 > 30 000, <= 300 contigs, 4.4-5.8 Mb,
-            # cgMLST call rate >= 95 %) are the CRITICAL limits: a sample
-            # outside them does not meet the recommendation. WARNING is
-            # tighter (a typical good assembly), FAIL looser (results
-            # probably unusable).
+            # EURL-Salmonella recommendations: N50 > 30 000, <= 300 contigs,
+            # 4.4-5.8 Mb, cgMLST call rate >= 95 %. Size: CRITICAL at the
+            # EURL limits; N50/contigs: WARNING (see below).
             # Assembly size from the SVA survey of GenBank assemblies:
             # WARNING = >99 % of GenBank, CRITICAL = EURL, FAIL = NCBI limits.
             warning_assembly_size            => "<4470000 >5370000",
             critical_assembly_size           => "<4400000 >5800000",
             fail_assembly_size               => "<4100000 >6000000",
-            warning_assembly_n50             => "<50000",
-            critical_assembly_n50            => "<30000",
+            # N50 and contigs (18 Nov 2026, SVA Salmonella validation): the
+            # EURL limits (N50 30 000, 300 contigs) are WARNING, not
+            # CRITICAL -- clean samples at 300-346 contigs / N50 27-29 k had
+            # cgMLST 96-98 %; the call rate, which measures what the typing
+            # needs, decides CRITICAL. Clean p95 172 contigs (reads 75-301 bp).
+            warning_assembly_n50             => "<30000",
             fail_assembly_n50                => "<15000",
-            warning_assembly_contigs_500     => ">150",
-            critical_assembly_contigs_500    => ">300",
+            warning_assembly_contigs_500     => ">200",
             fail_assembly_contigs_500        => ">500",
             warning_assembly_gc              => "<51.5 >53",
             fail_assembly_gc                 => "<50 >54.5",
-            warning_typing_cgmlst_call_rate  => "<98",
-            critical_typing_cgmlst_call_rate => "<95",
-            fail_typing_cgmlst_call_rate     => "<90",
+            # cgMLST call rate and paralogous: per schema
+            # (%CGMLST_SCHEMA_QC_DEFAULTS, chewie_ns_salmonella); other
+            # schemas use default (<95 / <90 / <80).
+            # Mixture of two strains of the species: clean up to 436 (p95
+            # 77); two-serovar mixtures 1 853-4 267. A mixture changes the
+            # cgMLST profile, so CRITICAL.
+            warning_contamination_mixed_windows  => ">500",
+            critical_contamination_mixed_windows => ">1000",
         },
         "Listeria monocytogenes" => {
             genomesize => 3000000,
@@ -2076,9 +2113,9 @@ $rundata{config}{defaults} = {
             # read length ("efsa" = 0.85 / 0.80 / 0.75 / 0.70 for reads up to
             # 75 / 150 / 250 / above 250 bp; EFSA B8, EURL-AR in the Inter-EURL
             # Deliverable 10): CRITICAL below it, FAIL below 0.70 (EFSA stops
-            # an upload). Raw Q30 only warns, with the same limits: a sign
-            # that something in the sequencing was not optimal.
-            warning_qscore_raw_q30_rate      => "efsa",
+            # an upload). Raw Q30 has no threshold (18 Nov 2026): it warned
+            # on 15 of 205 clean Salmonella samples whose trimmed Q30 was
+            # fine, and EFSA judges reads after fastp's filtering too.
             critical_qscore_trimmed_q30_rate => "efsa",
             fail_qscore_trimmed_q30_rate     => "<0.70",
             fail_coverage_trimmed_q30_coverage => "<30",          
@@ -2115,15 +2152,17 @@ $rundata{config}{defaults} = {
             critical_qscore_trimmed_adapters            => ">2",
             # N bases in the raw reads (%): clean isolates p95 0.13-0.17,
             # a few runs 10-13 % (failed cycles). A sign that the sequencing
-            # was not optimal, not a reason to reject (Nov 2026).
-            warning_qscore_raw_n_rate => ">1",
+            # was not optimal, not a reason to reject (Nov 2026). >2: clean
+            # PT28 samples at 1.0-1.3 % are normal enough.
+            warning_qscore_raw_n_rate => ">2",
             # R1/R2 read names that differ, pair by pair (% of the pairs
             # scanned by the prescan): a few can occur in usable data
-            # (WARNING); more than 1 % is a strong sign of files that do
-            # not belong together (CRITICAL); more than half: two samples'
-            # files mixed up, the analysis is meaningless (FAIL).
-            warning_qscore_raw_pair_name_mismatch_pct  => ">0",
-            critical_qscore_raw_pair_name_mismatch_pct => ">1",
+            # (0.14 % in a clean PT28 sample); above 0.5 % WARNING; more
+            # than 5 % is a strong sign of files that are partly mixed
+            # (CRITICAL); more than half: two samples' files mixed up, the
+            # analysis is meaningless (FAIL).
+            warning_qscore_raw_pair_name_mismatch_pct  => ">0.5",
+            critical_qscore_raw_pair_name_mismatch_pct => ">5",
             fail_qscore_raw_pair_name_mismatch_pct     => ">50",
         },
     },
@@ -4878,8 +4917,10 @@ sub postprocess_sample_prescan {
                     . ( $pc->{mismatched} * 2 > $pc->{compared}
                         ? " -- the R1 and R2 files probably do not belong together (renamed or mixed up?)" : "" )
                     . ( $ex ne "" ? "; e.g. $ex" : "" );
+            # A few mismatched pairs occur in usable data: logged, but only a
+            # runtime issue above 0.5 % (the QC measure has its own thresholds).
             log_message( "WARNING: sample_prescan [$sample_name]: $msg", "yellow" );
-            set_runtime_issue( $samplenr, "warning", "sample_prescan: $msg" );
+            set_runtime_issue( $samplenr, "warning", "sample_prescan: $msg" ) if ( $pc->{mismatch_pct} // 0 ) > 0.5;
         }
         if ( $pc->{mates_swapped} ) {
             my $msg = "the reads in the R1 file are marked as read 2, and those in R2 as read 1: the R1 and R2 files look swapped";
@@ -5650,6 +5691,8 @@ sub write_run_status {
             abandoned     => $s->{fatal_error} ? join("; ", @{ $s->{fatal_error_message} // [] }) || "yes" : undef,
             failed_steps  => $s->{failed_steps}     // [],
             skipped_steps => $s->{skipped_upstream} // [],
+            expected_failed_steps => $s->{expected_failed_steps} // [],   # data already failed: notes
+            expected_skipped      => $s->{expected_skipped}      // [],
         };
     }
     my (%seen, @errors);
@@ -13653,7 +13696,9 @@ sub parse_fastmlst {
         for my $i (3 .. $#cols) {
             my $field = $cols[$i];
 
-            if ($field =~ /^([A-Za-z0-9_]+)\((\d+)\)$/) {
+            # aroC(10); also aroC(10|12) (two alleles), aroC(-) (missing),
+            # aroC(~10) / aroC(10?): kept as written so typing QC sees them
+            if ($field =~ /^([A-Za-z0-9_]+)\(([^)]*)\)$/) {
                 my ($gene, $id) = ($1, $2);
                 $fastmlst_data{"allele_$gene"} = $id;
                 push @allele_names, $gene;
@@ -14607,7 +14652,7 @@ sub postprocess_sistr {
 
     # Reasons not to use SISTR's answer -> select_main_serotype falls back
     # to SeqSero2. Recorded in results.sistr.not_used_reason.
-    my %use_if = map { uc($_) => 1 } grep { /\S/ } split /[,\s]+/, ( $R_cfg->{sistr}{use_if_qc} // "PASS,WARNING" );
+    my %use_if = map { uc($_) => 1 } grep { /\S/ } split /[,\s]+/, ( $R_cfg->{sistr}{use_if_qc} // "PASS" );
     my @not_used;
     push @not_used, "QC status $qc" unless $use_if{$qc};
     push @not_used, "no serovar called" if $candidate eq "n/a" || $candidate =~ /^[\s\-:]*$/;
@@ -24788,16 +24833,30 @@ sub typing_qc_values {
     my $sp  = $s->{main_results}{taxonomy}{species} // "";
     my %q   = map { $_ => "n/a" } qw(mlst_incomplete_alleles mlst_st_disagree serotype_missing serotype_disagree serotype_tool_flag);
     my $none = qr/^\s*(?:|n\/a|na|-|none|unknown|nontypable|non-typable|not typable)\s*$/i;
+    # an antigenic formula without a single antigen: "-:-:-", "I -:-:-", "- -:-:-"
+    my $no_antigen = qr/^\s*(?:[IVab-]+\s+)?[-\s]*:[-\s]*:[-\s]*$/i;
 
     # MLST: of the seven loci, those without an exact allele (missing "-",
     # partial "?", several copies "1,2"); a new allele "~12" is information
-    my ($main) = grep { ref $_ eq 'HASH' && grep { /^allele_/ } keys %$_ }
-                 ( ( $res->{mlst} // {} )->{main}, ( $res->{fastmlst} // {} )->{main} );
-    if ($main) {
-        my @al = map { $main->{$_} // "" } grep { /^allele_/ } keys %$main;
-        my @bad = map { ( my $g = $_ ) =~ s/^allele_//; "$g($main->{$_})" } grep { ( $main->{$_} // "" ) !~ /^~?\d+$/ } sort grep { /^allele_/ } keys %$main;
-        $q{mlst_incomplete_alleles}        = scalar @bad;
-        $q{mlst_incomplete_alleles_detail} = join( ", ", @bad );
+    # (allele_* keys with a scalar value: one per locus; allele_names is a list)
+    my $loci = sub { my ($h) = @_; grep { /^allele_/ && $_ ne 'allele_names' && !ref $h->{$_} } keys %$h };
+    # Both tools are checked: a locus counts when either has no exact
+    # allele there (fastMLST reports two alleles as "10|12", mlst as "10,12").
+    my @tools = grep { ref $_->[1] eq 'HASH' && $loci->( $_->[1] ) }
+                ( [ "mlst", ( $res->{mlst} // {} )->{main} ], [ "fastMLST", ( $res->{fastmlst} // {} )->{main} ] );
+    if (@tools) {
+        my (%bad, @detail);
+        for my $t (@tools) {
+            my ($tool, $h) = @$t;
+            for my $k ( sort $loci->($h) ) {
+                next if ( $h->{$k} // "" ) =~ /^~?\d+$/;
+                ( my $g = $k ) =~ s/^allele_//;
+                $bad{$g} = 1;
+                push @detail, "$g($h->{$k})" . ( @tools > 1 ? " [$tool]" : "" );
+            }
+        }
+        $q{mlst_incomplete_alleles}        = scalar keys %bad;
+        $q{mlst_incomplete_alleles_detail} = join( ", ", @detail );
     }
     my ($st1, $st2) = ( ( ( $res->{mlst} // {} )->{main} // {} )->{st}, ( ( $res->{fastmlst} // {} )->{main} // {} )->{st} );
     if ( defined $st1 && defined $st2 && $st1 =~ /^\d+$/ && $st2 =~ /^\d+$/ ) {
@@ -24813,7 +24872,7 @@ sub typing_qc_values {
         my $si = $ran->("sistr")    ? $res->{sistr}    : undef;
         my $ss = $ran->("seqsero2") ? $res->{seqsero2} : undef;
         if ( $si || $ss ) {
-            my @got = grep { defined $_ && $_ !~ $none } ( $si ? $si->{serotype} : undef ), ( $ss ? $ss->{serotype} : undef );
+            my @got = grep { defined $_ && $_ !~ $none && $_ !~ $no_antigen } ( $si ? $si->{serotype} : undef ), ( $ss ? $ss->{serotype} : undef );
             $q{serotype_missing} = @got ? 0 : 1;
             $q{serotype_missing_detail} = "neither SISTR nor SeqSero2 gave a serovar" unless @got;
         }
@@ -24821,12 +24880,40 @@ sub typing_qc_values {
             my $field = $si->{serotype_field} // "serovar";
             my $sv = $si->{$field} // $si->{serovar} // "";
             my $sq = $ss->{serotype} // "";
-            if ( $sv !~ $none && $sq !~ $none ) {
+            # SISTR's answer not used (its own QC, Typhimurium without h2):
+            # the reported serovar is SeqSero2's and serotype_tool_flag
+            # already says why, so the two are not compared.
+            if ( ( $si->{not_used_reason} // "" ) =~ /QC status/ ) { $q{serotype_disagree} = 0; }
+            elsif ( $sv !~ $none && $sq !~ $none && $sv !~ $no_antigen && $sq !~ $no_antigen ) {
+                # Named serovars: the same if any name is shared. SISTR lists
+                # alternatives with "|", SeqSero2 with " or " ("Gallinarum or
+                # Enteritidis" agrees with SISTR Enteritidis).
                 my $norm = sub { my $x = lc shift; $x =~ s/\s+//g; $x =~ s/^salmonella(enterica)?//; $x };
-                my %v = map { $norm->($_) => 1 } split /\|/, $sv;
-                my $same = grep { $v{ $norm->($_) } } split /\|/, $sq;
+                my $names = sub { grep { $_ ne "" && !/:/ } map { $norm->($_) } split /\||\s+or\s+/i, $_[0] };
+                my %v = map { $_ => 1 } $names->($sv);
+                my $same = grep { $v{$_} } $names->($sq);
                 # SISTR's Typhimurium without h2 = the monophasic variant SeqSero2 names
                 $same ||= ( ( $si->{not_used_reason} // "" ) =~ /monophasic/i && $sq =~ /^I 4,\[5\],12:i:-$/ );
+                # When one tool gives only an antigenic formula (no name), or
+                # the names differ only because one tool missed an antigen:
+                # compare the antigens. Compatible = no antigen that both
+                # tools called differs (O: SeqSero2's factors are among
+                # SISTR's). Two different names with compatible antigens
+                # still count as different, unless one side has no name.
+                my $only_formula = !$names->($sv) || !$names->($sq);
+                if ( !$same && $only_formula ) {
+                    my $set = sub { my $x = lc( $_[0] // "" ); $x =~ s/[\[\]\s]//g;
+                                    return () if $x eq "" || $x =~ /^(?:-|n\/a|na)$/; split /,/, $x };
+                    my %so = map { $_ => 1 } $set->( $si->{o_antigen} );
+                    my @qo = $set->( $ss->{o_antigen} );
+                    my $o_ok = !%so || !@qo || !grep { !$so{$_} } @qo;
+                    my $h_ok = 1;
+                    for my $h ( [ $si->{h1}, $ss->{h1_antigen} ], [ $si->{h2}, $ss->{h2_antigen} ] ) {
+                        my ($a1, $b1) = map { join ",", sort $set->($_) } @$h;
+                        $h_ok = 0 if $a1 ne "" && $b1 ne "" && $a1 ne $b1;
+                    }
+                    $same = $o_ok && $h_ok;
+                }
                 $q{serotype_disagree} = $same ? 0 : 1;
                 $q{serotype_disagree_detail} = "SISTR $sv, SeqSero2 $sq" unless $same;
             }
@@ -24942,11 +25029,18 @@ sub set_reportable {
         ( $value, $reason ) = ( "no", "QC $status" . ( $i ne "" ? ": $i" : "" ) );
     }
     elsif ( @{ $s->{failed_steps} // [] } ) {
-        ( $value, $reason ) = ( "no", "step(s) failed: " . join(", ", @{ $s->{failed_steps} }) );
+        ( $value, $reason ) = ( "no", "step(s) failed: " . join(", ", map { ref $_ eq 'HASH' ? "$_->{runstep} ($_->{reason})" : $_ } @{ $s->{failed_steps} }) );
     }
     elsif ( $status eq "WARNING" ) {
         my $i = qc_root_cause_message( $s, "WARNING" ) // $first->("warning");
         $note = "reportable with a QC WARNING" . ( $i ne "" ? ": $i" : "" );
+    }
+    # Steps that failed or were skipped because the data had already failed.
+    my @ef = ( ( map { $_->{runstep} } @{ $s->{expected_failed_steps} // [] } ),
+               ( map { "$_ (skipped)" } @{ $s->{expected_skipped} // [] } ) );
+    if (@ef) {
+        my $t = "later steps failed as a consequence of the failed data: " . join( ", ", @ef );
+        $note = defined $note && $note ne "" ? "$note; $t" : $t;
     }
     $s->{main_results}{reportable} = { value => $value, reason => $reason, note => $note };
 }
@@ -31211,6 +31305,21 @@ sub print_run_summary {
            $n_warn ? "yellow" : "green");
     $add->($_, "yellow") for @warn_lines;
 
+    # Steps that failed or were skipped on samples whose data had already
+    # failed: consequences, not errors (sample_known_data_fail).
+    {
+        my @ef = grep { @{ $_->{expected_failed_steps} // [] } || @{ $_->{expected_skipped} // [] } } @$samples;
+        if (@ef) {
+            $add->(sprintf( "  %-12s %s", "Notes:", scalar(@ef) . " sample(s) with data that had already failed (QC FAIL); later steps failed or were skipped as a consequence:" ));
+            for my $s ( @ef[ 0 .. ( $#ef < 7 ? $#ef : 7 ) ] ) {
+                my @st = ( ( map { $_->{runstep} } @{ $s->{expected_failed_steps} // [] } ),
+                           ( map { "$_ (skipped)" } @{ $s->{expected_skipped} // [] } ) );
+                $add->( "    " . ( $s->{name} // "?" ) . ": " . join( ", ", @st ) );
+            }
+            $add->( "    ... +" . ( @ef - 8 ) ) if @ef > 8;
+        }
+    }
+
     # Species-specific tools that did not run because they are disabled
     if (@S_TOOLS_NOT_RUN) {
         $add->(sprintf( "  %-12s %s", "Not run:", "species-specific tools that are disabled in the configuration:" ), "yellow");
@@ -32097,12 +32206,17 @@ sub execute_and_log {
         $exit_code = -1;
     } elsif ($status & 127) {
         my $m = sprintf("ERROR: Command died with signal %d: %s", $status & 127, $cmd);
-        log_message($m, "red");
+        $m = sprintf( "NOTICE: Command died with signal %d (expected, %s): %s", $status & 127, $S_EXPECTED_FAIL_REASON, $cmd )
+            if defined $S_EXPECTED_FAIL_REASON && !$timed_out && ( $status & 127 ) != 2;   # not a time limit or Ctrl+C
+        log_message($m, $m =~ /^NOTICE/ ? "yellow" : "red");
         $exit_code = 128 + ($status & 127);   # conventional shell-style signal exit code
     } else {
         $exit_code = $status >> 8;
         if ($exit_code == 0) {
             log_message("INFO: Done (time used: $runtime)");
+        } elsif ( defined $S_EXPECTED_FAIL_REASON ) {
+            # The sample's data had already failed (sample_known_data_fail).
+            log_message( sprintf( "NOTICE: Command exited with code %d (expected, %s): %s", $exit_code, $S_EXPECTED_FAIL_REASON, $cmd ), "yellow" );
         } else {
             my $m = sprintf("ERROR: Command exited with code %d: %s", $exit_code, $cmd);
             log_message($m, "red");
@@ -36384,6 +36498,8 @@ sub run_data_driven_runsteps {
         if ( defined $command && $command ne "" ) {
             my $t_start = time();
             local $S_CURRENT_STEP = { runstep => $name, sample => $i, start_time => $t_start };   # for kill_all_children
+            my $known_fail = sample_known_data_fail($i);
+            local $S_EXPECTED_FAIL_REASON = $known_fail ne "" ? $known_fail : undef;   # execute_and_log: NOTICE, not ERROR
             my $r = run_step(
                 runstep_key => $name,
                 name       => $def->{long_name},
@@ -36397,6 +36513,10 @@ sub run_data_driven_runsteps {
                 set_runtime_issue($i, "warning", "[$name] stopped: time limit (" . format_elapsed(get_runstep_timeout($name)) . ") reached", $name);
                 set_aside_timed_out_result($name, $i, $t_start);
                 push @{ $R_samples->[$i]{failed_steps} }, { runstep => $name, reason => "timeout" };
+            }
+            elsif ( ref $r eq 'HASH' && !$r->{success} && $known_fail ne "" ) {
+                set_aside_partial_result($name, $i, $t_start, "failed");
+                note_expected_step_failure( $i, $name, "exit code " . ( $r->{exit_code} // '?' ), $known_fail );
             }
             elsif ( ref $r eq 'HASH' && !$r->{success} ) {
                 set_runtime_issue($i, "warning", "[$name] failed (exit code " . ( $r->{exit_code} // '?' ) . ")", $name);
@@ -36697,6 +36817,45 @@ sub run_step {
 
 }
 
+# Has the sample already failed on its data, before this step? Then a later
+# step that fails, or is skipped because of it, is a consequence and not a
+# new problem: it is recorded as a note (expected_failed_steps,
+# expected_skipped) and does not count as a run error, a failed step (exit
+# code 5) or a runtime warning. Judged with the FAIL thresholds of the read
+# and coverage measures (qscore_*, coverage_*) that already have a value,
+# so it follows the configuration. Returns the reason, or "".
+sub sample_known_data_fail {
+    my ($i) = @_;
+    my $s = $R_samples->[$i] // return "";
+    if ( $s->{fatal_error} ) {
+        my $m = $s->{fatal_error_message};
+        $m = join( "; ", @$m ) if ref $m eq 'ARRAY';
+        return "sample abandoned" . ( defined $m && $m ne "" ? ": $m" : "" );
+    }
+    my $species = $s->{main_results}{taxonomy}{species} // '';
+    for my $measure ( sort keys %QC_MEASURE_DEF ) {
+        my $def = $QC_MEASURE_DEF{$measure};
+        next unless ( $def->{category} // '' ) =~ /^(qscore|coverage)$/;
+        my $observed = eval { get_main_result_value( $i, $def->{path} ) };
+        next if !defined $observed || ref $observed || $observed eq '' || lc $observed eq 'n/a';
+        my $txt = get_config_value_for_species( $species, "fail_$measure" );
+        next if !defined $txt || $txt eq '';
+        my $th = parse_threshold_string($txt);
+        next unless $th && @{ $th->{conditions} // [] };
+        return "QC FAIL on the data: " . ( $def->{label} // $measure ) . " is $observed (fail $txt)"
+            if threshold_matches( $observed, $th );
+    }
+    return "";
+}
+
+# A step that failed on a sample whose data had already failed: a note.
+sub note_expected_step_failure {
+    my ($i, $name, $why, $because) = @_;
+    my $sn = $R_samples->[$i]{name} // $i;
+    push @{ $R_samples->[$i]{expected_failed_steps} }, { runstep => $name, reason => $why, because => $because };
+    log_message("NOTICE: Sample $sn: [$name] failed ($why) -- expected, the data had already failed ($because); recorded as a note, not as a run error");
+}
+
 # A step that could not run because a requirement will never be met.
 # "An earlier step failed" goes to the run summary (skipped_upstream) and
 # the log; "nothing produces it for this sample" is normal and only logged.
@@ -36704,7 +36863,10 @@ sub note_skipped_step {
     my ($i, $name, $unmet, $names) = @_;
     my $why = ( grep { key_unreachable_reason($_, $i, $names) eq "failed" } @$unmet ) ? "failed" : "not_applicable";
     my $sn  = $R_samples->[$i]{name} // $i;
-    if ( $why eq "failed" ) {
+    if ( $why eq "failed" && ( my $because = sample_known_data_fail($i) ) ne "" ) {
+        push @{ $R_samples->[$i]{expected_skipped} }, $name;
+        log_message("INFO: Sample $sn: [$name] skipped -- an earlier step failed on data that had already failed ($because)");
+    } elsif ( $why eq "failed" ) {
         push @{ $R_samples->[$i]{skipped_upstream} }, $name;
         log_message("INFO: Sample $sn: [$name] skipped -- an earlier step failed (no " . join(", ", @$unmet) . ")");
     } else {
@@ -37779,11 +37941,19 @@ sub run_parallel_runsteps {
 
             # Exit status, reported like execute_and_log does in sequential mode.
             my $job_status = 'success';
+            my $known_fail = ( $job->{timed_out} || !$exit_status ) ? "" : sample_known_data_fail($i);
             if ( $job->{timed_out} ) {
                 $job_status = 'timeout';
                 set_runtime_issue($i, "warning", "[$name] stopped: time limit (" . format_elapsed($job->{timeout_s}) . ") reached", $name);
                 set_aside_timed_out_result($name, $i, $job->{start_time});
                 push @{ $R_samples->[$i]{failed_steps} }, { runstep => $name, reason => "timeout" };
+            }
+            elsif ( $known_fail ne "" ) {
+                # The data had already failed: a consequence, recorded as a note.
+                $job_status = 'failed';
+                my $why = ( $exit_status & 127 ) ? "signal " . ( $exit_status & 127 ) : "exit code " . ( $exit_status >> 8 );
+                set_aside_partial_result($name, $i, $job->{start_time}, "failed");
+                note_expected_step_failure( $i, $name, $why, $known_fail );
             }
             elsif ( $exit_status & 127 ) {
                 $job_status = 'failed';
@@ -37793,7 +37963,7 @@ sub run_parallel_runsteps {
                 $job_status = 'failed';
                 log_message("ERROR: [$name] for sample [" . ( $R_samples->[$i]{name} // '?' ) . "] exited with code " . ( $exit_status >> 8 ), "red");
             }
-            if ( $job_status eq 'failed' ) {
+            if ( $job_status eq 'failed' && $known_fail eq "" ) {
                 my $why = ( $exit_status & 127 ) ? "signal " . ( $exit_status & 127 ) : "exit code " . ( $exit_status >> 8 );
                 push @{ $R_samples->[$i]{failed_steps} }, { runstep => $name, reason => $why };
                 set_runtime_issue($i, "warning", "[$name] failed ($why)", $name);

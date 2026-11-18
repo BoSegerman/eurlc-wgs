@@ -965,7 +965,7 @@ def _sample_row(run, smp):
         "abandoned": smp.get("fatal_error_message") or "" if smp.get("fatal_error") else "",
         "assembly_method": _get(mr, "assembly", "method"),
         "st": _get(mr, "mlst", "st"),
-        "serotype": _get(mr, "typing", "serotype", "value"),
+        "serotype": _get(mr, "typing", "serotype", "display") or _get(mr, "typing", "serotype", "value"),
         "cgmlst_schema": _get(mr, "typing", "cgmlst_call_rate_schema"),
         "contamination_species": _get(mr, "contamination", "species"),
         "contamination_genus": _get(mr, "contamination", "genus"),

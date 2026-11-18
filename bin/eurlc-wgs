@@ -1236,7 +1236,7 @@ my %QC_MEASURE_DEF = (
     typing_serotype_tool_flag => {
         category => 'typing',
         path     => [qw(typing qc serotype_tool_flag)],
-        label    => "The serotyping tool's own QC is not PASS (SISTR; ECTyper, or ECTyper names another species)",
+        label    => "The reported serotyping tool's own QC is not PASS (SISTR when its serovar is used, else SeqSero2's note; ECTyper, or ECTyper names another species)",
         flag     => "The serotyping tool's own QC is not PASS",
     },
     typing_cgmlst_inferred_pct => {
@@ -23543,7 +23543,7 @@ sub build_overview_typing_cell {
         push @tooltip_lines, "Scheme: $mlst_scheme";
     }
 
-    my $serotype_raw        = $sample->{main_results}{typing}{serotype}{value}  // "n/a";
+    my $serotype_raw        = serotype_display_name( $sample->{main_results}{typing}{serotype}{value} ) // "n/a";
     my $serotype_method_raw = $sample->{main_results}{typing}{serotype}{method} // "n/a";
     my $has_serotype = defined $serotype_raw && !ref($serotype_raw) && $serotype_raw ne "" && $serotype_raw ne "n/a";
 
@@ -24306,7 +24306,7 @@ sub short_report_section_typing {
     $html .= short_report_row("Clonal complex CC", $sample->{main_results}{typing}{mlst}{clonal_complex} // "n/a");
     $html .= short_report_row("MLST method", $sample->{main_results}{typing}{mlst}{mlst_method} // "n/a");
 
-    $html .= short_report_row("Serotype", $sample->{main_results}{typing}{serotype}{value} // "n/a");
+    $html .= short_report_row("Serotype", serotype_display_name( $sample->{main_results}{typing}{serotype}{value} ) // "n/a");
     $html .= short_report_row("Serotype method", $sample->{main_results}{typing}{serotype}{method} // "n/a");
 
     my $R_cg = $sample->{main_results}{typing}{cgmlst_schemas};
@@ -24863,6 +24863,20 @@ sub evaluate_qc_measure {
 ## work, in main_results.typing.qc (typing_mlst_* / typing_serotype_* in
 ## %QC_MEASURE_DEF; default WARNING >0). "n/a" where a check does not apply
 ## (no MLST scheme, no serotyping for the species, the tool not run).
+## The reported serotype in the form a reader recognises. The value stays
+## as the tool gave it (main_results.typing.serotype.value: the EFSA export,
+## the fingerprint and the comparisons use it); .display is what the
+## reports show. Monophasic Typhimurium: SeqSero2 gives the antigenic
+## formula I 4,[5],12:i:- (O4, O5 optional, O12; H1 i; no second-phase H
+## antigen) -- shown as "Monophasic Typhimurium (I 4,[5],12:i:-)", as the
+## SVA Salmonella pipeline names it.
+sub serotype_display_name {
+    my ($value) = @_;
+    return $value if !defined $value || ref $value;
+    return "Monophasic Typhimurium ($value)" if $value =~ /^\s*(?:I\s+)?(?:1,)?4,\[?5\]?,12:i:-\s*$/;
+    return $value;
+}
+
 sub typing_qc_values {
     my ($samplenr) = @_;
     my $s   = $R_samples->[$samplenr];
@@ -24961,10 +24975,26 @@ sub typing_qc_values {
             }
             else { $q{serotype_disagree} = 0; }
         }
+        # The QC of the tool whose serovar is reported (18 Nov 2026): SISTR's
+        # QC flags only when its serovar is used; when SISTR's QC is not
+        # PASS, SeqSero2 is reported and its own note decides (accepted
+        # notes in [seqsero2] accepted_notes do not count). SISTR's messages
+        # stay as information (main_results.typing.qc.sistr_qc_info), e.g.
+        # "Perform d-tartrate test" for Paratyphi B / Java.
+        my $used = ( $R_samples->[$samplenr]{main_results}{typing}{serotype} // {} )->{method} // "";
         if ($si) {
             my $qs = uc( $si->{qc_status} // "PASS" );
-            $q{serotype_tool_flag} = $qs eq "PASS" ? 0 : 1;
-            $q{serotype_tool_flag_detail} = "SISTR QC $qs" . ( ( $si->{qc_messages} // "" ) ne "" ? " ($si->{qc_messages})" : "" ) if $qs ne "PASS";
+            my $msg = "SISTR QC $qs" . ( ( $si->{qc_messages} // "" ) ne "" ? " ($si->{qc_messages})" : "" );
+            $q{sistr_qc_info} = $msg if $qs ne "PASS";
+            if ( $used eq "sistr" || !$ss ) {
+                $q{serotype_tool_flag} = $qs eq "PASS" ? 0 : 1;
+                $q{serotype_tool_flag_detail} = $msg if $qs ne "PASS";
+            }
+        }
+        if ( $ss && ( $used eq "seqsero2" || !$si ) ) {
+            my $ns = uc( $ss->{note_status} // "PASS" );
+            $q{serotype_tool_flag} = $ns eq "PASS" ? 0 : 1;
+            $q{serotype_tool_flag_detail} = "SeqSero2 note: " . ( $ss->{note} // "" ) if $ns ne "PASS";
         }
     }
     elsif ( $sp =~ /^(Escherichia|Shigella)\b/i ) {
@@ -24987,6 +25017,9 @@ sub typing_qc_values {
         }
     }
     $s->{main_results}{typing}{qc} = { %q };     # fresh each time (details only where a check flags)
+    if ( ref $s->{main_results}{typing}{serotype} eq 'HASH' ) {
+        $s->{main_results}{typing}{serotype}{display} = serotype_display_name( $s->{main_results}{typing}{serotype}{value} );
+    }
 }
 
 sub evaluate_sample_qc {

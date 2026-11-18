@@ -1031,8 +1031,17 @@ my %QC_MEASURE_DEF = (
     },
     qscore_raw_n_rate => {
         category => 'qscore',
-        path     => [qw(qscore raw n_pct)],      # was n_rate, which is never filled
+        # Whole files, from fastp's per-cycle N curves before filtering
+        # (18 Nov 2026; before: the prescan's first 5 000 reads, which can
+        # be far off -- D1_029 R2: 25.9 % in the first reads, 0.23 % in
+        # the file). The prescan's value is kept as raw.n_pct_prescan.
+        path     => [qw(qscore raw n_pct)],
         label    => 'Raw read N bases (%)',
+    },
+    qscore_trimmed_n_rate => {
+        category => 'qscore',
+        path     => [qw(qscore trimmed n_pct)],  # fastq_stats_trimmed, all trimmed reads
+        label    => 'Trimmed read N bases (%)',
     },
     qscore_raw_q30_rate => {
         category => 'qscore',
@@ -4960,7 +4969,9 @@ sub postprocess_sample_prescan {
     $R_samples->[$samplenr]{main_results}{run_data}{looks_long_read}        = $prescan_ref->{total}{looks_long_read}        // "n/a";
     $R_samples->[$samplenr]{main_results}{run_data}{long_read_reason}       = $prescan_ref->{total}{long_read_reason}       // "n/a";
 
-    $R_samples->[$samplenr]{main_results}{qscore}{raw}{n_pct}              = $prescan_ref->{total}{n_pct}                  // "n/a";
+    # first max_scan_reads reads only; the QC measure uses fastp's whole-file value (raw.n_pct, set by fastp_rawdata)
+    $R_samples->[$samplenr]{main_results}{qscore}{raw}{n_pct_prescan}      = $prescan_ref->{total}{n_pct}                  // "n/a";
+    $R_samples->[$samplenr]{main_results}{qscore}{raw}{n_pct}            //= $prescan_ref->{total}{n_pct}                  // "n/a";
     $R_samples->[$samplenr]{main_results}{qscore}{raw}{av_q_score}          = $prescan_ref->{total}{av_q_score}             // "n/a";
     $R_samples->[$samplenr]{main_results}{qscore}{raw}{av_read_len}         = $prescan_ref->{total}{average}                // "n/a";
     $R_samples->[$samplenr]{main_results}{qscore}{raw}{P75_read_len}        = $prescan_ref->{total}{q3}                     // "n/a";
@@ -6797,6 +6808,16 @@ sub postprocess_fastp_rawdata {
    ## MAIN RESULTS
    $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{q30_rate} = $target->{summary}{after_filtering}{q30_rate};
    $R_samples->[$samplenr]{main_results}{qscore}{raw}{q30_rate} = $target->{summary}{before_filtering}{q30_rate};
+   # N share of the whole raw files (the prescan only reads the first reads)
+   {
+       my $nr = $target->{summary}{before_filtering}{N_rate};
+       if ( !defined $nr ) {   # results parsed before 18 Nov 2026: from the curves directly
+           my @c = grep { defined $_ && $_ ne '' } @{ $target->{read1_before_filtering}{content_curves}{N} // [] },
+                                                   @{ $target->{read2_before_filtering}{content_curves}{N} // [] };
+           if (@c) { my $t = 0; $t += $_ for @c; $nr = $t / @c; }
+       }
+       $R_samples->[$samplenr]{main_results}{qscore}{raw}{n_pct} = sprintf( "%.5f", 100 * $nr ) if defined $nr;
+   }
        
    $R_samples->[$samplenr]{main_results}{qscore}{trimmed}{R2_R1_read_len_balance} = safe_rel($target->{summary}{after_filtering}{read2_mean_length},$target->{summary}{after_filtering}{read1_mean_length}, "n/a");
    $R_samples->[$samplenr]{main_results}{qscore}{raw}{R2_R1_read_len_balance} = safe_rel($target->{summary}{before_filtering}{read2_mean_length},$target->{summary}{before_filtering}{read1_mean_length}, "n/a");
@@ -8040,6 +8061,13 @@ sub parse_fastp_results {
 
     my $meanN = $count > 0 ? $sum / $count : 0;
     $parsed->{summary}{after_filtering}{N_rate} = $meanN;
+
+    # The same before filtering: the N share of the whole raw files (mean of
+    # the per-cycle N fractions, R1 and R2 together).
+    my @before = grep { defined $_ && $_ ne '' }
+                 @{ $data->{read1_before_filtering}{content_curves}{N} // [] },
+                 @{ $data->{read2_before_filtering}{content_curves}{N} // [] };
+    $parsed->{summary}{before_filtering}{N_rate} = @before ? ( eval { my $t = 0; $t += $_ for @before; $t } ) / @before : undef;
 
     return $parsed;
 }
@@ -13696,15 +13724,24 @@ sub parse_fastmlst {
         for my $i (3 .. $#cols) {
             my $field = $cols[$i];
 
+            # clonal_complex(...) first: it has the same form as a locus
+            # (Listeria's scheme calls it CC, and has a Lineage field)
+            if ($field =~ /^Lineage\(([^)]*)\)$/) {
+                $fastmlst_data{lineage} = $1;
+            }
+            elsif ($field =~ /^(?:clonal_complex|CC)\(([^)]*)\)$/) {
+                my $cc = $1;
+                $cc =~ s/^\s+|\s+$//g;
+                $fastmlst_data{clonal_complex} = ( $cc eq "" || lc $cc eq "nan" ) ? "n/a" : $cc;
+            }
             # aroC(10); also aroC(10|12) (two alleles), aroC(-) (missing),
-            # aroC(~10) / aroC(10?): kept as written so typing QC sees them
-            if ($field =~ /^([A-Za-z0-9_]+)\(([^)]*)\)$/) {
+            # aroC(~10) / aroC(10?): kept as written so typing QC sees them.
+            # Only allele-like values: other fields have the same form
+            # (Listeria: CC(CC5), Lineage(I)).
+            elsif ($field =~ /^([A-Za-z0-9_]+)\(((?:~?\d+\??)(?:[|,]~?\d+\??)*|-)\)$/) {
                 my ($gene, $id) = ($1, $2);
                 $fastmlst_data{"allele_$gene"} = $id;
                 push @allele_names, $gene;
-            }
-            elsif ($field =~ /^clonal_complex\(([^)]+)\)$/) {
-                $fastmlst_data{clonal_complex} = $1;
             }
         }
 
@@ -24839,7 +24876,12 @@ sub typing_qc_values {
     # MLST: of the seven loci, those without an exact allele (missing "-",
     # partial "?", several copies "1,2"); a new allele "~12" is information
     # (allele_* keys with a scalar value: one per locus; allele_names is a list)
-    my $loci = sub { my ($h) = @_; grep { /^allele_/ && $_ ne 'allele_names' && !ref $h->{$_} } keys %$h };
+    # Only allele-like values (a number, ~12, 12?, 10|12, 1,2, -): the
+    # fastMLST parser of 18 Nov 2026 morning also stored clonal_complex,
+    # CC and Lineage as allele_* keys.
+    my $allele_like = qr/^(?:~?\d+\??)(?:[|,]~?\d+\??)*$|^-$/;
+    my $loci = sub { my ($h) = @_; grep { /^allele_/ && $_ ne 'allele_names' && !ref $h->{$_}
+                                          && ( $h->{$_} // "" ) =~ $allele_like } keys %$h };
     # Both tools are checked: a locus counts when either has no exact
     # allele there (fastMLST reports two alleles as "10|12", mlst as "10,12").
     my @tools = grep { ref $_->[1] eq 'HASH' && $loci->( $_->[1] ) }
@@ -27377,7 +27419,7 @@ while(<HANDLE_INFILE>){
   
 
     my $count = 0;
-   foreach my $taxname (sort { $results_hitscore{$b} <=> $results_hitscore{$a} } keys %results_hitscore) {
+   foreach my $taxname (sort { $results_hitscore{$b} <=> $results_hitscore{$a} || $a cmp $b } keys %results_hitscore) {
     $count++;
     if($count==1){   return $taxname; }
 
@@ -27443,7 +27485,7 @@ sub parse_kraken2_results {
     };
 
     # Fill genus results (sorted descending)
-    foreach my $taxname (sort { $genuslevel{$b} <=> $genuslevel{$a} } keys %genuslevel) {
+    foreach my $taxname (sort { $genuslevel{$b} <=> $genuslevel{$a} || $a cmp $b } keys %genuslevel) {
         push @{ $result->{genus} }, {
             name    => $taxname,
             percent => $genuslevel{$taxname},
@@ -27451,7 +27493,7 @@ sub parse_kraken2_results {
     }
 
     # Fill species results (sorted descending)
-    foreach my $taxname (sort { $specieslevel{$b} <=> $specieslevel{$a} } keys %specieslevel) {
+    foreach my $taxname (sort { $specieslevel{$b} <=> $specieslevel{$a} || $a cmp $b } keys %specieslevel) {
         push @{ $result->{species} }, {
             name    => $taxname,
             percent => $specieslevel{$taxname},
@@ -27521,7 +27563,7 @@ sub parse_bracken_results {
         entries => [],
     };
 
-    foreach my $taxname (sort { $level{$b} <=> $level{$a} } keys %level) {
+    foreach my $taxname (sort { $level{$b} <=> $level{$a} || $a cmp $b } keys %level) {
         push @{ $result->{entries} }, {
             name    => $taxname,
             percent => $level{$taxname},
@@ -27568,7 +27610,7 @@ while(<HANDLE_INFILE>){
 
     my $count = 0;
   
-  foreach my $taxname (sort { $specieslevel{$b} <=> $specieslevel{$a} } keys %specieslevel) {
+  foreach my $taxname (sort { $specieslevel{$b} <=> $specieslevel{$a} || $a cmp $b } keys %specieslevel) {
     $count++;
     if($count==1){   return  $taxname; }
   }

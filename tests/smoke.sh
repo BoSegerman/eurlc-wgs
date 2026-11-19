@@ -387,6 +387,8 @@ check "report: CRITICAL is shown as needing assessment, FAIL as not reportable" 
 run "$T/vs1.out" datadir="$D" outdir="$T/out_vs" --assume-yes disable=chewbbaca validated_species="Campylobacter jejuni, Campylobacter coli"
 check "main report: the sample table has a Reportable column" \
       bash -c "grep -q '>Reportable</th>' '$T/out_vs/report/main_report.html' && grep -q '<td class=\"qc-[a-z]*\" title=\"[^\"]*\">\(Yes\|No\)' '$T/out_vs/report/main_report.html'"
+check "run started from another folder: the tools' output goes to the output folder's log, not <current folder>/eurlc-wgs/log" \
+      bash -c "grep -q '$T/out_vs/log/stdout.txt' '$T/out_vs/log/bash_commands.log' && ! grep -q '$T/work/eurlc-wgs/log/std' '$T/out_vs/log/bash_commands.log'"
 check "validated_species= is a setting, recorded with the run" \
       bash -c "! grep -q 'Unknown argument' '$T/vs1.out' && python3 -c \"import json,sys; d=json.load(open('$T/out_vs/data/rundata.json')); sys.exit(0 if d['config']['effective']['general']['validated_species']=='Campylobacter jejuni, Campylobacter coli' else 1)\""
 

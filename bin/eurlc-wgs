@@ -2682,6 +2682,13 @@ our @LATER_ARG_NAMES = qw(
     $capture_stderr_hide    = " 2>>\"$S_logdir/stderr.txt\"";
     $capture_output_verbose = " > >(tee -a \"$S_logdir/stdout.txt\") 2> >(tee -a \"$S_logdir/stderr.txt\" >&2)";
     $capture_stderr_verbose = " 2> >(tee -a \"$S_logdir/stderr.txt\" >&2)";
+    # The strings in use were copied from the ones above when the output
+    # folder was still <current folder>/eurlc-wgs. Without this, the tools'
+    # stdout/stderr of a run started from another folder than the data folder
+    # (datadir=, outdir=) went to <current folder>/eurlc-wgs/log -- and every
+    # tool failed when that folder did not exist. (--verbose is applied later.)
+    $capture_output = $capture_output_hide;
+    $capture_stderr = $capture_stderr_hide;
 }
 
 ###################################################################################################

@@ -30,9 +30,14 @@ AN EXISTING OUTPUT FOLDER
     --resume                     Continue: reuse finished results, run what is
                                  missing or failed
     overwrite=yes | no           Overwrite without asking / stop
+                                 (--overwrite = overwrite=yes)
     rerun=<step>[,<step>...]     In an existing folder (implies --resume): run
                                  these steps again, and every step that depends
                                  on them
+    summarize                    Re-evaluate QC with the current thresholds,
+                                 validate and verify again, and rebuild the
+                                 report and data/rundata.json (no tools are
+                                 run)
 
 WHAT IS ANALYSED
     enable=<tool|species>[,...]  Switch tools on, e.g. enable=sistr or
@@ -47,13 +52,12 @@ WHAT IS ANALYSED
     --qc-screen                  Quick check of the raw reads only (Q30
                                  coverage, species, other genus, read length);
                                  traffic-light report in eurlc-wgs_qcscreen/
-    summarize                    Re-evaluate QC and rebuild the report of an
-                                 existing output folder (no tools are run)
 
 RUNNING
     threads=<n>                  Threads per tool
     parallel_mode=on             Run several samples/steps at once within
-                                 max_threads / max_ram_gb
+                                 max_threads=<n> / max_ram_gb=<n>
+                                 (default: what the computer has)
     --assume-yes                 Answer installation questions with yes
                                  (never: overwriting results or a config file)
     --verbose                    More detail in the log
@@ -61,6 +65,17 @@ RUNNING
 
     While running: write pause, resume or terminate to
     <output>/control/cmd to pause, continue or stop the run.
+
+CHECKING THE RESULTS
+    validate=auto|off|<folder>   Compare with an EURL validation dataset
+                                 (auto: a *_validation_profile.yml in the data
+                                 folder or the folder above); report/validation/
+    verify_reference=auto|off|<file or folder>
+                                 Compare with the results fingerprint of an
+                                 earlier run (auto: the newest in reference/
+                                 next to the data); report/verification/
+    verify_expect=<area>[,...]   Differences that are expected, e.g.
+                                 verify_expect=amr,qc.coverage
 
 INSTALLATION AND MAINTENANCE
     --setup [--optional]         Install tool environments and databases
@@ -75,6 +90,11 @@ INSTALLATION AND MAINTENANCE
     --generate-seal[=<name>]     Seal the configuration (settings, frozen
                                  databases, tool environments, pipeline
                                  version)
+    --remap-check [--convert] <output folder>
+                                 Check remap results from an earlier version
+                                 against the current method (--convert: take
+                                 over the identical ones, so the step is not
+                                 run again)
 
 cgMLST SCHEMAS
     --list-schemas               Installed and available schemas
@@ -96,16 +116,30 @@ EXIT CODES
 
 FILES IN THE OUTPUT FOLDER
     report/main_report.html      The report
+    report/tables/               Result tables, and the results fingerprint
+                                 (eurlc_results_fingerprint.json.gz)
+    data/rundata.json            All results of the run, for scripts
     log/log.txt                  Full log (search "EURLC-WGS RUN")
     log/run_summary.txt          Summary of the last run
     log/run_status.json          Status for scripts and GUIs
     log/events.jsonl             One line per step started/finished
+
+COMPANION TOOLS (installed with the pipeline; --help on each)
+    eurlc-wgs-inspect            Look into output folders: inventory, extract a
+                                 small package, summarize many runs, compare
+                                 runs (repeatability, after an update)
+    eurlc-validate               Compare any pipeline's results with an EURL
+                                 validation dataset
+    eurlc-cgmlst-compare         Why two cgMLST results of the same isolate
+                                 differ (profiles, schemas)
 
 EXAMPLES
     eurlc-wgs datadir=/data/run192 threads=8
     eurlc-wgs datadir=/data/run192 outdir=/analysis/run192 --resume
     eurlc-wgs datadir=/data/run192 --qc-screen
     eurlc-wgs outdir=/analysis/run192 rerun=sistr enable=sistr
+    eurlc-wgs outdir=/analysis/run192 summarize
+    eurlc-wgs-inspect compare run1/eurlc-wgs run2/eurlc-wgs --out repeatability/
 
 Full documentation: docs/eurlc-wgs-user-manual.md in the source
 repository (https://github.com/BoSegerman/eurlc-wgs).

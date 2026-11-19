@@ -132,6 +132,17 @@ check "misspelt threshold: warning" grep -q "warning_assembly_sise.*is not a QC 
 check "threshold without operator: warning" grep -q "cannot be read as a threshold" "$T/c2.out"
 check "written file reads back without parse warnings" bash -c "! grep -q 'could not parse' '$T/c2.out'"
 cp "$T/cfg.bak" "$CFG"
+# A [chewbbaca_schema_<name>] section must reach a schema with capitals in its name
+# (the section title is lower-cased when the file is read).
+SD="$HOME/eurlc-wgs_db/chewbbaca/schemas/Smoke-Schema-1"; mkdir -p "$SD"
+printf '[schema]\nname = Smoke-Schema-1\nspecies = Campylobacter jejuni\n' > "$SD/schema.ini"
+printf '\n[chewbbaca_schema_Smoke-Schema-1]\narguments = --st 0.05\n\n[chewbbaca_schema_No-Such-Schema]\narguments = --st 0.05\n' >> "$CFG"
+run "$T/c2b.out" datadir="$D" outdir="$T/out_c2b" --assume-yes disable=chewbbaca
+check "schema section reaches a schema with capitals in its name" \
+      python3 -c "import json,sys; s=json.load(open('$T/out_c2b/data/rundata.json'))['config']['effective']['chewbbaca_schemas']; sys.exit(not (s.get('Smoke-Schema-1',{}).get('arguments')=='--st 0.05' and 'smoke-schema-1' not in s))"
+check "  ... and a section for a schema that is not installed: warning" \
+      grep -q "chewbbaca_schema_no-such-schema\] in the config file does not match an installed" "$T/c2b.out"
+cp "$T/cfg.bak" "$CFG"; rm -rf "$SD"
 
 run "$T/c3.out" datadir="$D" outdir="$T/out_c3" --assume-yes disable=chewbbaca enable=shovill_skesa
 check "enable=shovill_skesa also switches on [shovill]" grep -q "Overriding from launch-arguments: shovill.enabled=1" "$T/c3.out"
@@ -332,6 +343,12 @@ check "  ... MLST: the list allele_names is not taken for a locus" \
       bash -c "! grep -q 'ARRAY' <<<'$SC' && grep -q '^Infantis .*mlst=1 dnaN(2?)' <<<'$SC'"
 check "  ... SISTR not used (its QC): no disagreement; fastMLST's two alleles count" \
       bash -c "grep -q '^NotUsed|Berta .*disagree=0 .*mlst=2 dnaN(2?) \[mlst\], aroC(5|7) \[fastMLST\]' <<<'$SC'"
+
+FM=$(perl "$(dirname "$0")/unit/fastmlst_parse.pl" "$SCRIPT" 2>&1)
+check "  ... SISTR QC WARNING but SeqSero2 reported and fine: no tool flag" \
+      bash -c "grep -q '^NotUsed|Berta .*toolflag=0' <<<'$SC' && [[ \$(grep -c 'toolflag=0' <<<'$SC') -eq 10 ]]"
+check "  ... fastMLST: clonal_complex, CC, Lineage are not loci; two alleles and '-' are kept" \
+      bash -c "[[ \$(grep -c 'loci=7' <<<'$FM') -eq 4 ]] && grep -q 'cc=ST-11 complex' <<<'$FM' && grep -q 'allele_aroC=5|7,allele_dnaN=-' <<<'$FM'"
 
 # --- eurlc-cgmlst-compare -------------------------------------------------
 echo "cgMLST comparison"

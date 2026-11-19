@@ -1343,15 +1343,16 @@ $rundata{config}{defaults} = {
 
         # export_efsa: files for programmatic submission to the EFSA WGS
         # System (scripts/eurlc-efsa-export; docs/eurlc-efsa-export.md):
-        # results/export/efsa/. auto = when the run has reportable samples of
-        # Salmonella, E. coli, Listeria or Campylobacter; off = never.
+        # results/export/efsa/. Experimental, not yet agreed with EFSA, so off
+        # by default (18 Nov 2026). auto = when the run has reportable samples
+        # of Salmonella, E. coli, Listeria or Campylobacter; off = never.
         # Nothing is sent. efsa_metadata: TSV with instrument codes and
         # sampling data (default: efsa_metadata.tsv in the data folder, when
         # there). efsa_dir: EFSA's locus lists and locus-name maps (default
         # <database>/efsa_export). efsa_locus_suffix: added to the locus names
         # in allelicProfile.tsv (open question: ".fasta" or nothing).
         # efsa_pipeline_tag: AnalyticalPipelineInfoTag (default EURLC-WGS <version>).
-        export_efsa       => "auto",
+        export_efsa       => "off",
         efsa_metadata     => "",
         efsa_dir          => "",
         efsa_locus_suffix => "",
@@ -2933,6 +2934,18 @@ log_message("NOTICE: Configuration source: $rundata{config}{source}");
     my %discovered = discover_installed_schemas();
     for my $schema_name (keys %discovered) {
         my $disc = $discovered{$schema_name};
+        # A [chewbbaca_schema_<name>] section is stored under its lower-cased
+        # name (read_ini_file lower-cases section titles), and at that point no
+        # installed schema was known to match it against. Move such an entry to
+        # the schema's real name, or a section for a schema with capitals in its
+        # name (CAMPISO-PubMLST-8) stays a separate entry that nothing uses.
+        for my $cfg_key ( sort keys %{ $R_cfg->{chewbbaca_schemas} } ) {
+            next if $cfg_key eq $schema_name || lc($cfg_key) ne lc($schema_name);
+            my $from_cfg = delete $R_cfg->{chewbbaca_schemas}{$cfg_key};
+            for my $field ( keys %$from_cfg ) {
+                $R_cfg->{chewbbaca_schemas}{$schema_name}{$field} //= $from_cfg->{$field};
+            }
+        }
         # Start from discovered values, then let any config-file overrides win
         # (they were already merged into $R_cfg_schemas during config loading above).
         for my $field (keys %$disc) {
@@ -2941,7 +2954,14 @@ log_message("NOTICE: Configuration source: $rundata{config}{source}");
         # Store the schema dir so filter resolution can find co-located filter files
         $R_cfg->{chewbbaca_schemas}{$schema_name}{_schema_dir} //= $disc->{_schema_dir};
     }
-    my $n = scalar keys %{ $R_cfg->{chewbbaca_schemas} };
+    # A section that matches no installed schema would otherwise be ignored
+    # without a word (a misspelled schema name, or a schema not installed yet).
+    for my $cfg_key ( sort keys %{ $R_cfg->{chewbbaca_schemas} } ) {
+        next if exists $discovered{$cfg_key};
+        log_message("WARNING: [chewbbaca_schema_$cfg_key] in the config file does not match an installed "
+                  . "chewBBACA schema; its settings are not used (--list-schemas shows the installed schemas)", "yellow");
+    }
+    my $n = scalar keys %discovered;
     log_message("INFO: chewBBACA schemas discovered: $n");
 }
 
@@ -37627,7 +37647,7 @@ HTML
 sub run_efsa_export {
     %S_EFSA_EXPORT = ();
     my $g = $R_cfg->{general} // {};
-    my $mode = $g->{export_efsa} // "auto";
+    my $mode = $g->{export_efsa} // "off";
     return if $mode =~ /^(off|no|0|false)$/i;
     my %efsa_species = map { $_ => 1 } ( "Salmonella enterica", "Escherichia coli", "Listeria monocytogenes",
                                           "Campylobacter jejuni", "Campylobacter coli" );

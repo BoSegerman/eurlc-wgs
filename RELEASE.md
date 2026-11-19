@@ -11,6 +11,56 @@ det i release-texten. För- och testversioner: `1.1.0-beta1`, `1.1.0-rc1`.
 
 ---
 
+## Plan mot 1.0.0 (november 2026)
+
+Ordningen är den tänkta. Detaljerna för varje steg står i avsnitten nedan.
+
+### A. Trösklarna
+- [ ] Sista `--resume` och `summarize` på testkörningarna (*Campylobacter*,
+      *Salmonella*) med den aktuella versionen; inga varningar på rena prov
+      utom förklarade.
+- [ ] Gräns för `qscore_trimmed_n_rate` satt från spridningen (kandidat
+      0,1 %, ISO 23418 A.2).
+- [ ] *E. coli* och *Listeria*: antingen trösklar från egna data, eller
+      försiktiga standardvärden (bara WARNING) och "inte validerat" under
+      Known limitations.
+- [ ] Öppna frågor i `qc_threshold_selection.md` §6 besvarade eller
+      flyttade till `eurlc-wgs-planned.md`.
+
+### B. Omfattning och frysning
+- [ ] Bestämt vilka arter versionen är validerad för; övriga körs men
+      anges som inte validerade.
+- [ ] Hjälpverktyg utanför valideringen märkta som sådana
+      (`eurlc-efsa-export`: experimentell, av som standard;
+      `eurlc-cgmlst-compare`, `eurlc-wgs-inspect`: hjälpverktyg).
+- [ ] Funktionsfrysning: efter detta bara rättelser; allt annat i planned.
+- [ ] Manualens Known limitations uppdaterad (avsnitt 13).
+
+### C. Reproducerbar installation
+- [ ] Versionerna låsta i alla YML-filer (avsnitt 3).
+- [ ] `docs/help.txt` uppdaterad med det som tillkommit (`summarize`,
+      verifieringen mot referens, `eurlc-wgs-inspect compare`).
+- [ ] Provinstallation på en ren maskin (avsnitt 5).
+
+### D. Release candidate och testomgång
+- [ ] Version `1.0.0-rc1` satt (avsnitt 4).
+- [ ] Alla testdataset körda **från början** (inte resume) med rc1.
+- [ ] `compare`: sekventiellt mot parallellt, olika trådantal, två datorer;
+      varje skillnad förklarad.
+- [ ] Valideringsdataseten D1–D3: ALL REQUIRED CHECKS AGREE.
+- [ ] Fingeravtrycken från rc1 sparade i `reference/`.
+
+### E. Rapporten
+- [ ] Rapporten läst för ett prov per art och per typfall (rent,
+      kontaminerat, låg täckning, blandning av stammar): texter, orsaker
+      till status, länkar.
+
+### F. Validering och release
+- [ ] Avsnitt 6–8 nedan: databaser frysta, validering, försegling, tagg,
+      GitHub-release.
+
+---
+
 ## 1. Innan koden fryses
 
 - [ ] Det som ska med är klart; det som skjuts upp står i

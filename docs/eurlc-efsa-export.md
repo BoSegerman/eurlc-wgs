@@ -1,5 +1,9 @@
 # eurlc-efsa-export: results for the EFSA WGS System
 
+> **Experimental.** This is a preview. The format and the checks have not
+> yet been agreed with EFSA, and some points are open (listed at the end).
+> The pipeline does not run it unless `export_efsa=auto` is set.
+
 `eurlc-efsa-export` turns an EURLC-WGS run into the files the **EFSA WGS
 System** takes in a programmatic submission (WGS CLI `wgs upload`, or the WGS
 API). It also checks every sample against EFSA's business rules before

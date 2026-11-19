@@ -215,6 +215,7 @@ foreach my $arg (@ARGV) {
     if ($arg =~ /^(?:--?)?optional$/)                 { $S_SETUP_OPTIONAL = 1; }   # --setup --optional (install.sh)
     if ($arg =~ /^(?:--?)?freeze-databases(?:=|$)/)   { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?verify-databases$/)         { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?installation-check(?:=|$)/) { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?generate-seal(?:=|$)/)        { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?install-scheme(?:=|$)/)       { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?install-efsa-schemas(?:=|$)/){ $S_SUPPRESS_STARTUP_LOG = 1; }
@@ -1370,6 +1371,14 @@ $rundata{config}{defaults} = {
         # not count. Writes report/verification/.
         verify_reference => "auto",
         verify_expect    => "",
+
+        # validated_species: the species this configuration is validated for
+        # (comma-separated, e.g. "Campylobacter jejuni, Campylobacter coli";
+        # a genus alone covers all its species). Empty = nothing declared.
+        # A sample of another species is analysed as usual, but marked as
+        # outside the validated species and not reportable. The setting is
+        # part of the configuration, so a config seal covers it.
+        validated_species => "",
 
         # export_efsa: files for programmatic submission to the EFSA WGS
         # System (scripts/eurlc-efsa-export; docs/eurlc-efsa-export.md):
@@ -2616,7 +2625,7 @@ our @LATER_ARG_NAMES = qw(
     assume-yes no-color non-interactive overwrite recursive resume verbose
     infotool installtool reinstalltool removetool
     color colour no-colour docker optional qc-screen qcscreen
-    setup freeze-databases verify-databases generate-seal import-schema install-efsa-schemas install-schema install-scheme list-schemas update-catalog
+    setup freeze-databases verify-databases installation-check generate-seal import-schema install-efsa-schemas install-schema install-scheme list-schemas update-catalog
     enable disable fastq fasta summarize summarise
 );
 {
@@ -3506,6 +3515,7 @@ my %early_handled_args = (
     "setup"            => 1,
     "freeze-databases" => 1,
     "verify-databases" => 1,   # B12: full MD5 of every database, ignoring remembered values
+    "installation-check" => 1, # run the installation check set(s) in <database>/installation_check
     "generate-seal"    => 1,   # also matches --generate-seal=Name (prefix match below)
     "install-scheme"   => 1,   # also matches --install-scheme=Species (prefix match below) [LEGACY alias]
     "install-schema"   => 1,   # also matches --install-schema=Name (prefix match below)
@@ -3722,6 +3732,11 @@ if ( $R_cfg->{general}{archive_results} ) {
     }
     if ($found_verify_dbs) {
         $utility_exit->( _cmd_verify_databases() );
+    }
+    if ( exists $args{"installation-check"} ) {
+        my $failed = _cmd_installation_check( $args{"installation-check"} );
+        close_logfile();
+        exit( $failed ? 1 : 0 );
     }
     if ($found_seal) {
         my $seal_name = $args{"generate-seal"};
@@ -5749,6 +5764,7 @@ sub write_run_status {
             type          => $s->{type},
             qc_status     => $qc,
             species       => $s->{main_results}{taxonomy}{species},
+            validated_scope => ( $state eq 'finished' ? $s->{main_results}{validated_scope} : undef ),   # validated | outside | undetermined | ""
             abandoned     => $s->{fatal_error} ? join("; ", @{ $s->{fatal_error_message} // [] }) || "yes" : undef,
             failed_steps  => $s->{failed_steps}     // [],
             skipped_steps => $s->{skipped_upstream} // [],
@@ -22278,7 +22294,7 @@ sub print_main_html_report {
 
     my $amr_table = main_report_section_amr();
 
-    my $config_seal_html = get_config_seal_html_for_report() . get_resume_html_for_report() . get_validation_html_for_report()
+    my $config_seal_html = get_config_seal_html_for_report() . get_validated_species_html_for_report() . get_resume_html_for_report() . get_validation_html_for_report()
                          . get_verification_html_for_report();
 
     # Inject seal banner CSS and the banner itself into the report HTML.
@@ -23403,6 +23419,7 @@ sub main_report_section_sample_overview {
     $html .= "      <th class=\"sort-col\">Raw Q30 rate</th>\n";
     $html .= "      <th class=\"sort-col\">Q30+ Coverage</th>\n";
     $html .= "      <th class=\"sort-col\">QC</th>\n";
+    $html .= "      <th class=\"sort-col\" title=\"Can the results be reported? PASS and WARNING: yes. CRITICAL: only after assessment. FAIL, an abandoned sample, or a species outside the validated species: no.\">Reportable</th>\n";
     $html .= "      <th>Reports</th>\n";   # Reports column not sortable
     $html .= "    </tr>\n";
     $html .= "  </thead>\n";
@@ -23434,6 +23451,7 @@ sub build_sample_overview_row {
     my $q30_cell           = build_overview_q30_cell($sample, $H);
     my $coverage_cell      = build_overview_coverage_cell($sample, $H);
     my $qc_cell            = build_overview_qc_cell($sample, $H);
+    my $reportable_cell    = build_overview_reportable_cell($sample, $H);
     my $reports_cell       = build_overview_reports_cell($sample, $H);
 
     my $html = "";
@@ -23446,6 +23464,7 @@ sub build_sample_overview_row {
     $html .= $q30_cell;
     $html .= $coverage_cell;
     $html .= $qc_cell;
+    $html .= $reportable_cell;
     $html .= $reports_cell;
     $html .= "    </tr>\n";
 
@@ -23877,6 +23896,31 @@ sub build_overview_qc_cell {
     return qq{      <td class="$qc_class" title="$qc_tooltip">$qc</td>\n};
 }
 
+## Reportable (set_reportable): what is shown, a css class and the reason.
+## "Yes"; "No"; for a CRITICAL sample "No -- needs assessment" (a
+## bioinformatician may approve it); for a species outside the validated
+## species of the configuration "No -- outside validated species".
+sub reportable_display {
+    my ($sample) = @_;
+    my $rep = $sample->{main_results}{reportable};
+    return ( "n/a", "qc-unknown", "" ) unless ref $rep eq 'HASH' && defined $rep->{value};
+    my $why = join( "; ", grep { defined $_ && $_ ne "" } $rep->{reason}, $rep->{note} );
+    return ( "Yes", "qc-good", $why ) if $rep->{value} eq "yes";
+    return ( "No -- outside validated species", "qc-bad", $why )
+        if ( $sample->{main_results}{validated_scope} // "" ) eq "outside";
+    my $status = uc( $sample->{report_issues}{summary}{status} // $sample->{qc}{status} // "" );
+    return ( "No -- needs assessment", "qc-critical", $why )
+        if $status eq "CRITICAL" && !$sample->{fatal_error} && !@{ $sample->{failed_steps} // [] };
+    return ( "No", "qc-bad", $why );
+}
+
+sub build_overview_reportable_cell {
+    my ($sample, $H) = @_;
+    my ( $text, $class, $why ) = reportable_display($sample);
+    my $esc = $H->{esc};
+    return qq{      <td class="$class" title="} . $esc->($why) . qq{">} . $esc->($text) . qq{</td>\n};
+}
+
 sub build_overview_reports_cell {
     my ($sample, $H) = @_;
 
@@ -24257,6 +24301,12 @@ sub short_report_section_sample_summary {
     $html .= short_report_row("Sample name", $sample->{name} // "n/a");
     $html .= short_report_row("Sample type", $sample->{type} // "n/a");
     $html .= short_report_raw_row("Overall QC", encode_entities($status) . " " . warning_level_to_dot_html($level));
+    {
+        my ( $text, undef, $why ) = reportable_display($sample);
+        $html .= short_report_row("Reportable", $text . ( $why ne "" ? " ($why)" : "" ));
+        $html .= short_report_row("Validated species", $R_cfg->{general}{validated_species})
+            if ( $R_cfg->{general}{validated_species} // "" ) =~ /\S/;
+    }
 
     $html .= short_report_row("Pipeline version", get_pipeline_version_for_report());
     $html .= short_report_row("Analysis host", get_hostname_for_report());
@@ -25113,8 +25163,8 @@ sub evaluate_sample_qc {
 ## Can the sample's results be reported? (EURL convention, also used by the
 ## validation against EURL datasets.) PASS and WARNING: yes -- WARNING with a
 ## note; CRITICAL and FAIL: no; an abandoned sample, or one where a step
-## failed: no. Whether the species is inside a validation's target species
-## is decided by the validation, not here.
+## failed: no. A sample of a species outside general.validated_species: no
+## (when validated species are declared).
 ## Of the QC measures at a status, the one most likely to be the root cause,
 ## for the reportable reason: reads and depth before species and
 ## contamination, before the re-mapping, the assembly and the typing (low
@@ -25167,7 +25217,62 @@ sub set_reportable {
         my $t = "later steps failed as a consequence of the failed data: " . join( ", ", @ef );
         $note = defined $note && $note ne "" ? "$note; $t" : $t;
     }
+    # Species outside the validated species of this configuration
+    # (general.validated_species): the results stay, but are not reportable.
+    my $scope = sample_validation_scope($s);
+    $s->{main_results}{validated_scope} = $scope;
+    if ( $scope eq "outside" ) {
+        my $t = "species outside the validated species of this configuration ("
+              . ( $s->{main_results}{taxonomy}{species} // "?" ) . ")";
+        $reason = $value eq "no" && $reason ne "" ? "$t; $reason" : $t;
+        $value  = "no";
+    }
+    elsif ( $scope eq "undetermined" && $value eq "yes" ) {
+        # no species call: it cannot be said to be one of the validated species
+        ( $value, $reason ) = ( "no", "species not determined (validated species are declared for this configuration)" );
+    }
     $s->{main_results}{reportable} = { value => $value, reason => $reason, note => $note };
+}
+
+## The validated species of this configuration (general.validated_species),
+## lower-cased; empty list = nothing declared.
+sub validated_species_list {
+    return grep { $_ ne "" } map { my $x = lc $_; $x =~ s/^\s+|\s+$//g; $x =~ s/\s+/ /g; $x }
+           split /,/, ( $R_cfg->{general}{validated_species} // "" );
+}
+
+## "validated" / "outside" for a sample whose species is known, "undetermined"
+## when it is not, "" when no validated species are declared. An entry of one
+## word is a genus and covers all its species.
+sub sample_validation_scope {
+    my ($s) = @_;
+    my @val = validated_species_list() or return "";
+    my $sp = lc( $s->{main_results}{taxonomy}{species} // "" );
+    $sp =~ s/^\s+|\s+$//g; $sp =~ s/\s+/ /g;
+    return "undetermined" if $sp eq "" || $sp =~ /^(?:n\/a|na|unknown|-)$/;
+    for my $v (@val) {
+        return "validated" if $sp eq $v || ( $v !~ / / && $sp =~ /^\Q$v\E / );
+    }
+    return "outside";
+}
+
+## Banner for the main report: the validated species, and the samples outside them.
+sub get_validated_species_html_for_report {
+    my @val = validated_species_list() or return "";
+    my @out = grep { ( $_->{main_results}{validated_scope} // "" ) eq "outside" } @{ $R_samples // [] };
+    my $cls = @out ? "seal-warning" : "seal-verified";
+    my $txt = "Validated species of this configuration: <b>"
+            . encode_entities( $R_cfg->{general}{validated_species} ) . "</b>";
+    my $detail = @out
+        ? scalar(@out) . " sample(s) of other species, not reportable: "
+          . join( ", ", map { encode_entities( ( $_->{name} // "?" ) . " (" . ( $_->{main_results}{taxonomy}{species} // "?" ) . ")" ) } @out )
+        : "all samples with a species call are of these species";
+    return <<"HTML";
+<div class="seal-banner $cls">
+  <span class="seal-icon">&#9678;</span>
+  <span class="seal-label">$txt<br><small style='opacity:0.75'>$detail</small></span>
+</div>
+HTML
 }
 
 
@@ -31462,6 +31567,17 @@ sub print_run_summary {
         $add->("    (or add the species to species_scope in the configuration to always include it)");
     }
 
+    # samples outside the validated species of this configuration
+    if ( my @val = validated_species_list() ) {
+        my @out = grep { ( $_->{main_results}{validated_scope} // "" ) eq "outside" } @{ $R_samples // [] };
+        if (@out) {
+            $add->(sprintf( "  %-12s %s", "Scope:", scalar(@out) . " sample(s) outside the validated species ("
+                   . $R_cfg->{general}{validated_species} . "), not reportable:" ), "yellow");
+            my @n = map { ( $_->{name} // "?" ) . " (" . ( $_->{main_results}{taxonomy}{species} // "?" ) . ")" } @out;
+            $add->( "    " . ( @n > 8 ? join( ", ", @n[ 0 .. 7 ] ) . ", ... +" . ( @n - 8 ) : join( ", ", @n ) ), "yellow" );
+        }
+    }
+
     # validation against a validation dataset
     if (%S_VALIDATION) {
         $add->(sprintf( "  %-12s %s: %s", "Validation:", $S_VALIDATION{dataset}, $S_VALIDATION{verdict} ),
@@ -34508,6 +34624,192 @@ sub load_schema_catalogs {
 # Lists installed schemas (from discover_installed_schemas) and available
 # schemas (from catalog JSONs in db/chewbbaca/catalog/).
 # ---------------------------------------------------------------------------
+#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+## --installation-check[=<set>[,<set>]]
+##
+## Does this installation work, and does it give the results it should?
+## Runs the check set(s) in <database>/installation_check/ through the
+## pipeline, one after the other, each as a run of its own, and compares the
+## results with the set's expected results and, when the set has one, with
+## its reference run. A set is a folder laid out as a validation dataset:
+##
+##   <database>/installation_check/<set>/
+##       <ID>_validation_profile.yml, <ID>_expected_results.tsv   (docs/eurlc-validate.md)
+##       *.md5          md5sum lines for every file of the set (paths relative to the set)
+##       fastq/         the reads (or directly in the set folder)
+##       reference/     optional: results fingerprint of the approved run
+##
+## Before a set is run, its files are checked against the .md5 list. The
+## check passes when the files are intact, the run finished, every required
+## check against the expected results agrees, the comparison with the
+## reference shows no unexpected differences, and -- when a config seal is
+## configured -- the seal is verified. The output of each run is kept in
+## <database>/installation_check_runs/<set>/<time>_<host>/ with a record of
+## the check (installation_check.json and .txt); one line per check goes to
+## <database>/installation_check_runs/installation_checks.tsv.
+## Returns the number of sets that did not pass.
+
+sub _cmd_installation_check {
+    my ($which) = @_;
+    $S_SUPPRESS_STARTUP_LOG = 0;   # show all output from here on
+    require Sys::Hostname;
+    my $db   = peekdir("db") // "";
+    my $root = "$db/installation_check";
+    my @all  = -d $root ? sort grep { -d "$root/$_" && glob("$root/$_/*_validation_profile.y*ml") }
+                               map { basename($_) } glob("$root/*") : ();
+    my @want = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $which // "" );
+    my @sets = @want ? @want : @all;
+    if ( my @unknown = grep { my $w = $_; !grep { $_ eq $w } @all } @want ) {
+        log_message("ERROR: Installation check: no check set named " . join( ", ", @unknown ) . " in [$root]"
+                  . ( @all ? " (sets there: " . join( ", ", @all ) . ")" : "" ), "red");
+        return scalar @unknown;
+    }
+    if ( !@sets ) {
+        log_message("ERROR: Installation check: no check set in [$root]. A check set is a folder there with a "
+                  . "validation profile (<ID>_validation_profile.yml), its expected results, the reads and an .md5 list "
+                  . "-- see the user manual, Installation check.", "red");
+        return 1;
+    }
+    my $host  = Sys::Hostname::hostname() // "unknown";
+    my $user  = $ENV{USER} // $ENV{LOGNAME} // ( getpwuid($<) )[0] // "unknown";
+    my $self  = eval { abs_path($0) } // $0;
+    # this run's other arguments (database=, configfile=, threads= ...) go to the runs
+    my @pass  = grep { !/^-{0,2}(?:installation-check|datadir|outdir|validate|verify_reference|resume|overwrite|rerun|assume-yes)(?:=|$)/i } @ORIGINAL_ARGV;
+    my $runs  = "$db/installation_check_runs";
+    my $failed = 0;
+    my @lines;
+
+    for my $set (@sets) {
+        my $dir = "$root/$set";
+        my %rec = ( format => "eurlc-wgs-installation-check", format_version => 1, set => $set, set_folder => $dir,
+                    started => iso_timestamp(), host => $host, user => $user,
+                    pipeline => $rundata{pipeline_info}{name}, version => $PIPELINE_VERSION, checks => [] );
+        my $add = sub { my ($name, $ok, $detail) = @_;
+                        push @{ $rec{checks} }, { check => $name, ok => ( $ok ? \1 : \0 ), detail => $detail // "" };
+                        log_message( sprintf( "NOTICE:   %-4s %s%s", $ok ? "ok" : "FAIL", $name, ( $detail // "" ) ne "" ? ": $detail" : "" ), $ok ? "green" : "red" );
+                        return $ok; };
+        log_message("NOTICE: Installation check: set [$set]");
+        my $ok = 1;
+
+        # 1. the set's files against its .md5 list
+        if ($ok) {
+            my @lists = glob("$dir/*.md5");
+            if ( !@lists ) {
+                $ok = $add->( "files of the check set", 0, "no .md5 list in the set folder (make one there: md5sum fastq/* *.tsv *.yml reference/* > $set.md5)" );
+            }
+            else {
+                my ( $n, @bad ) = (0);
+                require Digest::MD5;
+                my $ctx = Digest::MD5->new;
+                for my $list ( sort @lists ) {
+                    open( my $fh, '<', $list ) or do { push @bad, basename($list) . " (cannot be read)"; next; };
+                    while ( my $l = <$fh> ) {
+                        $ctx->add($l);
+                        next unless $l =~ /^([0-9a-fA-F]{32})\s+\*?(\S.*?)\s*$/;
+                        my ( $sum, $f ) = ( lc $1, $2 );
+                        $n++;
+                        my $got = md5_file("$dir/$f");
+                        push @bad, "$f (" . ( $got =~ /^ERROR:(.*)/ ? $1 : "changed" ) . ")" if $got ne $sum;
+                    }
+                    close $fh;
+                }
+                $rec{set_md5} = $ctx->hexdigest;   # identifies the set: MD5 of its .md5 list(s)
+                push @bad, "the .md5 list names no files" if !$n;
+                $ok = $add->( "files of the check set", !@bad,
+                              @bad ? join( ", ", @bad > 5 ? ( @bad[ 0 .. 4 ], "... +" . ( @bad - 5 ) ) : @bad ) : "$n files, MD5 sums as listed" );
+            }
+        }
+
+        # 2. the run
+        my $out = "$runs/$set/" . strftime( "%Y%m%d-%H%M%S", localtime ) . "_" . ( $host =~ s/[^\w.-]/_/gr );
+        if ($ok) {
+            my $data = -d "$dir/fastq" ? "$dir/fastq" : $dir;
+            my $ref  = glob("$dir/reference/*.json $dir/reference/*.json.gz") ? "$dir/reference" : "off";
+            File::Path::make_path( dirname($out) );
+            my @cmd = ( $^X, $self, "datadir=$data", "outdir=$out", "validate=$dir", "verify_reference=$ref", "--assume-yes", @pass );
+            log_message( "NOTICE: Installation check: running " . join( " ", map { _shell_quote_arg($_) } basename($self), @cmd[ 2 .. $#cmd ] ) );
+            close_logfile();
+            my $rc = system(@cmd);
+            $rc = $rc == -1 ? 1 : ( $rc & 127 ) ? 4 : ( $rc >> 8 );
+            $rec{output} = $out;
+            $rec{exit_code} = $rc;
+            my $st = -f "$out/log/run_status.json" ? ( eval { read_json_file("$out/log/run_status.json") } // {} ) : {};
+            my $finished = ( $st->{state} // "" ) eq "finished";
+            $ok = $add->( "run", $finished, $finished ? "finished (" . ( $st->{result} // "?" ) . "), " . ( ( $st->{counts} // {} )->{samples} // "?" ) . " sample(s)"
+                                                        : "did not finish (exit code $rc" . ( $st->{state} ? ", state $st->{state}" : "" ) . ") -- see $out/log/log.txt" );
+
+            # 3. the seal
+            my $seal = $st->{seal} // {};
+            $rec{seal} = { status => $seal->{status} // "UNSEALED", name => $seal->{name} };
+            if ( ( $R_cfg->{general}{seal} // "" ) ne "" && -f $R_cfg->{general}{seal} ) {
+                my $v = ( $seal->{status} // "" ) eq "SEAL VERIFIED";
+                $ok = 0 unless $add->( "config seal", $v, ( $seal->{status} // "no seal status" ) . ( $seal->{name} ? " ($seal->{name})" : "" )
+                                       . ( $v ? "" : join( "", map { "; $_" } @{ $seal->{mismatches} // [] }, @{ $seal->{overrides} // [] } ) ) );
+            }
+            else {
+                $add->( "config seal", 1, "no seal configured (UNSEALED): the results are checked, the configuration is not" );
+            }
+
+            if ($finished) {
+                # 4. expected results
+                my $v = -f "$out/report/validation/validation.json" ? ( eval { read_json_file("$out/report/validation/validation.json") } // {} ) : {};
+                my $verdict = ( $v->{meta} // {} )->{verdict};
+                $rec{dataset} = ( $v->{meta} // {} )->{dataset};
+                $ok = 0 unless $add->( "expected results", defined $verdict && $verdict =~ /^ALL .*AGREE/ ? 1 : 0,
+                                       $verdict // "not compared (no report/validation/validation.json)" );
+                # 5. reference run
+                if ( $ref ne "off" ) {
+                    my $c = -f "$out/report/verification/comparison.json" ? ( eval { read_json_file("$out/report/verification/comparison.json") } // {} ) : {};
+                    my $cv = $c->{verdict};
+                    $ok = 0 unless $add->( "reference run", defined $cv && $cv =~ /^NO UNEXPECTED DIFFERENCES/ ? 1 : 0,
+                                           $cv // "not compared (no report/verification/comparison.json)" );
+                }
+                else {
+                    $add->( "reference run", 1, "the set has no reference/ -- not compared" );
+                }
+            }
+        }
+
+        $rec{result}   = $ok ? "PASSED" : "FAILED";
+        $rec{finished} = iso_timestamp();
+        $failed++ unless $ok;
+        log_message( "NOTICE: Installation check [$set]: $rec{result}" . ( $rec{seal} && $rec{seal}{status} eq "UNSEALED" && $ok ? " (UNSEALED configuration)" : "" ),
+                     $ok ? "green" : "red" );
+
+        # the record of the check
+        my $recdir = -d $out ? $out : do { File::Path::make_path("$runs/$set"); "$runs/$set" };
+        my $stem = -d $out ? "$recdir/installation_check" : "$recdir/installation_check_" . strftime( "%Y%m%d-%H%M%S", localtime ) . "_failed";
+        save_hash_as_json( "$stem.json", \%rec );
+        if ( open( my $t, '>', "$stem.txt" ) ) {
+            print {$t} "EURLC-WGS installation check\n\n";
+            printf {$t} "%-12s %s\n", @$_ for (
+                [ "Result:", $rec{result} ], [ "Check set:", $set . ( $rec{dataset} ? " ($rec{dataset})" : "" ) ],
+                [ "Set MD5:", $rec{set_md5} // "-" ], [ "Pipeline:", "$rec{pipeline} $rec{version}" ],
+                [ "Seal:", $rec{seal} ? $rec{seal}{status} . ( $rec{seal}{name} ? " ($rec{seal}{name})" : "" ) : "-" ],
+                [ "Computer:", $host ], [ "User:", $user ], [ "Started:", $rec{started} ], [ "Finished:", $rec{finished} ],
+                [ "Output:", $rec{output} // "-" ] );
+            print {$t} "\n";
+            printf {$t} "  %-4s %s%s\n", ( ${ $_->{ok} } ? "ok" : "FAIL" ), $_->{check}, ( $_->{detail} ne "" ? ": $_->{detail}" : "" ) for @{ $rec{checks} };
+            close $t;
+        }
+        log_message("NOTICE: Installation check: record written to $stem.txt (and .json)");
+        push @lines, join( "\t", $rec{finished}, $host, $user, $PIPELINE_VERSION, $rec{seal} ? $rec{seal}{status} : "", ( $rec{seal} && $rec{seal}{name} ) // "",
+                           $set, $rec{set_md5} // "", $rec{result}, $rec{output} // "" );
+    }
+
+    # one line per check, for the method log
+    my $tsv = "$runs/installation_checks.tsv";
+    my $new = !-s $tsv;
+    if ( -d $runs && open( my $fh, '>>', $tsv ) ) {
+        print {$fh} join( "\t", qw(finished computer user pipeline_version seal_status seal_name check_set set_md5 result output) ), "\n" if $new;
+        print {$fh} "$_\n" for @lines;
+        close $fh;
+    }
+    log_message( "NOTICE: Installation check: " . ( $failed ? "$failed of " . scalar(@sets) . " set(s) FAILED" : scalar(@sets) . " set(s) PASSED" ),
+                 $failed ? "red" : "green" );
+    return $failed;
+}
+
 sub _cmd_list_schemas {
     $S_SUPPRESS_STARTUP_LOG = 0;
 
@@ -37367,7 +37669,7 @@ sub write_observed_results_table {
     my $dir  = getdir("out,report,tables");
     my $file = "$dir/eurlc_observed_results.tsv";
     my @cols = qw(sample_id species st mlst_alleles qc_status qc_issues cgmlst_called_percent cgmlst_scheme
-                  reportable reportable_reason abandoned);
+                  reportable reportable_reason abandoned validated_scope);
     open( my $fh, '>', $file ) or do { log_message("WARNING: cannot write [$file]: $!"); return; };
     print {$fh} join("\t", @cols), "\n";
     for my $s (@$R_samples) {
@@ -37389,6 +37691,7 @@ sub write_observed_results_table {
             reportable            => $rep->{value} // "",
             reportable_reason     => join("; ", grep { defined $_ && $_ ne "" } $rep->{reason}, $rep->{note}),
             abandoned             => $s->{fatal_error} ? "yes" : "no",
+            validated_scope       => $mr->{validated_scope} // "",
         );
         print {$fh} join("\t", map { my $x = $v{$_} // ""; $x =~ s/[\t\n]/ /g; $x } @cols), "\n";
     }

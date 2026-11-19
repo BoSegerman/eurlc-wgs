@@ -268,6 +268,30 @@ if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
           python3 "$INSP" compare "$FPF" "$T/fp_changed.json" --expect amr,qc.coverage --out "$T/cmp2" > /dev/null
     check "  ... the reference may be given as an output folder" \
           bash -c "python3 '$INSP' compare '$VDATA/eurlc-wgs' '$FPF' > /dev/null"
+
+    # --installation-check: the check set in <database>/installation_check
+    ICS="$HOME/eurlc-wgs_db/installation_check/T1"; mkdir -p "$ICS/fastq" "$ICS/reference"
+    cp "$D/A_S1_L001_R1_001.fastq.gz" "$D/A_S1_L001_R2_001.fastq.gz" "$ICS/fastq/"
+    cp "$VDATA/T1_validation_profile.yml" "$ICS/"
+    # without tools the sample cannot be analysed: that is the expected result here
+    printf 'sample_id\texpected_species\texpected_species_is_target\texpected_st\texpected_mlst_alleles\texpected_qc_status\talternative_qc_status\texpected_qc_issue\texpected_cgmlst_min_called_percent\texpected_cluster\texpected_max_pairwise_distance_within_cluster\texpected_reportable\texpected_non_reportable_reason\nA\tn/a\tyes\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tno\tn/a\n' > "$ICS/T1_expected_results.tsv"
+    cp "$FPF" "$ICS/reference/2026-01-01_ref.json.gz"
+    ( cd "$ICS" && md5sum fastq/* *.tsv *.yml reference/* > T1.md5 )
+    run "$T/ic1.out" --installation-check disable=chewbbaca
+    ICR="$HOME/eurlc-wgs_db/installation_check_runs"
+    check "installation check: the set passes (exit 0)" bash -c "[[ $RC == 0 ]] && grep -q 'Installation check \[T1\]: PASSED' '$T/ic1.out'"
+    check "  ... files, run, expected results and reference run are checked" \
+          bash -c "grep -q 'ok   files of the check set: 5 files' '$T/ic1.out' && grep -q 'ok   run: finished' '$T/ic1.out' && grep -q 'ok   expected results: ALL' '$T/ic1.out' && grep -q 'ok   reference run: NO UNEXPECTED DIFFERENCES' '$T/ic1.out'"
+    check "  ... and a record is kept with the run and in installation_checks.tsv" \
+          bash -c "grep -q '\"result\" *: *\"PASSED\"' '$ICR'/T1/*/installation_check.json && grep -q '^Result: *PASSED' '$ICR'/T1/*/installation_check.txt && [[ \$(grep -c 'T1' '$ICR/installation_checks.tsv') == 1 ]]"
+    echo "# changed after the list was made" >> "$ICS/T1_expected_results.tsv"
+    run "$T/ic2.out" --installation-check=T1 disable=chewbbaca
+    check "installation check: a changed file of the set fails before anything is run (exit 1)" \
+          bash -c "[[ $RC == 1 ]] && grep -q 'FAIL files of the check set: T1_expected_results.tsv (changed)' '$T/ic2.out' && ! grep -q 'ok   run' '$T/ic2.out'"
+    run "$T/ic3.out" --installation-check=NoSuchSet
+    check "installation check: an unknown set is an error that names the sets (exit 1)" \
+          bash -c "[[ $RC == 1 ]] && grep -q 'no check set named NoSuchSet.*sets there: T1' '$T/ic3.out'"
+    rm -rf "$HOME/eurlc-wgs_db/installation_check" "$ICR"
 fi
 
 # --- R1/R2 read names (prescan) ------------------------------------------------
@@ -349,6 +373,22 @@ check "  ... SISTR QC WARNING but SeqSero2 reported and fine: no tool flag" \
       bash -c "grep -q '^NotUsed|Berta .*toolflag=0' <<<'$SC' && [[ \$(grep -c 'toolflag=0' <<<'$SC') -eq 10 ]]"
 check "  ... fastMLST: clonal_complex, CC, Lineage are not loci; two alleles and '-' are kept" \
       bash -c "[[ \$(grep -c 'loci=7' <<<'$FM') -eq 4 ]] && grep -q 'cc=ST-11 complex' <<<'$FM' && grep -q 'allele_aroC=5|7,allele_dnaN=-' <<<'$FM'"
+
+# --- validated species of the configuration ---------------------------------
+echo "Validated species"
+VS=$(perl "$(dirname "$0")/unit/validated_scope.pl" "$SCRIPT" 2>&1)
+check "samples of declared species are validated, others outside and not reportable" \
+      bash -c "grep -q '^jejuni	validated	yes		Yes$' <<<'$VS' && grep -q '^coli	validated	yes		Yes$' <<<'$VS' && grep -q '^lari	outside	no	species outside the validated species of this configuration (Campylobacter lari)	No -- outside validated species$' <<<'$VS'"
+check "  ... a genus covers its species; a failed sample keeps its QC reason; no species call: not reportable" \
+      bash -c "grep -q '^genus-lari	validated	yes		Yes$' <<<'$VS' && grep -q '^lari-fail	outside	no	species outside the validated species of this configuration (Campylobacter lari); QC FAIL' <<<'$VS' && grep -q '^nospecies	undetermined	no	species not determined (validated species are declared for this configuration)	No$' <<<'$VS'"
+check "  ... nothing declared: nothing is marked" bash -c "grep -q '^undeclared		yes		Yes$' <<<'$VS'"
+check "report: CRITICAL is shown as needing assessment, FAIL as not reportable" \
+      bash -c "grep -q '^critical		no	QC CRITICAL	No -- needs assessment$' <<<'$VS' && grep -q '^fail		no	QC FAIL	No$' <<<'$VS'"
+run "$T/vs1.out" datadir="$D" outdir="$T/out_vs" --assume-yes disable=chewbbaca validated_species="Campylobacter jejuni, Campylobacter coli"
+check "main report: the sample table has a Reportable column" \
+      bash -c "grep -q '>Reportable</th>' '$T/out_vs/report/main_report.html' && grep -q '<td class=\"qc-[a-z]*\" title=\"[^\"]*\">\(Yes\|No\)' '$T/out_vs/report/main_report.html'"
+check "validated_species= is a setting, recorded with the run" \
+      bash -c "! grep -q 'Unknown argument' '$T/vs1.out' && python3 -c \"import json,sys; d=json.load(open('$T/out_vs/data/rundata.json')); sys.exit(0 if d['config']['effective']['general']['validated_species']=='Campylobacter jejuni, Campylobacter coli' else 1)\""
 
 # --- eurlc-cgmlst-compare -------------------------------------------------
 echo "cgMLST comparison"

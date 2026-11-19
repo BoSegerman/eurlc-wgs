@@ -76,6 +76,13 @@ CHECKING THE RESULTS
                                  next to the data); report/verification/
     verify_expect=<area>[,...]   Differences that are expected, e.g.
                                  verify_expect=amr,qc.coverage
+    validated_species=<species>[, ...]
+                                 The species this configuration is validated
+                                 for, e.g. "Campylobacter jejuni, Campylobacter
+                                 coli" (set it in the configuration file, so
+                                 that the seal covers it). Samples of other
+                                 species (or without a species call) are
+                                 analysed, but marked and not reportable
 
 INSTALLATION AND MAINTENANCE
     --setup [--optional]         Install tool environments and databases
@@ -90,6 +97,12 @@ INSTALLATION AND MAINTENANCE
     --generate-seal[=<name>]     Seal the configuration (settings, frozen
                                  databases, tool environments, pipeline
                                  version)
+    --installation-check[=<set>[,<set>]]
+                                 Check this installation: run the check set(s)
+                                 in <database>/installation_check/ and compare
+                                 with their expected results and reference run
+                                 (docs/installation-check.md). Exit code 0 when
+                                 every set passes, 1 otherwise
     --remap-check [--convert] <output folder>
                                  Check remap results from an earlier version
                                  against the current method (--convert: take

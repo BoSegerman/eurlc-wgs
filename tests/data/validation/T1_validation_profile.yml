@@ -1,0 +1,53 @@
+dataset:
+  id: T1
+  version: v1
+  title: EURLC-WGS test dataset (smoke tests only)
+
+scope:
+  target_species:
+    - Campylobacter jejuni
+    - Campylobacter coli
+
+validation:
+  mode: reference_result_validation
+  expected_results_file: T1_expected_results.tsv
+  sample_id_column: sample_id
+  ignore_values:
+    - n/a
+
+checks:
+  species:
+    enabled: true
+    required: true
+    expected_column: expected_species
+    target_species_column: expected_species_is_target
+    exact_match_required: true
+  mlst:
+    enabled: true
+    required_when_expected: true
+    expected_st_column: expected_st
+    expected_alleles_column: expected_mlst_alleles
+  qc_status:
+    enabled: true
+    required_when_expected: true
+    expected_column: expected_qc_status
+    alternative_column: alternative_qc_status
+  qc_issue:
+    enabled: true
+    required_when_expected: true
+    expected_column: expected_qc_issue
+  cgmlst_call_rate:
+    enabled: true
+    required_when_expected: true
+    expected_min_called_percent_column: expected_cgmlst_min_called_percent
+    comparison: greater_or_equal
+  cluster:
+    enabled: true
+    required: true
+    expected_column: expected_cluster
+    max_pairwise_distance_column: expected_max_pairwise_distance_within_cluster
+  reportability:
+    enabled: true
+    required: true
+    expected_reportable_column: expected_reportable
+    non_reportable_reason_column: expected_non_reportable_reason

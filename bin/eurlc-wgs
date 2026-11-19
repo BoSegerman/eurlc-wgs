@@ -51,10 +51,40 @@ use Digest::MD5;
 use IO::Uncompress::Unzip qw($UnzipError);
  
 # CPAN modules (require install, see envs/core/eurlc-wgs.yml)
-use JSON::MaybeXS qw(encode_json decode_json);   # bioconda: perl-json-maybexs
-use HTML::Entities qw(encode_entities);          # bioconda: perl-html-parser
-use Term::ANSIColor;                              # bioconda: perl-term-ansicolor
-use Term::ReadKey qw(GetTerminalSize);            # bioconda: perl-termreadkey
+# Loaded in a BEGIN block and not with plain "use": --version and --help are
+# to work outside the conda environment, where the system Perl seldom has
+# these modules. Anything else stops here with a message that says what to do,
+# instead of Perl's "Can't locate JSON/MaybeXS.pm in @INC ...".
+use Term::ANSIColor;                              # core since Perl 5.6
+BEGIN {
+    my @cpan = (
+        [ 'JSON::MaybeXS',  [qw(encode_json decode_json)], 'perl-json-maybexs' ],
+        [ 'HTML::Entities', [qw(encode_entities)],         'perl-html-parser'  ],
+        [ 'Term::ReadKey',  [qw(GetTerminalSize)],         'perl-termreadkey'  ],
+    );
+    my @missing;
+    for my $m (@cpan) {
+        my ( $module, $import, $package ) = @$m;
+        ( my $file = "$module.pm" ) =~ s{::}{/}g;
+        if ( eval { require $file; 1 } ) {
+            $module->import(@$import);
+            next;
+        }
+        push @missing, "$module (conda package $package)";
+        # Declared so that the script compiles; only reached by mistake.
+        no strict 'refs';
+        for my $name (@$import) {
+            *{"main::$name"} = sub { die "eurlc-wgs: $name() needs the Perl module $module, which is not installed\n" };
+        }
+    }
+    my $info_only = @ARGV && !grep { !/^-{0,2}(?:version|help|h)$/i } @ARGV;
+    if ( @missing && !$info_only ) {
+        print STDERR "eurlc-wgs: Perl module(s) not found: " . join( ", ", @missing ) . ".\n"
+                   . "They are part of the eurlc-wgs conda environment. Activate it first "
+                   . "(conda activate eurlc-wgs), or install it as the README describes.\n";
+        exit 2;
+    }
+}
 
 ###################################################################################################
 ###################################################################################################

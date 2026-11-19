@@ -1,0 +1,5 @@
+sample_id	species	st	mlst_alleles	qc_status	qc_issues	cgmlst_called_percent	cgmlst_scheme	reportable	reportable_reason	abandoned
+T1_001	Campylobacter jejuni	257	aspA(9);glnA(2);gltA(4);glyA(62);pgm(4);tkt(5);uncA(6)	PASS		99.2	CAMPISO-PubMLST-8	yes		no
+T1_002	Campylobacter jejuni	257		WARNING	low_n50	98.0	CAMPISO-PubMLST-8	yes	reportable with a QC WARNING	no
+T1_003	Campylobacter coli			FAIL	contamination;high_contig_count	80	CAMPISO-PubMLST-8	no	QC FAIL	no
+T1_004	Campylobacter lari			PASS				yes		no

@@ -1,0 +1,5 @@
+sample_id	expected_species	expected_species_is_target	expected_st	expected_mlst_alleles	expected_qc_status	alternative_qc_status	expected_qc_issue	expected_cgmlst_min_called_percent	expected_cluster	expected_max_pairwise_distance_within_cluster	expected_reportable	expected_non_reportable_reason
+T1_001	Campylobacter jejuni	yes	ST257	aspA(9);glnA(2);gltA(4);glyA(62);pgm(4);tkt(5);uncA(6)	PASS	n/a	n/a	95	C1	5	yes	n/a
+T1_002	Campylobacter jejuni	yes	ST257	n/a	PASS	WARNING	n/a	95	C1	5	yes	n/a
+T1_003	Campylobacter coli	yes	n/a	n/a	FAIL	n/a	contamination	n/a	n/a	n/a	no	contamination
+T1_004	Campylobacter lari	no	n/a	n/a	n/a	n/a	n/a	n/a	n/a	n/a	no	out_of_scope_species

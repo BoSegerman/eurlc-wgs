@@ -101,3 +101,12 @@ nohup.out
 # =========================================================
 
 Thumbs.db
+
+# =========================================================
+# Test data: small hand-made files the smoke test needs.
+# Kept last: it re-includes what the rules above
+# (data/, results/, *.fasta, *.gz ...) would leave out.
+# =========================================================
+
+!tests/data/
+!tests/data/**

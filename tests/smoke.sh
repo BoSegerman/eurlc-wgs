@@ -389,8 +389,21 @@ check "main report: the sample table has a Reportable column" \
       bash -c "grep -q '>Reportable</th>' '$T/out_vs/report/main_report.html' && grep -q '<td class=\"qc-[a-z]*\" title=\"[^\"]*\">\(Yes\|No\)' '$T/out_vs/report/main_report.html'"
 check "run started from another folder: the tools' output goes to the output folder's log, not <current folder>/eurlc-wgs/log" \
       bash -c "grep -q '$T/out_vs/log/stdout.txt' '$T/out_vs/log/bash_commands.log' && ! grep -q '$T/work/eurlc-wgs/log/std' '$T/out_vs/log/bash_commands.log'"
+check "run summary: an abandoned sample is counted as ABANDONED, not as QC PASS" \
+      bash -c "grep -q '^  QC: *[0-9]* ABANDONED$' '$T/vs1.out' && ! grep -q '^  QC:.*PASS' '$T/vs1.out'"
 check "validated_species= is a setting, recorded with the run" \
       bash -c "! grep -q 'Unknown argument' '$T/vs1.out' && python3 -c \"import json,sys; d=json.load(open('$T/out_vs/data/rundata.json')); sys.exit(0 if d['config']['effective']['general']['validated_species']=='Campylobacter jejuni, Campylobacter coli' else 1)\""
+
+# --- the seal and the installation ---------------------------------------------
+echo "Config seal"
+SS=$(perl "$(dirname "$0")/unit/seal_state.pl" "$SCRIPT" 2>&1)
+check "seal: files unchanged and installation as described: verified" bash -c "grep -q '^all-as-sealed	SEAL VERIFIED	SEAL VERIFIED	SEAL VERIFIED	$' <<<'$SS'"
+check "  ... an updated conda environment breaks it, and says which" \
+      bash -c "grep -q '^env-updated	SEAL VERIFIED	SEAL BROKEN	SEAL BROKEN	conda environment eurlc-wgs-spades: differs from conda_manifest.ini' <<<'$SS'"
+check "  ... a frozen database that is not in use breaks it (also a seal with overrides)" \
+      bash -c "grep -q '^db-live	SEAL VERIFIED WITH OVERRIDES	SEAL BROKEN	SEAL BROKEN	database kraken2: the frozen version is not in use' <<<'$SS'"
+check "  ... a seal already broken keeps its own reasons" bash -c "grep -q '^files-changed	SEAL BROKEN	SEAL BROKEN	SEAL BROKEN	eurlc_wgs_config: changed$' <<<'$SS'"
+check "--version prints 1.0.0-rc1" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc1'"
 
 # --- eurlc-cgmlst-compare -------------------------------------------------
 echo "cgMLST comparison"

@@ -17,7 +17,15 @@
 use strict;
 use warnings;
  
-our $PIPELINE_VERSION = '0.1.0-beta1';
+our $PIPELINE_VERSION = '1.0.0-rc1';
+
+# The conda environment the pipeline itself runs in (envs/core/eurlc-wgs.yml):
+# Perl with its modules, and the Python that hashes the cgMLST alleles.
+our $PIPELINE_CONDA_ENV = 'eurlc-wgs';
+
+# Where the installation differs from what a config seal describes
+# (see _verify_config_seal).
+our ( %S_SEAL_STATE_PROBLEMS, $S_SEAL_STATE_LOGGED );
 our $VERSION           = $PIPELINE_VERSION;   # kept for Perl --version-style tooling conventions
 
 # Forward declaration: summarize_results() is called from the postmount
@@ -104,7 +112,7 @@ my %rundata;
 $rundata{pipeline_info} = {
     name        => "eurlc-wgs",
     version     => $PIPELINE_VERSION,
-    versiondate => "2026-05-20",
+    versiondate => "2026-11-20",
     author      => "Bo Segerman",
     contact     => "bo.segerman\@sva.se",
 };
@@ -5104,24 +5112,19 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     zcat __R1T__ | head -n 400000 | gzip > __OUTDIR__/tmpR1.fastq.gz
     __NEWCOMMAND__
     zcat __R2T__ | head -n 400000 | gzip > __OUTDIR__/tmpR2.fastq.gz
     __NEWCOMMAND__  
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
+    { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/kraken2-__BASE__.report 
        --threads __THREADS__ 
        --db __KRAKENDB__
        --paired __OUTDIR__/tmpR1.fastq.gz __OUTDIR__/tmpR2.fastq.gz
        > __OUTDIR__/tmp.krakenout.txt
-       __HIDE-STDERR__
-    __NEWCOMMAND__
-    rm __OUTDIR__/tmpR1.fastq.gz
-    __NEWCOMMAND__
-    rm __OUTDIR__/tmpR2.fastq.gz
-    __NEWCOMMAND__
-    rm __OUTDIR__/tmp.krakenout.txt
+       __HIDE-STDERR__ ;
+      rc=\$? ; rm -f __OUTDIR__/tmpR1.fastq.gz __OUTDIR__/tmpR2.fastq.gz __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
     __NEWCOMMAND__
     conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
        -d __BRACKENDB__
@@ -5140,20 +5143,17 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
 CMD
 
 
-$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
     zcat __SET__ | head -n 400000 | gzip > __OUTDIR__/tmpSE.fastq.gz
     __NEWCOMMAND__
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
+    { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/kraken2-__BASE__.report 
        --threads __THREADS__ 
        --db __KRAKENDB__
        __OUTDIR__/tmpSE.fastq.gz
        > __OUTDIR__/tmp.krakenout.txt
-       __HIDE-STDERR__
-    __NEWCOMMAND__
-    rm __OUTDIR__/tmpSE.fastq.gz
-    __NEWCOMMAND__
-    rm __OUTDIR__/tmp.krakenout.txt
+       __HIDE-STDERR__ ;
+      rc=\$? ; rm -f __OUTDIR__/tmpSE.fastq.gz __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
     __NEWCOMMAND__
     conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
        -d __BRACKENDB__
@@ -5172,15 +5172,14 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
 CMD
 
 $runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{kraken2}->{env}  --no-capture-output kraken2
+    { conda run -n $R_cfg->{kraken2}->{env}  --no-capture-output kraken2
        --report __OUTDIR__/kraken2-__BASE__.report
        --threads __THREADS__  
        --db __KRAKENDB__
        __FASTA__
        > __OUTDIR__/tmp.krakenout.txt
-       __HIDE-STDERR__
-    __NEWCOMMAND__
-    rm __OUTDIR__/tmp.krakenout.txt
+       __HIDE-STDERR__ ;
+       rc=\$? ; rm -f __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
 CMD
 
 
@@ -6453,31 +6452,29 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<'CMD');
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<'CMD');
     ln -sf '__R1__' '__OUTDIR__/__BASE___R1.fastq.gz'
     __NEWCOMMAND__
     ln -sf '__R2__' '__OUTDIR__/__BASE___R2.fastq.gz'
     __NEWCOMMAND__
-    conda run -n __FASTQCENV__ --no-capture-output fastqc
+    { conda run -n __FASTQCENV__ --no-capture-output fastqc
        -t __THREADS__
        -o __OUTDIR__
        '__OUTDIR__/__BASE___R1.fastq.gz'
        '__OUTDIR__/__BASE___R2.fastq.gz'
-       __HIDE-OUTPUT__
-    __NEWCOMMAND__
-    rm -f '__OUTDIR__/__BASE___R1.fastq.gz' '__OUTDIR__/__BASE___R2.fastq.gz'
+       __HIDE-OUTPUT__ ;
+      rc=$? ; rm -f '__OUTDIR__/__BASE___R1.fastq.gz' '__OUTDIR__/__BASE___R2.fastq.gz' ; ( exit $rc ) ; }
 CMD
 
-$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<'CMD');
+$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<'CMD');
     ln -sf '__SE__' '__OUTDIR__/__BASE___SE.fastq.gz'
     __NEWCOMMAND__
-    conda run -n __FASTQCENV__ --no-capture-output fastqc
+    { conda run -n __FASTQCENV__ --no-capture-output fastqc
        -t __THREADS__
        -o __OUTDIR__
        '__OUTDIR__/__BASE___SE.fastq.gz'
-       __HIDE-OUTPUT__
-    __NEWCOMMAND__
-    rm -f '__OUTDIR__/__BASE___SE.fastq.gz'
+       __HIDE-OUTPUT__ ;
+      rc=$? ; rm -f '__OUTDIR__/__BASE___SE.fastq.gz' ; ( exit $rc ) ; }
 CMD
 
 $runstep{$runstep_name}{cmd_template}{FASTA} = "";
@@ -7006,9 +7003,9 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     ln -s '__R1__' '__R1T__' 
-       $capture_output
+       __HIDE-OUTPUT__
     __NEWCOMMAND__   
     ln -s '__R2__' '__R2T__' 
        __HIDE-OUTPUT__
@@ -7130,7 +7127,7 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{bbmap}->{env} --no-capture-output reformat.sh 
+    { conda run -n $R_cfg->{bbmap}->{env} --no-capture-output reformat.sh 
        in='__R1T__' 
        in2='__R2T__' 
        out='__R1TD__' 
@@ -7138,21 +7135,23 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        samplebasestarget=__TARGETBASES__ 
        sampleseed=11 
        1>>'__DIR-LOG__/stdout.txt' 
-       2>'__RESULTFILE__'
-    __NEWCOMMAND__
-    cat '__RESULTFILE__' >> '__DIR-LOG__/stderr.txt'
+       2>'__RESULTFILE__' ;
+      rc=\$? ; cat '__RESULTFILE__' >> '__DIR-LOG__/stderr.txt' ;
+      [ \$rc -eq 0 ] || rm -f '__R1TD__' '__R2TD__' ;
+      ( exit \$rc ) ; }
 CMD
 
 $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{bbmap}->{env} --no-capture-output reformat.sh 
+    { conda run -n $R_cfg->{bbmap}->{env} --no-capture-output reformat.sh 
        in='__SET__' 
        out='__SETD__' 
        samplebasestarget=__TARGETBASES__ 
        sampleseed=11 
        1>>'__DIR-LOG__/stdout.txt' 
-       2>'__RESULTFILE__'
-    __NEWCOMMAND__
-    cat '__RESULTFILE__' >> '__DIR-LOG__/stderr.txt'
+       2>'__RESULTFILE__' ;
+      rc=\$? ; cat '__RESULTFILE__' >> '__DIR-LOG__/stderr.txt' ;
+      [ \$rc -eq 0 ] || rm -f '__SETD__' ;
+      ( exit \$rc ) ; }
 CMD
 
 $runstep{$runstep_name}{cmd_template}{FASTA} = "";
@@ -7468,7 +7467,7 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     ln -s '__R1T__' '__R1TD__' 
        __HIDE-OUTPUT__
     __NEWCOMMAND__   
@@ -8431,14 +8430,15 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
+    { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/__BASE__.kraken2.txt 
        --threads __THREADS__ 
        --db __KRAKENDB__
        --paired '__R1TD__' '__R2TD__'
        > __OUTDIR__/__BASE__.krakenout.txt
-       __HIDE-STDERR__
+       __HIDE-STDERR__ ;
+      rc=\$? ; rm -f __OUTDIR__/__BASE__.krakenout.txt ; ( exit \$rc ) ; }
     __NEWCOMMAND__
     conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
        -r __OUTDIR__/__BASE__.kraken2.txt
@@ -8465,8 +8465,6 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        -l G
        __HIDE-OUTPUT__
      __NEWCOMMAND__
-     rm __OUTDIR__/__BASE__.krakenout.txt
-     __NEWCOMMAND__
     conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
        -r __OUTDIR__/__BASE__.kraken2_bracken_species.txt
        -o __OUTDIR__/__BASE__.bracken_species_krona_input
@@ -8476,17 +8474,17 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        __OUTDIR__/__BASE__.bracken_species_krona_input
        -o __OUTDIR__/__BASE__.krona_bracken_species.html
        __HIDE-OUTPUT__
-        __NEWCOMMAND__
 CMD
 
-$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2
+$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
+    { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2
        --report __OUTDIR__/__BASE__.kraken2.txt
        --threads __THREADS__
        --db __KRAKENDB__
        '__SETD__'
        > __OUTDIR__/__BASE__.krakenout.txt
-       __HIDE-STDERR__
+       __HIDE-STDERR__ ;
+      rc=\$? ; rm -f __OUTDIR__/__BASE__.krakenout.txt ; ( exit \$rc ) ; }
     __NEWCOMMAND__
     conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
        -r __OUTDIR__/__BASE__.kraken2.txt
@@ -8512,8 +8510,6 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
        -r __READLEN__
        -l G
        __HIDE-OUTPUT__
-    __NEWCOMMAND__
-       rm __OUTDIR__/__BASE__.krakenout.txt
         __NEWCOMMAND__
     conda run -n $R_cfg->{krakentools}->{env} --no-capture-output kreport2krona.py
        -r __OUTDIR__/__BASE__.kraken2_bracken_species.txt
@@ -8524,19 +8520,17 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
        __OUTDIR__/__BASE__.bracken_species_krona_input
        -o __OUTDIR__/__BASE__.krona_bracken_species.html
        __HIDE-OUTPUT__
-        __NEWCOMMAND__
 CMD
 
 $runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
-    conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2
+    { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2
        --report __OUTDIR__/__BASE__.kraken2.txt
        --threads __THREADS__
        --db __KRAKENDB__
        __FASTA__
        > __OUTDIR__/tmp.krakenout.txt
-       __HIDE-STDERR__
-       __NEWCOMMAND__
-       rm __OUTDIR__/tmp.krakenout.txt
+       __HIDE-STDERR__ ;
+       rc=\$? ; rm -f __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
 CMD
 
 # TEST---------------------------------
@@ -9412,7 +9406,7 @@ $runstep{$runstep_name} = {
 
 # TEMPLATES---------------------------------
 
-$runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template} = wrap_cmd_strict(<<CMD);
     cp __FASTA__  __DIR-ALTERNATIVE-ASSEMBLIES__/imported/__BASE__.imported.fasta
     __HIDE-OUTPUT__
     __NEWCOMMAND__
@@ -9524,7 +9518,7 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
    conda run -n $R_cfg->{spades}->{env} --no-capture-output spades.py 
        -1 '__R1TD__' 
        -2 '__R2TD__' 
@@ -9536,7 +9530,7 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
     cp __OUTDIR__/__BASE__/contigs.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.spades.fasta
 CMD
 
-$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
    conda run -n $R_cfg->{spades}->{env} --no-capture-output spades.py 
        -s '__SETD__'  
        -t __THREADS__ 
@@ -9705,7 +9699,7 @@ sub define_shovill_runstep {
     my $args = join ' ', grep { defined && $_ ne '' }
                          ( $R_cfg->{shovill}{arguments}, $R_cfg->{$name}{arguments} );
 
-    $runstep{$name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+    $runstep{$name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     conda run -n $R_cfg->{shovill}->{env} --no-capture-output shovill
        --assembler $inner
        --R1 '__R1TD__'
@@ -9931,7 +9925,7 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 
-$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     mkdir -p __OUTDIR__/__BASE__
     __NEWCOMMAND__
     conda run -n $R_cfg->{skesa}->{env} --no-capture-output skesa 
@@ -9941,17 +9935,17 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        > __OUTDIR__/__BASE__/__BASE__.fasta 
        __HIDE-STDERR__
     __NEWCOMMAND__   
-    conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
+    { conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
        --reads __R1TD__,__R2TD__ 
        --contigs __OUTDIR__/__BASE__/__BASE__.fasta 
        --gfa __OUTDIR__/__BASE__/__BASE__.gfa 
        --csv __OUTDIR__/__BASE__/__BASE__.csv 
-       __HIDE-OUTPUT__
+       __HIDE-OUTPUT__ || true ; }
     __NEWCOMMAND__   
     cp __OUTDIR__/__BASE__/__BASE__.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta
 CMD
 
-$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
+$runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
     mkdir -p __OUTDIR__/__BASE__
     __NEWCOMMAND__
     conda run -n $R_cfg->{skesa}->{env} --no-capture-output skesa 
@@ -9961,12 +9955,12 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
        > __OUTDIR__/__BASE__/__BASE__.fasta 
        __HIDE-STDERR__
     __NEWCOMMAND__   
-    conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
+    { conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
        --reads __SETD__ 
        --contigs __OUTDIR__/__BASE__/__BASE__.fasta 
        --gfa __OUTDIR__/__BASE__/__BASE__.gfa 
        --csv __OUTDIR__/__BASE__/__BASE__.csv 
-       __HIDE-OUTPUT__
+       __HIDE-OUTPUT__ || true ; }
     __NEWCOMMAND__   
     cp __OUTDIR__/__BASE__/__BASE__.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta
 CMD
@@ -10001,7 +9995,8 @@ sub preprocess_skesa {
     # which only makes the graph and costs another pass over the reads.
     if ( defined $command && lc( $R_cfg->{cleanup}{assembly_graphs} // "gzip" ) eq "remove"
          && !is_disabled( $R_cfg->{cleanup}{assembler_workfiles} // 1 ) ) {
-        $command =~ s/conda run -n \S+ --no-capture-output gfa_connector .*?__HIDE-OUTPUT__\s*;\s*//;
+        $command =~ s/\{ conda run -n \S+ --no-capture-output gfa_connector .*?__HIDE-OUTPUT__ \|\| true ; \}\s*&&\s*//
+            or log_message("ERROR: [PIPELINE BUG] skesa: the gfa_connector command was not found in the command template", "red");
     }
 
     if($sample_type eq "FASTA"){
@@ -14686,6 +14681,8 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
+    rm -f '__OUTDIR__/__BASE__.sistr.json'
+    __NEWCOMMAND__
     conda run -n $R_cfg->{sistr}->{env} --no-capture-output sistr
        -i '__DIR-ASSEMBLIES__/__BASE__.fasta' '__BASE__'
        -f json
@@ -14696,6 +14693,8 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
        __HIDE-OUTPUT__
     __NEWCOMMAND__
     rm -rf '__OUTDIR__/__BASE__.tmp'
+    __NEWCOMMAND__
+    test -s '__OUTDIR__/__BASE__.sistr.json'
 CMD
 
 # TEST---------------------------------
@@ -14881,7 +14880,7 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
-    rm -rf '__OUTDIR__/__BASE__'
+    rm -rf '__OUTDIR__/__BASE__' '__OUTDIR__/__BASE__.seqsero2.tsv'
     __NEWCOMMAND__
     conda run -n $R_cfg->{seqsero2}->{env} --no-capture-output SeqSero2_package.py
        -m k -t 4
@@ -14897,6 +14896,8 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     cp '__OUTDIR__/__BASE__/SeqSero_result.tsv' '__OUTDIR__/__BASE__.seqsero2.tsv'
     __NEWCOMMAND__
     rm -rf '__OUTDIR__/__BASE__'
+    __NEWCOMMAND__
+    test -s '__OUTDIR__/__BASE__.seqsero2.tsv'
 CMD
 
 # TEST---------------------------------
@@ -15083,7 +15084,7 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
-    rm -rf '__OUTDIR__/__BASE__'
+    rm -rf '__OUTDIR__/__BASE__' '__OUTDIR__/__BASE__.ectyper.tsv'
     __NEWCOMMAND__
     conda run -n $R_cfg->{ectyper}->{env} --no-capture-output ectyper
        -i '__DIR-ASSEMBLIES__/__BASE__.fasta'
@@ -15097,6 +15098,8 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     cp '__OUTDIR__/__BASE__/output.tsv' '__OUTDIR__/__BASE__.ectyper.tsv'
     __NEWCOMMAND__
     rm -rf '__OUTDIR__/__BASE__'
+    __NEWCOMMAND__
+    test -s '__OUTDIR__/__BASE__.ectyper.tsv'
 CMD
 
 # TEST---------------------------------
@@ -15551,6 +15554,8 @@ $runstep{$runstep_name} = {
 $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     mkdir -p '__OUTDIR__/tmp'
     __NEWCOMMAND__
+    rm -f '__OUTDIR__/__BASE__.virulencefinder.json'
+    __NEWCOMMAND__
     conda run -n $R_cfg->{virulencefinder}->{env} --no-capture-output python -m virulencefinder
        -ifa '__DIR-ASSEMBLIES__/__BASE__.fasta'
        -o '__OUTDIR__'
@@ -15563,6 +15568,8 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
        __HIDE-OUTPUT__
     __NEWCOMMAND__
     rm -rf '__OUTDIR__/tmp'
+    __NEWCOMMAND__
+    test -s '__OUTDIR__/__BASE__.virulencefinder.json'
 CMD
 
 # TEST---------------------------------
@@ -15714,6 +15721,8 @@ $runstep{$runstep_name} = {
 $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     mkdir -p '__OUTDIR__/tmp'
     __NEWCOMMAND__
+    rm -f '__OUTDIR__/data.json' '__OUTDIR__/__BASE__.plasmidfinder.json'
+    __NEWCOMMAND__
     conda run -n $R_cfg->{plasmidfinder}->{env} --no-capture-output plasmidfinder.py
        -i '__DIR-ASSEMBLIES__/__BASE__.fasta'
        -o '__OUTDIR__'
@@ -15727,6 +15736,8 @@ $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
     mv '__OUTDIR__/data.json' '__OUTDIR__/__BASE__.plasmidfinder.json'
     __NEWCOMMAND__
     rm -rf '__OUTDIR__/tmp'
+    __NEWCOMMAND__
+    test -s '__OUTDIR__/__BASE__.plasmidfinder.json'
 CMD
 
 # TEST---------------------------------
@@ -17162,7 +17173,7 @@ sub run_chewbbaca_hashing {
 
     my $md5_flag = $R_cfg->{general}{chewbbaca_write_md5} ? "--write-md5" : "";
 
-    my $cmd = qq{cd "$result_dir" && conda run -n eurlc-wgs "$script" "$assembly_base_dir" $md5_flag __HIDE-OUTPUT__};
+    my $cmd = qq{cd "$result_dir" && conda run -n $PIPELINE_CONDA_ENV "$script" "$assembly_base_dir" $md5_flag __HIDE-OUTPUT__};
     $cmd = fill_placeholders($cmd);
 
     my $msg = "Hashing ChewBBACA alleles";
@@ -18467,18 +18478,15 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 $runstep{$runstep_name}{cmd_template} = wrap_cmd(<<CMD);
-cd "__DIR-QC1__"
-__NEWCOMMAND__
+cd "__DIR-QC1__" &&
 conda run -n $R_cfg->{multiqc}->{env} --no-capture-output multiqc . __HIDE-OUTPUT__
 
 __NEWCOMMAND__
-cd "__DIR-QC2__"
-__NEWCOMMAND__
+cd "__DIR-QC2__" &&
 conda run -n $R_cfg->{multiqc}->{env} --no-capture-output multiqc . __HIDE-OUTPUT__
 
 __NEWCOMMAND__
-cd "__DIR-QC3__"
-__NEWCOMMAND__
+cd "__DIR-QC3__" &&
 conda run -n $R_cfg->{multiqc}->{env} --no-capture-output multiqc . __HIDE-OUTPUT__
 CMD
 
@@ -21893,6 +21901,18 @@ sub file_age_days {
 # fails ends the step with its exit code. (wrap_cmd joins them with ; so only
 # the last command decides -- see planned §36.) A ; inside a quoted bash -c
 # string is left alone, since only __NEWCOMMAND__ markers are replaced.
+## Two wrappers for a step's command template. __NEWCOMMAND__ separates the
+## commands of a step:
+##   wrap_cmd_strict   joins them with && -- the first command that fails
+##                     ends the step, and the step has failed.
+##   wrap_cmd          joins them with ;  -- every command is run, and only
+##                     the LAST one decides whether the step failed.
+## Use wrap_cmd_strict unless the template itself looks after the exit code.
+## A template that must tidy up after a tool whatever it returned does so in
+## a group that keeps the tool's exit code:
+##     { tool ... ; rc=$? ; rm -f tmp ; ( exit $rc ) ; }
+## A step whose last command is rm, cp or cat otherwise reports success for
+## a tool that failed (reviewed 20 November 2026).
 sub wrap_cmd_strict {
     my ($cmd) = @_;
     $cmd =~ s/__NEWCOMMAND__/&&/g;
@@ -31469,7 +31489,10 @@ sub print_run_summary {
     my (%type, %qc, @not_pass, %species);
     for my $s (@$samples) {
         $type{ uc( $s->{type} // "?" ) }++;
-        my $q = $s->{report_issues}{summary}{status} // $s->{qc}{status} // "UNKNOWN";
+        # An abandoned sample has no QC result: its status is still the PASS
+        # it started with, and must not be counted as one.
+        my $q = $s->{fatal_error} ? "ABANDONED"
+              : ( $s->{report_issues}{summary}{status} // $s->{qc}{status} // "UNKNOWN" );
         $qc{$q}++;
         push @not_pass, ( $s->{name} // "?" ) . " ($q)" if $q ne "PASS";
         $species{ $s->{main_results}{taxonomy}{species} // "unknown" }++;
@@ -31477,7 +31500,7 @@ sub print_run_summary {
     $add->(sprintf "  %-12s %d  (%s)", "Samples:", scalar(@$samples),
            join(", ", map { "$_ $type{$_}" } sort keys %type));
     my @qc_order = grep { $qc{$_} } ( qw(PASS WARNING CRITICAL FAIL), grep { !/^(PASS|WARNING|CRITICAL|FAIL)$/ } sort keys %qc );
-    my $qc_color = ( $qc{FAIL} || $qc{CRITICAL} ) ? "red" : $qc{WARNING} ? "yellow" : "green";
+    my $qc_color = ( $qc{FAIL} || $qc{CRITICAL} || $qc{ABANDONED} ) ? "red" : $qc{WARNING} ? "yellow" : "green";
     $add->(sprintf( "  %-12s %s", "QC:", join(", ", map { "$qc{$_} $_" } @qc_order) || "-" ), $qc_color);
     if (@not_pass) {
         my @show = @not_pass > 12 ? ( @not_pass[0..11], "... +" . (@not_pass - 12) . " more" ) : @not_pass;
@@ -32816,6 +32839,7 @@ sub verify_programs {
         if ($actual eq "") {
             $status = "ENV_NOT_FOUND"; $color = "red";
             $errors++;
+            $S_SEAL_STATE_PROBLEMS{"conda environment $env: not found (it is in conda_manifest.ini)"} = 1;
             log_message("WARNING: Program manifest: conda environment [$env] not found "
                        . "or conda not accessible.", "red");
         }
@@ -32833,6 +32857,7 @@ sub verify_programs {
         else {
             $status = "MISMATCH"; $color = "red";
             $errors++;
+            $S_SEAL_STATE_PROBLEMS{"conda environment $env: differs from conda_manifest.ini (packages added, removed or updated)"} = 1;
             log_message("WARNING: Program manifest: [$env] fingerprint does not match "
                        . "any accepted value.\n"
                        . "  Actual:   $actual\n"
@@ -33127,6 +33152,10 @@ sub resolve_and_verify_databases {
                 $display_status = "OK [LIVE]";
             }
         }
+        # A database with a frozen version in db_freeze.config that is not
+        # the one in use: the seal does not hold (see _verify_config_seal).
+        $S_SEAL_STATE_PROBLEMS{"database $name: the frozen version is not in use ($status" . ( $detail ne "" ? ": $detail" : "" ) . ")"} = 1
+            if $ref_md5 ne "" && $status ne "OK";
         # Which version this is (B12): the fingerprint of the marker files,
         # named from known_databases.tsv or the database's SOURCE.txt.
         my ($fingerprint, $version) = ("", "");
@@ -33298,7 +33327,28 @@ sub seal_relevant_overrides {
 # SEAL BROKEN. The result is cached: the files do not change during a run,
 # and the BROKEN warning should be logged once, not once per caller.
 our $S_SEAL_RESULT;
+## The seal's verdict. The seal attests three files (settings, frozen
+## database versions, environment fingerprints) and the pipeline script.
+## That the files are unchanged is checked in _verify_config_seal_files().
+## That the installation is what those files describe is checked where the
+## databases and environments are verified at startup; what they find is
+## collected in %S_SEAL_STATE_PROBLEMS and breaks the seal here. Without
+## this, a tool environment that had been updated, or a frozen database
+## that could not be used (the run then falls back to the live one), gave a
+## warning in the log while the report still said SEAL VERIFIED.
 sub _verify_config_seal {
+    my $r = _verify_config_seal_files(@_);
+    return $r unless %S_SEAL_STATE_PROBLEMS && ref $r eq 'HASH' && ( $r->{status} // "" ) =~ /^SEAL VERIFIED/;
+    my @m = map { "  $_" } sort keys %S_SEAL_STATE_PROBLEMS;
+    my $detail = "MISMATCHES:\n" . join( "\n", @m );
+    log_message( "WARNING: Config seal [" . ( $r->{name} // "?" ) . "] is BROKEN -- the installation is not what the seal describes:\n$detail", "red" )
+        unless ( $S_SEAL_STATE_LOGGED // "" ) eq $detail;
+    $S_SEAL_STATE_LOGGED = $detail;
+    # kept, so that the places that read $S_SEAL_RESULT directly agree
+    return $S_SEAL_RESULT = { %$r, status => "SEAL BROKEN", detail => $detail, mismatches => \@m, overrides => [] };
+}
+
+sub _verify_config_seal_files {
     my ($seal_path, $cfg_path, $db_path, $prog_path) = @_;
     return $S_SEAL_RESULT if $S_SEAL_RESULT;
 
@@ -34481,6 +34531,10 @@ sub _cmd_generate_seal {
         next unless ($R_cfg->{$tool}{enabled} // 1);
         push @envs_to_snap, { tool => $tool, env => $env };
     }
+    # The pipeline's own environment belongs to no tool section, and was left
+    # out: Perl, its modules and the Python that hashes the cgMLST alleles
+    # could change under a seal without the seal noticing.
+    push @envs_to_snap, { tool => "pipeline", env => $PIPELINE_CONDA_ENV } unless $seen_env{$PIPELINE_CONDA_ENV}++;
 
     my $created = strftime("%Y-%m-%d %H:%M:%S", localtime);
 
@@ -39818,7 +39872,18 @@ sub log_tool_versions {
 
 
     my @tool_array;
-            
+
+    # The pipeline's own environment (no tool section names it): recorded
+    # with the run like the tools' environments.
+    if ( $logdir ne "" ) {
+        my $f = "$logdir/versioning_explicit/$PIPELINE_CONDA_ENV.explicit";
+        if ( !-e $f ) {
+            my $text = qx(conda list --explicit -n $PIPELINE_CONDA_ENV 2>/dev/null);
+            $text = "" if $? != 0;
+            if ( open my $fh, ">", $f ) { print {$fh} $text; close $fh; }
+        }
+    }
+
     for my $tool (sort keys %$R_cfg) {
         # Defensive, explicit skip for the non-tool top-level sections (these
         # also get skipped implicitly below since they have no "env" key, but

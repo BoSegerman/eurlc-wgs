@@ -22,9 +22,9 @@ Sweden, which is the **European Union Reference Laboratory for
 the methods and cgMLST schemas used by the EU network of national
 reference laboratories.
 
-> **Status: beta (0.1.0-beta1).** The pipeline is in active development and
-> early external testing. Settings and output formats may still change
-> between versions. Feedback is very welcome.
+> **Status: release candidate (1.0.0-rc1).** Feature-frozen and under test
+> before version 1.0.0; only corrections are made. Feedback is very welcome.
+> What has changed is in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -37,7 +37,7 @@ For each sample:
 | Read QC and trimming | built-in prescan, fastp |
 | Species and contamination | Kraken2 + Bracken, Mash screen |
 | Downsampling of very deep samples | BBMap |
-| Assembly, best result chosen automatically | SPAdes, SKESA (optional: Shovill, Unicycler) |
+| Assembly, best result chosen automatically | SPAdes, SKESA (optional: Shovill) |
 | Assembly QC | QUAST, Bowtie2 remapping |
 | MLST | FastMLST, mlst |
 | AMR genes and point mutations | AMRFinderPlus, ResFinder |

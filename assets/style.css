@@ -485,3 +485,25 @@ table {
 }
 
 
+
+/* ----------------------------------------
+   REPORTABLE (sample overview)
+   A small label, quieter than the QC status cell beside it: the QC
+   column is the one that should catch the eye. The reason is the title
+   (tooltip) of the label.
+---------------------------------------- */
+.rep-pill {
+    display: inline-block;
+    padding: 1px 9px;
+    border-radius: 10px;
+    font-size: 0.9em;
+    font-weight: bold;
+    white-space: nowrap;
+    cursor: default;
+}
+.rep-yes     { background-color: #e8f5e9; color: #1b5e20; }
+.rep-assess  { background-color: #fff3e0; color: #a14a00; }
+.rep-no      { background-color: #fdecea; color: #a31515; }
+.rep-outside { background-color: #eceff1; color: #455a64; }
+.rep-unknown { background-color: transparent; color: #777; font-weight: normal; }
+.rep-legend  { font-size: 0.85em; color: #555; margin: 4px 0 0 0; }

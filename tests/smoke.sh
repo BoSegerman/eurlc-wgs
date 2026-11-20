@@ -374,19 +374,28 @@ check "  ... SISTR QC WARNING but SeqSero2 reported and fine: no tool flag" \
 check "  ... fastMLST: clonal_complex, CC, Lineage are not loci; two alleles and '-' are kept" \
       bash -c "[[ \$(grep -c 'loci=7' <<<'$FM') -eq 4 ]] && grep -q 'cc=ST-11 complex' <<<'$FM' && grep -q 'allele_aroC=5|7,allele_dnaN=-' <<<'$FM'"
 
+SA=$(perl "$(dirname "$0")/unit/species_agreement.pl" "$SCRIPT" 2>&1)
+check "species: Kraken2's species among Mash screen's is agreement, also when Mash screen names two" \
+      bash -c "grep -q '^same	0	$' <<<'$SA' && grep -q '^mash-two	0	$' <<<'$SA' && grep -q '^mash-two-other	0	$' <<<'$SA'"
+check "  ... another species is a disagreement, and says what each gave" \
+      bash -c "grep -q '^disagree	1	Mash screen says Campylobacter upsaliensis, Kraken2 says Campylobacter helveticus$' <<<'$SA' && grep -q '^disagree-target	1	' <<<'$SA'"
+check "  ... not judged when one of them gave no species" \
+      bash -c "grep -q '^no-mash	n/a	$' <<<'$SA' && grep -q '^mash-na	n/a	$' <<<'$SA' && grep -q '^no-kraken	n/a	$' <<<'$SA' && grep -q '^no-species	n/a	$' <<<'$SA'"
+check "  ... and the default is CRITICAL" grep -q 'critical_taxonomy_species_disagree *=> *">0"' "$SCRIPT"
+
 # --- validated species of the configuration ---------------------------------
 echo "Validated species"
 VS=$(perl "$(dirname "$0")/unit/validated_scope.pl" "$SCRIPT" 2>&1)
 check "samples of declared species are validated, others outside and not reportable" \
-      bash -c "grep -q '^jejuni	validated	yes		Yes$' <<<'$VS' && grep -q '^coli	validated	yes		Yes$' <<<'$VS' && grep -q '^lari	outside	no	species outside the validated species of this configuration (Campylobacter lari)	No -- outside validated species$' <<<'$VS'"
+      bash -c "grep -q '^jejuni	validated	yes		Yes$' <<<'$VS' && grep -q '^coli	validated	yes		Yes$' <<<'$VS' && grep -q '^lari	outside	no	species outside the validated species of this configuration (Campylobacter lari)	Not validated$' <<<'$VS'"
 check "  ... a genus covers its species; a failed sample keeps its QC reason; no species call: not reportable" \
       bash -c "grep -q '^genus-lari	validated	yes		Yes$' <<<'$VS' && grep -q '^lari-fail	outside	no	species outside the validated species of this configuration (Campylobacter lari); QC FAIL' <<<'$VS' && grep -q '^nospecies	undetermined	no	species not determined (validated species are declared for this configuration)	No$' <<<'$VS'"
 check "  ... nothing declared: nothing is marked" bash -c "grep -q '^undeclared		yes		Yes$' <<<'$VS'"
-check "report: CRITICAL is shown as needing assessment, FAIL as not reportable" \
-      bash -c "grep -q '^critical		no	QC CRITICAL	No -- needs assessment$' <<<'$VS' && grep -q '^fail		no	QC FAIL	No$' <<<'$VS'"
+check "report: CRITICAL is shown as Assess, FAIL as No" \
+      bash -c "grep -q '^critical		no	QC CRITICAL	Assess$' <<<'$VS' && grep -q '^fail		no	QC FAIL	No$' <<<'$VS'"
 run "$T/vs1.out" datadir="$D" outdir="$T/out_vs" --assume-yes disable=chewbbaca validated_species="Campylobacter jejuni, Campylobacter coli"
 check "main report: the sample table has a Reportable column" \
-      bash -c "grep -q '>Reportable</th>' '$T/out_vs/report/main_report.html' && grep -q '<td class=\"qc-[a-z]*\" title=\"[^\"]*\">\(Yes\|No\)' '$T/out_vs/report/main_report.html'"
+      bash -c "grep -q '>Reportable</th>' '$T/out_vs/report/main_report.html' && grep -q '<span class=\"rep-pill rep-[a-z]*\" title=\"[^\"]*\">\(Yes\|No\)</span>' '$T/out_vs/report/main_report.html' && grep -q 'class=\"rep-legend\"' '$T/out_vs/report/main_report.html' && grep -q 'rep-pill' '$T/out_vs/report/assets/style.css'"
 check "run started from another folder: the tools' output goes to the output folder's log, not <current folder>/eurlc-wgs/log" \
       bash -c "grep -q '$T/out_vs/log/stdout.txt' '$T/out_vs/log/bash_commands.log' && ! grep -q '$T/work/eurlc-wgs/log/std' '$T/out_vs/log/bash_commands.log'"
 check "run summary: an abandoned sample is counted as ABANDONED, not as QC PASS" \
@@ -403,6 +412,13 @@ check "  ... an updated conda environment breaks it, and says which" \
 check "  ... a frozen database that is not in use breaks it (also a seal with overrides)" \
       bash -c "grep -q '^db-live	SEAL VERIFIED WITH OVERRIDES	SEAL BROKEN	SEAL BROKEN	database kraken2: the frozen version is not in use' <<<'$SS'"
 check "  ... a seal already broken keeps its own reasons" bash -c "grep -q '^files-changed	SEAL BROKEN	SEAL BROKEN	SEAL BROKEN	eurlc_wgs_config: changed$' <<<'$SS'"
+EL=$(perl "$(dirname "$0")/unit/env_lists.pl" "$SCRIPT" 2>&1)
+check "package lists: a missing environment is made from its list, a matching one is left alone" \
+      bash -c "grep -q '^missing-with-list	1	create-from-list	yes$' <<<'$EL' && grep -q '^same-as-list	1	nothing	yes$' <<<'$EL'"
+check "  ... one that differs is removed and made again; not without permission" \
+      bash -c "grep -q '^differs-from-list	1	remove,create-from-list	yes$' <<<'$EL' && grep -q '^differs-not-allowed	1	nothing	no$' <<<'$EL'"
+check "  ... without a list the YML file is used, as before" bash -c "grep -q '^no-list	1	create-from-yml	-$' <<<'$EL'"
+check "install.sh: shell syntax" bash -n "$(dirname "$0")/../install.sh"
 check "--version prints 1.0.0-rc1" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc1'"
 
 # --- eurlc-cgmlst-compare -------------------------------------------------

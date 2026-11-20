@@ -1160,6 +1160,13 @@ my %QC_MEASURE_DEF = (
         path     => [qw(taxonomy species_score)],
         label    => 'Species determination score',
     },
+    # the two species methods against each other (species_agreement_value, in evaluate_sample_qc)
+    taxonomy_species_disagree => {
+        category => 'taxonomy',
+        path     => [qw(taxonomy species_disagree)],
+        label    => 'Kraken2 and Mash screen give different species (1 = yes)',
+        flag     => "Species: Kraken2 and Mash screen disagree",
+    },
 
     contamination_species_level => {
         category => 'contamination',
@@ -2193,6 +2200,12 @@ $rundata{config}{defaults} = {
             # Typing that did not work (Nov 2026): a warning, not a rejection --
             # the other results stay valid. To be reviewed per species with
             # more data (E. coli, Listeria).
+            # The two species methods disagree (Nov 2026): the species Kraken2
+            # reports is not among those Mash screen finds. The species is a
+            # reported result, so this needs a bioinformatician: CRITICAL.
+            # (Mash screen finding a second species as well is not this: that
+            # is contamination, and the contamination measures judge it.)
+            critical_taxonomy_species_disagree     => ">0",
             warning_typing_mlst_incomplete_alleles => ">0",
             warning_typing_mlst_st_disagree        => ">0",
             warning_typing_serotype_missing        => ">0",
@@ -9158,8 +9171,12 @@ sub postprocess_mash_screen {
     log_message("NOTICE: Sample $sample_name mash screen species: $species [Score=$hitscore, identity=$identity shared hashes=$shared/$outof]", $color);
 
     if ($species ne "n/a" && $species ne ($R_samples->[$samplenr]{main_results}{taxonomy}{species} // "n/a")) {
+        my $kraken = $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "n/a";
+        my @found  = split /\s*,\s*/, $species;
         log_message(
-            "WARNING: Sample $sample_name: species check does not match Kraken2: [$species<>$R_samples->[$samplenr]{main_results}{taxonomy}{species}]",
+            ( grep { lc $_ eq lc $kraken } @found )
+              ? "WARNING: Sample $sample_name: Mash screen finds " . join( " and ", @found ) . "; Kraken2 says $kraken (more than one species: see the contamination measures)"
+              : "WARNING: Sample $sample_name: the species methods disagree: Mash screen says " . join( " and ", @found ) . ", Kraken2 says $kraken",
             "red"
         );
         push @{ $R_samples->[$samplenr]{main_results}{taxonomy}{species_warnings} },
@@ -19134,6 +19151,15 @@ if ( is_resume_mode() && ( $rundata{config}{overrides} // "" ) !~ /chewbbaca_mod
     prepare_rerun();   # rerun=<steps>: remove their results + dependents' (resume mode only)
     plan_read_regeneration();   # after a cleanup: re-create reads only where still needed
     log_message(sprintf("NOTICE: Validating pipeline configuration: done (%.1f s)", time() - $t0));
+    # Shovill does not give the same assembly twice (planned §49).
+    log_message("NOTICE: Shovill is switched on. Its assembly is not reproducible: two runs on the same reads, with the same settings, give "
+              . "assemblies that differ slightly. The typing results were the same in our tests, but a comparison with a reference run "
+              . "will report differences in the assembly.", "yellow")
+        if $R_cfg->{shovill}{enabled} && grep { $R_cfg->{$_}{enabled} } qw(shovill_spades shovill_skesa);
+    # CheckM runs, but nothing reads its result yet (planned §47).
+    log_message("NOTICE: CheckM is switched on. It is experimental in this version: completeness and contamination are written to the log and to "
+              . "results/qc/stage3_assemblies/CheckM*/.../checkm_results.tab, but are not shown in the reports and are not part of the QC status.", "yellow")
+        if $R_cfg->{checkm}{enabled};
 }
 
 # Dump the complete runstep dependency graph to the log immediately after
@@ -21111,6 +21137,65 @@ sub ensure_conda_tool {
 
         my %seen;
         @pkg_specs = grep { !$seen{$_}++ } @pkg_specs;
+    }
+
+    # ------------------------------------------------------------------
+    # A package list from a sealed installation (sealed_env_list): the
+    # environment is made from it, and one that already matches it is left
+    # as it is -- an update from the YML file would change it.
+    # ------------------------------------------------------------------
+
+    if ( ( my $list = sealed_env_list($env) ) ne "" ) {
+        my $want = explicit_list_fingerprint($list);
+        if ( !defined $want ) {
+            log_message("ERROR: The package list [$list] for conda env '$env' holds no packages -- remove it, or copy it again from the sealed installation", "red");
+            return 0;
+        }
+        if ( conda_env_exists($env) ) {
+            my $have = conda_env_fingerprint($env) // "";
+            if ( $have eq $want ) {
+                log_message("INFO: Conda env '$env' is as in the package list [$list]");
+                return 1 if validate_tool_installation($env, $toolname);
+                log_message("WARNING: Conda env '$env' matches its package list, but $toolname does not answer", "red");
+                return 0;
+            }
+            my $redo = ( $ASSUME_YES || $auto ) ? 1 : prompt_yes_no_yesstoall(
+                "Conda env '$env' differs from the package list of the sealed installation. Remove it and make it again from the list?", 0 );
+            unless ($redo) {
+                log_message("WARNING: Conda env '$env' differs from the package list [$list] -- left as it is; a config seal will not verify", "yellow");
+                return validate_tool_installation($env, $toolname) ? 1 : 0;
+            }
+            log_message("NOTICE: Removing conda env '$env' (differs from the package list)");
+            system( "conda", "env", "remove", "-y", "-n", $env );
+            if ( $? != 0 ) {
+                log_message("ERROR: Could not remove conda env '$env'", "red");
+                return 0;
+            }
+            undef $S_CONDA_ENVS;
+        }
+        elsif ( !( $ASSUME_YES || $auto ) && !prompt_yes_no_yesstoall( "Conda env '$env' for $toolname is missing. Create it?", 0 ) ) {
+            log_message("ERROR: Required tool $toolname not installed", "red");
+            return 0;
+        }
+        my @cmd = ( "conda", "create", "-y", "-n", $env, "--file", $list );
+        log_message("NOTICE: Creating conda env '$env' from the package list [$list]");
+        log_message("DEBUG: " . join( " ", @cmd ));
+        system(@cmd);
+        if ( $? != 0 ) {
+            log_message("ERROR: Conda environment creation failed for $toolname from the package list [$list] "
+                      . "(a package that can no longer be downloaded? the list is for linux-64)", "red");
+            return 0;
+        }
+        undef $S_CONDA_ENVS;
+        my $got = conda_env_fingerprint($env) // "";
+        log_message("WARNING: Conda env '$env' was made from its package list but has another fingerprint ($got, expected $want)", "yellow")
+            if $got ne $want;
+        if ( validate_tool_installation($env, $toolname) ) {
+            log_message("NOTICE: $toolname installed in $env, as in the sealed installation", "green");
+            return 1;
+        }
+        log_message("ERROR: $toolname installed but validation failed", "red");
+        return 0;
     }
 
     # ------------------------------------------------------------------
@@ -23446,7 +23531,7 @@ sub main_report_section_sample_overview {
     $html .= "      <th class=\"sort-col\">Raw Q30 rate</th>\n";
     $html .= "      <th class=\"sort-col\">Q30+ Coverage</th>\n";
     $html .= "      <th class=\"sort-col\">QC</th>\n";
-    $html .= "      <th class=\"sort-col\" title=\"Can the results be reported? PASS and WARNING: yes. CRITICAL: only after assessment. FAIL, an abandoned sample, or a species outside the validated species: no.\">Reportable</th>\n";
+    $html .= "      <th class=\"sort-col\" title=\"Can the results be reported? Yes: QC PASS or WARNING. Assess: QC CRITICAL, a bioinformatician decides. No: QC FAIL or a sample that could not be analysed. Not validated: a species the configuration is not validated for. Hold the pointer over a value for the reason.\">Reportable</th>\n";
     $html .= "      <th>Reports</th>\n";   # Reports column not sortable
     $html .= "    </tr>\n";
     $html .= "  </thead>\n";
@@ -23463,6 +23548,10 @@ sub main_report_section_sample_overview {
 
     $html .= "  </tbody>\n";
     $html .= "</table>\n";
+    # the tooltips do not reach a printed report
+    $html .= "<p class=\"rep-legend\">Reportable: <b>Yes</b> = QC PASS or WARNING; <b>Assess</b> = QC CRITICAL, to be assessed by a bioinformatician; "
+           . "<b>No</b> = QC FAIL, or the sample could not be analysed; <b>Not validated</b> = a species the configuration is not validated for. "
+           . "The reason is shown when the pointer is held over the value, and in the sample's own report.</p>\n";
 
     return $html;
 }
@@ -23924,28 +24013,34 @@ sub build_overview_qc_cell {
 }
 
 ## Reportable (set_reportable): what is shown, a css class and the reason.
-## "Yes"; "No"; for a CRITICAL sample "No -- needs assessment" (a
-## bioinformatician may approve it); for a species outside the validated
-## species of the configuration "No -- outside validated species".
+##   Yes            reportable
+##   Assess         QC status CRITICAL: not reportable as it is, but a
+##                  bioinformatician may approve it
+##   No             FAIL, abandoned, a failed step, or no species call
+##   Not validated  the species is outside the validated species of the
+##                  configuration (grey: the sample is not bad, the method
+##                  is not validated for it)
+## The words are short and the reason is the tooltip, so that the column
+## stays narrow and quieter than the QC status beside it.
 sub reportable_display {
     my ($sample) = @_;
     my $rep = $sample->{main_results}{reportable};
-    return ( "n/a", "qc-unknown", "" ) unless ref $rep eq 'HASH' && defined $rep->{value};
+    return ( "n/a", "rep-unknown", "" ) unless ref $rep eq 'HASH' && defined $rep->{value};
     my $why = join( "; ", grep { defined $_ && $_ ne "" } $rep->{reason}, $rep->{note} );
-    return ( "Yes", "qc-good", $why ) if $rep->{value} eq "yes";
-    return ( "No -- outside validated species", "qc-bad", $why )
+    return ( "Yes", "rep-yes", $why ) if $rep->{value} eq "yes";
+    return ( "Not validated", "rep-outside", $why )
         if ( $sample->{main_results}{validated_scope} // "" ) eq "outside";
     my $status = uc( $sample->{report_issues}{summary}{status} // $sample->{qc}{status} // "" );
-    return ( "No -- needs assessment", "qc-critical", $why )
+    return ( "Assess", "rep-assess", $why eq "" ? "QC CRITICAL: to be assessed by a bioinformatician" : "$why -- to be assessed by a bioinformatician" )
         if $status eq "CRITICAL" && !$sample->{fatal_error} && !@{ $sample->{failed_steps} // [] };
-    return ( "No", "qc-bad", $why );
+    return ( "No", "rep-no", $why );
 }
 
 sub build_overview_reportable_cell {
     my ($sample, $H) = @_;
     my ( $text, $class, $why ) = reportable_display($sample);
     my $esc = $H->{esc};
-    return qq{      <td class="$class" title="} . $esc->($why) . qq{">} . $esc->($text) . qq{</td>\n};
+    return qq{      <td style="text-align:center"><span class="rep-pill $class" title="} . $esc->($why) . qq{">} . $esc->($text) . qq{</span></td>\n};
 }
 
 sub build_overview_reports_cell {
@@ -25149,6 +25244,32 @@ sub typing_qc_values {
     }
 }
 
+## Do the two species methods agree? Sets main_results.taxonomy.species_disagree:
+##   0    the species Kraken2/Bracken reports is among those Mash screen finds
+##   1    it is not (species_disagree_detail says what each gave)
+##   n/a  one of them gave no species (no Mash screen for FASTA input; or the
+##        reported species is Mash screen's own, taken when Kraken2 gave none)
+## Mash screen may name several species (a mixed sample): that the reported
+## one is among them is agreement here; the second species is contamination,
+## which has its own measures.
+sub species_agreement_value {
+    my ($samplenr) = @_;
+    my $s   = $R_samples->[$samplenr];
+    my $tax = $s->{main_results}{taxonomy} //= {};
+    delete $tax->{species_disagree_detail};
+    $tax->{species_disagree} = "n/a";
+    my $norm = sub { my $x = lc( $_[0] // "" ); $x =~ s/^\s+|\s+$//g; $x =~ s/\s+/ /g; $x };
+    my $reported = $norm->( $tax->{species} );
+    my $mash     = ref $s->{results}{mash_screen} eq 'HASH' && ref $s->{results}{mash_screen}{main} eq 'HASH'
+                 ? ( $s->{results}{mash_screen}{main}{species} // "" ) : "";
+    my @mash = grep { $_ ne "" && $_ ne "n/a" } map { $norm->($_) } split /,/, $mash;
+    return if $reported eq "" || $reported eq "n/a" || !@mash;
+    return if lc( $tax->{species_method} // "" ) eq "mash-screen";
+    if ( grep { $_ eq $reported } @mash ) { $tax->{species_disagree} = 0; return; }
+    $tax->{species_disagree} = 1;
+    $tax->{species_disagree_detail} = "Mash screen says $mash, Kraken2 says $tax->{species}";
+}
+
 sub evaluate_sample_qc {
     my ($samplenr) = @_;
 
@@ -25161,6 +25282,9 @@ sub evaluate_sample_qc {
 
     # typing that did not work (MLST, serotype)
     typing_qc_values($samplenr);
+
+    # the two species methods against each other
+    species_agreement_value($samplenr);
 
     # re-mapping measures for runs analysed before they existed
     remap_qc_values($samplenr) if !exists $R_samples->[$samplenr]{main_results}{remap}
@@ -32812,6 +32936,71 @@ sub conda_env_fingerprint {
     return Digest::MD5::md5_hex(join("", @pkg_lines));
 }
 
+## Package lists of a sealed installation ("lock files").
+##
+## An environment made from a YML file gets whatever builds of the tool's
+## dependencies are current that day, so two computers installed on
+## different days have different environments -- and the seal, which holds a
+## fingerprint of every environment, cannot be verified on the second one.
+## --generate-seal therefore also writes the exact package list of every
+## environment in the seal to <folder of the seal>/conda_envs/<env>.explicit
+## (conda list --explicit --md5). Where such a list exists, the environment
+## is created from it (conda create --file: the same builds, nothing is
+## solved) instead of from the YML file, and an existing environment that
+## already matches it is left alone. install.sh does the same for the
+## pipeline's own environment.
+
+sub sealed_env_list_dir {
+    my ($dir) = @_;   # given by --generate-seal; otherwise next to the seal
+    if ( !defined $dir || $dir eq "" ) {
+        ($dir) = map { dirname($_) } grep { defined $_ && m{/} } $R_cfg->{general}{seal}, $R_cfg->{general}{conda_manifest};
+        $dir //= peekdir("db") // "";
+    }
+    return $dir eq "" ? "" : "$dir/conda_envs";
+}
+
+# The package list for an environment, or "" when there is none.
+sub sealed_env_list {
+    my ($env) = @_;
+    my $dir = sealed_env_list_dir();
+    return "" if $dir eq "" || !defined $env || $env eq "";
+    my $f = "$dir/$env.explicit";
+    return -s $f ? $f : "";
+}
+
+# The fingerprint an environment made from a package list will have: the
+# same as conda_env_fingerprint() gives for it (the #md5 that --md5 adds to
+# each line is not part of it).
+sub explicit_list_fingerprint {
+    my ($file) = @_;
+    open( my $fh, '<', $file ) or return undef;
+    my @lines = <$fh>;
+    close $fh;
+    s/\r?\n\z/\n/ for @lines;
+    my @pkg = sort grep { /^\@EXPLICIT$|^https?:/ } map { s/#[0-9a-fA-F]+\s*$/\n/r } @lines;
+    return undef unless grep { /^https?:/ } @pkg;
+    return Digest::MD5::md5_hex( join( "", @pkg ) );
+}
+
+# Write the package lists of the given environments. Returns the number written.
+sub write_sealed_env_lists {
+    my ($where, @envs) = @_;
+    my $dir = sealed_env_list_dir($where);
+    return 0 if $dir eq "";
+    File::Path::make_path($dir) unless -d $dir;
+    my $n = 0;
+    for my $env (@envs) {
+        my $text = qx(conda list --explicit --md5 -n "$env" 2>/dev/null);
+        if ( $? != 0 || $text !~ /^https?:/m ) {
+            log_message("WARNING: Could not write the package list of conda environment [$env]", "yellow");
+            next;
+        }
+        if ( open( my $fh, '>', "$dir/$env.explicit" ) ) { print {$fh} $text; close $fh; $n++; }
+        else { log_message("WARNING: Cannot write [$dir/$env.explicit]: $!", "yellow"); }
+    }
+    return $n;
+}
+
 # Verify conda environments against the program manifest.
 # Logs results to log/versioning_explicit/programs.log.
 # Returns number of environments with MISMATCH or ERROR status.
@@ -34547,6 +34736,7 @@ sub _cmd_generate_seal {
     print $mfh "# Do not edit by hand. Regenerate with: eurlc-wgs --generate-seal\n\n";
 
     my $snap_errors = 0;
+    my @listed_envs;
     for my $entry (sort { $a->{env} cmp $b->{env} } @envs_to_snap) {
         my ($tool, $env) = @{$entry}{qw(tool env)};
         my $fp = conda_env_fingerprint($env);
@@ -34555,6 +34745,7 @@ sub _cmd_generate_seal {
             print $mfh "explicit_list_md5 = $fp\n";
             print $mfh "tool              = $tool\n\n";
             log_message("NOTICE:   OK  $env");
+            push @listed_envs, $env;
         } else {
             log_message("WARNING: Could not fingerprint conda env [$env] (not installed?)", "yellow");
             print $mfh "[$env]\n";
@@ -34569,6 +34760,14 @@ sub _cmd_generate_seal {
     if ($snap_errors) {
         log_message("WARNING: $snap_errors environment(s) could not be fingerprinted -- "
                    . "install missing tools before sealing.", "yellow");
+    }
+
+    # The exact package list of every environment in the seal, so that the
+    # same environments can be made on another computer (see sealed_env_list).
+    {
+        my $n = write_sealed_env_lists( dirname($manifest_path), @listed_envs );
+        log_message("NOTICE: Package lists of $n conda environment(s) written to " . sealed_env_list_dir( dirname($manifest_path) )
+                  . " -- copy this folder with the seal; --setup and install.sh then make the same environments on another computer");
     }
 
     # ── 3. Fingerprint all three config files → config_seal.ini ─────────────

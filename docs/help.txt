@@ -96,7 +96,12 @@ INSTALLATION AND MAINTENANCE
                                  version
     --generate-seal[=<name>]     Seal the configuration (settings, frozen
                                  databases, tool environments, pipeline
-                                 version)
+                                 version). Also writes the exact package
+                                 list of every environment to
+                                 <database>/conda_envs/; with those lists
+                                 in the database folder, install.sh and
+                                 --setup make the same environments on
+                                 another computer
     --installation-check[=<set>[,<set>]]
                                  Check this installation: run the check set(s)
                                  in <database>/installation_check/ and compare

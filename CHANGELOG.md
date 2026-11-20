@@ -17,13 +17,32 @@ Release candidate for 1.0.0. Feature-frozen: only corrections from here to
   configuration is validated for. Samples of other species are analysed,
   but marked and not reportable. A config seal covers the setting.
 - **Reportable in the reports**: the sample table of the main report has a
-  column *Reportable* (`Yes`, `No`, `No -- needs assessment`,
-  `No -- outside validated species`), and each sample report a line with
-  the reason. New column `validated_scope` in
+  column *Reportable* (`Yes`, `Assess`, `No`, `Not validated`; the reason
+  is the tooltip), and each sample report a line with the reason. New column `validated_scope` in
   `report/tables/eurlc_observed_results.tsv` and in `log/run_status.json`.
+
+- **The same installation on another computer**: `--generate-seal` writes
+  the exact package list of every conda environment to
+  `<database>/conda_envs/`. With those lists in the database folder,
+  `install.sh` and `--setup` make the environments from them, so that a
+  seal made on one computer verifies on another. `install.sh` has a new
+  option `--database=DIR`.
+
+- **QC: the two species methods against each other.** When the species
+  Kraken2 reports is not among those Mash screen finds, the sample is
+  CRITICAL (`critical_taxonomy_species_disagree`). Before, the disagreement
+  was only a line in the log. A reference fingerprint made with an earlier
+  version does not have this measure, so a comparison reports it as a
+  difference once: make the reference again.
 
 ### Changed
 
+- The log message for a species difference between Mash screen and
+  Kraken2 says in words what each found.
+- CheckM (`enable=checkm`) now says at start that it is experimental: its
+  results are not shown in the reports.
+- With Shovill switched on, the pipeline says at start that its assemblies
+  are not reproducible (Known limitations in the manual).
 - **A config seal now also breaks when the installation is not what its
   files describe**: a conda environment that differs from
   `conda_manifest.ini`, or a frozen database that could not be used.

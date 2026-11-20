@@ -13,6 +13,14 @@ set -euo pipefail
 #   ./install.sh --optional         include optional tool environments in setup
 #   ./install.sh --assume-yes       non-interactive (for scripts/CI)
 #   ./install.sh --resources-only   reinstall scripts/templates/assets only
+#   ./install.sh --database=DIR     the database folder (default ~/eurlc-wgs_db)
+#
+# A database folder from a sealed installation holds the exact package list
+# of every conda environment (DIR/conda_envs/<env>.explicit, written by
+# eurlc-wgs --generate-seal). When the list for the main environment is
+# there, the environment is made from it instead of from the YML file, so
+# that it is the same as on the computer where the seal was made; the tool
+# environments are then made from their lists by eurlc-wgs --setup.
 #
 # Expected project layout:
 #   install.sh
@@ -43,6 +51,7 @@ INSTALL_OPTIONAL=0
 ASSUME_YES=0
 RESOURCES_ONLY=0
 UNINSTALL=0
+DB_DIR="${HOME}/eurlc-wgs_db"
 
 # -----------------------------------------------------------------------------
 # Parse options
@@ -61,6 +70,8 @@ for arg in "$@"; do
             RUN_SETUP=0 ;;
         --uninstall)
             UNINSTALL=1 ;;
+        --database=*)
+            DB_DIR="${arg#--database=}" ;;
         -h|--help)
             echo "Usage:"
             echo "  ./install.sh                   install eurlc-wgs + run setup"
@@ -69,6 +80,9 @@ for arg in "$@"; do
             echo "  ./install.sh --assume-yes      non-interactive"
             echo "  ./install.sh --resources-only  reinstall scripts/templates/assets only"
             echo "  ./install.sh --uninstall       remove all eurlc-wgs environments and resources"
+            echo "  ./install.sh --database=DIR    the database folder (default ~/eurlc-wgs_db); with the"
+            echo "                                 package lists of a sealed installation in DIR/conda_envs,"
+            echo "                                 the environments are made from them"
             exit 0 ;;
         *)
             echo "ERROR: Unknown option: $arg"
@@ -157,7 +171,28 @@ if [[ "${RESOURCES_ONLY}" -eq 0 ]]; then
     echo ">>> Installing main environment: ${MAIN_ENV}"
     echo ">>> YML: ${MAIN_YML}"
 
-    if conda env list | awk 'NF > 1 {print $1}' | grep -qx "${MAIN_ENV}"; then
+    # The fingerprint eurlc-wgs gives an environment or a package list:
+    # MD5 of the sorted package lines (conda_env_fingerprint in bin/eurlc-wgs).
+    env_fingerprint()  { conda list --explicit -n "$1" 2>/dev/null | grep -E '^@EXPLICIT$|^https?:' | LC_ALL=C sort | md5sum | cut -d' ' -f1; }
+    list_fingerprint() { sed -E 's/#[0-9a-fA-F]+[[:space:]]*$//' "$1" | tr -d '\r' | grep -E '^@EXPLICIT$|^https?:' | LC_ALL=C sort | md5sum | cut -d' ' -f1; }
+
+    MAIN_LIST="${DB_DIR}/conda_envs/${MAIN_ENV}.explicit"
+    MAIN_EXISTS=0
+    conda env list | awk 'NF > 1 {print $1}' | grep -qx "${MAIN_ENV}" && MAIN_EXISTS=1
+
+    if [[ -s "${MAIN_LIST}" ]]; then
+        echo ">>> Package list of a sealed installation found: ${MAIN_LIST}"
+        if [[ "${MAIN_EXISTS}" -eq 1 && "$(env_fingerprint "${MAIN_ENV}")" == "$(list_fingerprint "${MAIN_LIST}")" ]]; then
+            echo ">>> Environment exists and is as in the package list."
+        else
+            if [[ "${MAIN_EXISTS}" -eq 1 ]]; then
+                echo ">>> Environment exists but differs from the package list: removing it..."
+                conda env remove -n "${MAIN_ENV}" -y
+            fi
+            echo ">>> Creating environment from the package list..."
+            conda create -y -n "${MAIN_ENV}" --file "${MAIN_LIST}"
+        fi
+    elif [[ "${MAIN_EXISTS}" -eq 1 ]]; then
         echo ">>> Environment exists, updating..."
         "${CONDA_BIN}" env update -n "${MAIN_ENV}" -f "${MAIN_YML}" --prune
     else
@@ -360,6 +395,7 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     # Always add --assume-yes when called from install.sh: conda run has no
     # terminal so interactive prompts would hang indefinitely.
     SETUP_ARGS="--setup --assume-yes"
+    [[ "${DB_DIR}" != "${HOME}/eurlc-wgs_db" ]] && SETUP_ARGS="${SETUP_ARGS} database=${DB_DIR}"
     [[ "${INSTALL_OPTIONAL}" -eq 1 ]] && SETUP_ARGS="${SETUP_ARGS} --optional"
 
     # Run setup from HOME to avoid the pipeline treating the source

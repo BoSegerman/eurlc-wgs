@@ -100,7 +100,7 @@ takes a while.
 | `--no-setup` | Install the program only; run `eurlc-wgs --setup` yourself later |
 | `--assume-yes` | No questions |
 | `--resources-only` | Reinstall the program, templates and assets only (after `git pull`) |
-| `--optional` | Also install the tools that are off by default (Bakta, CheckM, ...) |
+| `--optional` | Also install the tools that are off by default (Bakta, CheckM, ...). CheckM is experimental, see [section 13](#13-known-limitations) |
 | `--uninstall` | Remove all `eurlc-wgs*` environments and shared files (not the database folder) |
 
 Tool versions come from the environment files in `envs/`; every
@@ -376,6 +376,7 @@ What is checked by default:
 | Share of bases ≥ Q30 (raw reads) | warning < 80 %, critical < 70 %, fail < 50 % |
 | Depth counting Q30 bases, after trimming | fail < 30× |
 | Largest other species / other genus in the reads | fail > 5 % |
+| The two species methods (Kraken2 and Mash screen) | critical when the species Kraken2 reports is not among those Mash screen finds. Mash screen finding a second species as well is contamination, judged by the measures above |
 | Mean read length after trimming | warning < 50 bp |
 | Assembly size (*C. jejuni*) | warning outside 1.56–1.98 Mb, critical outside 1.40–2.30 Mb, fail outside 1.37–2.60 Mb |
 | Assembly size (*C. coli*) | warning outside 1.56–2.06 Mb, critical outside 1.40–2.30 Mb, fail outside 1.37–2.60 Mb |
@@ -412,11 +413,12 @@ sample's own report a line with the reason:
 | Reportable | When |
 |---|---|
 | Yes | QC status PASS or WARNING |
-| No -- needs assessment | QC status CRITICAL: not reportable as it is, but a bioinformatician may approve it after looking at the details |
+| Assess | QC status CRITICAL: not reportable as it is, but a bioinformatician may approve it after looking at the details |
 | No | QC status FAIL, an abandoned sample, or a step that failed |
-| No -- outside validated species | The species is not one of the configuration's validated species (below) |
+| Not validated | The species is not one of the configuration's validated species (below). Shown in grey: the sample is not bad, the method is not validated for it |
 
-Hold the pointer over the cell for the reason. The same verdict is in
+Hold the pointer over the value for the reason; it is also written out in
+the sample's own report. The same verdict is in
 `report/tables/eurlc_observed_results.tsv` (columns `reportable`,
 `reportable_reason`, `validated_scope`) and in the results fingerprint.
 
@@ -1051,6 +1053,7 @@ correct one.
 | `species_scope` | the four main species | Which species' tools are installed and run |
 | `validated_species` | empty | The species the configuration is validated for; samples of other species are marked and not reportable ([section 6](#can-the-results-be-reported)) |
 | `main_assembly` | `fewest_contigs500` | How the main assembly is chosen; or the name of an assembler |
+| `enable=shovill_spades` (or `shovill_skesa`) | off | Also assemble with Shovill. Not reproducible, see [section 13](#13-known-limitations) |
 | `maxdepth` (species) | 100 | Downsampling target; `0` = use all reads |
 | `targetbases_floor` (`[species__default]`) | 200000000 | When the genome size had to be estimated from the reads: downsample to no fewer bases than this (200 Mb), so that a too-low estimate cannot cut the data too hard |
 | `fatal_mindepth` (species) | 30 | Below this depth the sample is abandoned |
@@ -1066,7 +1069,8 @@ correct one.
 | *Salmonella* | SISTR, SeqSero2 | yes |
 | *E. coli*, *Shigella* | ECTyper, VirulenceFinder | yes |
 | *Listeria monocytogenes* | LisSero | yes |
-| any | PlasmidFinder, Bakta, CheckM | off; `enable=` |
+| any | PlasmidFinder, Bakta | off; `enable=` |
+| any | CheckM | off; `enable=checkm`. Experimental: its results are not shown in the reports ([section 13](#13-known-limitations)) |
 
 `species_scope` decides which of these are installed by `--setup` and run.
 To add a species permanently, add it to `species_scope` in the config
@@ -1187,6 +1191,35 @@ Settings that only steer the run (threads, time limits, `--resume`,
 `outdir=`, cleanup, ...) do not count as overrides. A new pipeline version
 breaks the seal: validate it and seal again.
 
+**The same installation on another computer.** A conda environment made
+from the pipeline's YML files gets the builds of the tool's dependencies
+that are current that day. Two computers installed on different days
+therefore have different environments, and a seal made on one is `SEAL
+BROKEN` on the other. To avoid that, `--generate-seal` also writes the
+exact package list of every environment in the seal to
+`~/eurlc-wgs_db/conda_envs/<environment>.explicit`. On the other computer:
+
+1. Copy the database folder of the sealed installation (config file,
+   `db_freeze.config`, `conda_manifest.ini`, `config_seal.ini`,
+   `conda_envs/`, `frozen_dbs/`, `installation_check/`) to
+   `~/eurlc-wgs_db`.
+2. Install the same pipeline version from its source folder:
+   `./install.sh` (add `--database=DIR` if the database folder is
+   elsewhere). `install.sh` makes the pipeline's own environment from its
+   package list, and `eurlc-wgs --setup` makes each tool's environment from
+   its list: the same builds, nothing is solved again. An environment
+   that is already there and differs from its list is removed and made
+   again (`--setup` asks first, unless started with `--assume-yes`); one
+   that matches is left as it is.
+3. `eurlc-wgs --installation-check` (below).
+
+The package lists are for Linux on x86-64 (also WSL), and the packages are
+downloaded from the conda channels when the environments are made. As long
+as the lists are in the database folder, `--setup` does not update those
+environments from the YML files. To change a sealed installation on
+purpose (a new tool version), remove the environment's list from
+`conda_envs/`, run `--setup`, verify, and seal again.
+
 **Check an installation.** On a computer where an approved version has
 been installed, one command shows that the installation works and gives the
 results it should:
@@ -1271,7 +1304,31 @@ This version, 1.0.0-rc1.
 - The genome size estimate from the reads (only for a species without a
   known size) runs before the status board starts and has no time limit.
 
+**Reproducibility**
+- With the default assemblers (SPAdes and SKESA), two runs on the same
+  reads with the same settings and number of threads give the same
+  results, down to the assembly file.
+- **Shovill does not.** With Shovill as the assembler, the assembly differs
+  slightly from run to run, also with identical settings and number of
+  threads (tested with Shovill and SPAdes on two *C. jejuni* samples: the
+  assembly file differed in every run). In those tests the species, MLST,
+  every cgMLST allele, the AMR genes and the QC status were the same, and
+  the coverage measures differed in the last decimal only. A comparison
+  with a reference run (`verify_reference`, `--installation-check`,
+  `eurlc-wgs-inspect compare`) will report the assembly as an unexpected
+  difference. The pipeline says so at start when Shovill is switched on.
+  Do not use Shovill in a configuration that is to be validated on
+  identical results.
+
 **Experimental**
+- CheckM (`enable=checkm`) runs, but is experimental in this version:
+  completeness and contamination are written to the log and to
+  `results/qc/stage3_assemblies/CheckM*/.../checkm_results.tab`, but are not
+  shown in the reports and are not part of the QC status. The pipeline's
+  own measures of the same things are the assembly size, the cgMLST call
+  rate and the contamination measures. It takes 3–4 minutes per sample and
+  14–16 GB of memory; the first use downloads its database (275 MB).
+  Tested with two *Campylobacter* samples only.
 - `eurlc-efsa-export` (files for a programmatic submission to the EFSA WGS
   System) is a preview and is not yet aligned with EFSA; it is off by
   default (`export_efsa=off`). See `docs/eurlc-efsa-export.md`.

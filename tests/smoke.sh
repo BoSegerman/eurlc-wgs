@@ -419,7 +419,9 @@ check "  ... one that differs is removed and made again; not without permission"
       bash -c "grep -q '^differs-from-list	1	remove,create-from-list	yes$' <<<'$EL' && grep -q '^differs-not-allowed	1	nothing	no$' <<<'$EL'"
 check "  ... without a list the YML file is used, as before" bash -c "grep -q '^no-list	1	create-from-yml	-$' <<<'$EL'"
 check "install.sh: shell syntax" bash -n "$(dirname "$0")/../install.sh"
-check "--version prints 1.0.0-rc1" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc1'"
+check "--version prints 1.0.0-rc2" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc2'"
+check "downsampling reads gzip with Java's own reader (unbgzip=f unpigz=f), paired and single" \
+      bash -c "[[ \$(grep -c '^       unbgzip=f unpigz=f \$' '$SCRIPT') == 2 ]]"
 
 # --- eurlc-cgmlst-compare -------------------------------------------------
 echo "cgMLST comparison"

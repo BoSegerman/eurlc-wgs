@@ -1,6 +1,6 @@
 # EURLC-WGS User Manual
 
-Version 1.0.0-rc1 · November 2026
+Version 1.0.0-rc2 · November 2026
 
 This manual is for the person who runs the pipeline: what it does, how to
 start it, where the results are and how to read them, and what to do when
@@ -1268,7 +1268,7 @@ a line `id<TAB><instrument ID><TAB><name>` in
 
 ## 13. Known limitations
 
-This version, 1.0.0-rc1.
+This version, 1.0.0-rc2.
 
 **Validation and thresholds**
 - The built-in QC thresholds are set from validation data for

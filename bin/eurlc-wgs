@@ -17,7 +17,7 @@
 use strict;
 use warnings;
  
-our $PIPELINE_VERSION = '1.0.0-rc1';
+our $PIPELINE_VERSION = '1.0.0-rc2';
 
 # The conda environment the pipeline itself runs in (envs/core/eurlc-wgs.yml):
 # Perl with its modules, and the Python that hashes the cgMLST alleles.
@@ -112,7 +112,7 @@ my %rundata;
 $rundata{pipeline_info} = {
     name        => "eurlc-wgs",
     version     => $PIPELINE_VERSION,
-    versiondate => "2026-11-20",
+    versiondate => "2026-11-21",
     author      => "Bo Segerman",
     contact     => "bo.segerman\@sva.se",
 };
@@ -7138,6 +7138,14 @@ $runstep{$runstep_name} = {
 };
 
 # TEMPLATES---------------------------------
+# unbgzip=f unpigz=f: read the gzip files with Java's own reader. By default
+# BBTools reads .gz with its multithreaded BGZF reader (or pigz/bgzip when
+# they are installed). With BBMap 40.02 that reader lost part of a line in
+# files written by fastp (many gzip members): reformat.sh then stopped with
+# "truncated or corrupt input" / "Mismatch between length of bases and
+# qualities" on a file that was intact (D1 run of 21 November 2026: 14 of 50
+# samples; unbgzip=f alone cures it). It also makes the step independent of
+# which decompressors happen to be installed.
 
 $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
     { conda run -n $R_cfg->{bbmap}->{env} --no-capture-output reformat.sh 
@@ -7147,6 +7155,7 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd(<<CMD);
        out2='__R2TD__' 
        samplebasestarget=__TARGETBASES__ 
        sampleseed=11 
+       unbgzip=f unpigz=f 
        1>>'__DIR-LOG__/stdout.txt' 
        2>'__RESULTFILE__' ;
       rc=\$? ; cat '__RESULTFILE__' >> '__DIR-LOG__/stderr.txt' ;
@@ -7160,6 +7169,7 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd(<<CMD);
        out='__SETD__' 
        samplebasestarget=__TARGETBASES__ 
        sampleseed=11 
+       unbgzip=f unpigz=f 
        1>>'__DIR-LOG__/stdout.txt' 
        2>'__RESULTFILE__' ;
       rc=\$? ; cat '__RESULTFILE__' >> '__DIR-LOG__/stderr.txt' ;
@@ -39176,7 +39186,7 @@ sub estimate_genomesize_from_kmers {
     # --- run bbduk to build k-mer histogram ---
     my $cmd = "conda run -n $R_cfg->{bbmap}->{env} --no-capture-output ".
               "bbduk.sh in='$r1' in2='$r2' ".
-              "k=$k khist='$khist' threads=$threads minkmerhits=1";
+              "k=$k khist='$khist' threads=$threads minkmerhits=1 unbgzip=f unpigz=f";
     system($cmd) == 0 or graceful_die("bbduk.sh failed ($?)");
 
     # --- parse histogram ---

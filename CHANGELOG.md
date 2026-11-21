@@ -2,6 +2,23 @@
 
 Changes that a user of the pipeline can notice. The newest version first.
 
+## 1.0.0-rc2 (21 November 2026)
+
+### Fixed
+
+- **Downsampling failed for some samples with "truncated or corrupt
+  input".** BBMap 40.02 reads `.gz` files with its own multithreaded
+  reader by default, and that reader lost part of a line in files written
+  by fastp, although the files were intact. `reformat.sh` is now run with
+  `unbgzip=f unpigz=f`, which makes it use Java's own gzip reader. In the
+  D1 validation dataset this stopped 14 of 50 samples.
+
+  Before 1.0.0-rc1 this failure was not noticed by the pipeline (the exit
+  code of `reformat.sh` was not the one that counted): a sample could go on
+  with only the reads that had been written before `reformat.sh` stopped.
+  Look for `truncated or corrupt input` in `log/stderr.txt` of earlier
+  runs made with BBMap 40.
+
 ## 1.0.0-rc1 (20 November 2026)
 
 Release candidate for 1.0.0. Feature-frozen: only corrections from here to

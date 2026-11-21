@@ -22,7 +22,7 @@ Sweden, which is the **European Union Reference Laboratory for
 the methods and cgMLST schemas used by the EU network of national
 reference laboratories.
 
-> **Status: release candidate (1.0.0-rc1).** Feature-frozen and under test
+> **Status: release candidate (1.0.0-rc2).** Feature-frozen and under test
 > before version 1.0.0; only corrections are made. Feedback is very welcome.
 > What has changed is in [CHANGELOG.md](CHANGELOG.md).
 

@@ -528,7 +528,9 @@ echo
 echo "Start with:"
 echo "    conda activate ${MAIN_ENV}"
 if [[ "${RUN_SETUP}" -eq 1 ]]; then
-    echo "    eurlc-wgs datadir=<folder with FASTQ files>"
+    echo "    cd <folder with FASTQ files>"
+    echo "    eurlc-wgs"
+    echo "(or from anywhere: eurlc-wgs datadir=<folder with FASTQ files>)"
     echo
     echo "Help:  eurlc-wgs --help   (user manual: docs/eurlc-wgs-user-manual.md)"
 else

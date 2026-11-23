@@ -127,8 +127,13 @@ of the user manual.
 
 ```bash
 conda activate eurlc-wgs
-eurlc-wgs datadir=/data/MiSeq_192
+cd /data/MiSeq_192          # the folder with your FASTQ files
+eurlc-wgs
 ```
+
+That is all: without arguments the pipeline analyses the folder you are
+standing in. From anywhere else, name the folder:
+`eurlc-wgs datadir=/data/MiSeq_192`.
 
 The pipeline finds the FASTQ/FASTA files in the folder, shows the samples
 it found, checks that every tool and database is in place, and runs the

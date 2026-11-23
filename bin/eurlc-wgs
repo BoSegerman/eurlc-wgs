@@ -34231,7 +34231,9 @@ sub _cmd_setup {
     if ( $basics_ok && @ready ) {
         log_message("NOTICE:");
         log_message("NOTICE: Run an analysis:");
-        log_message("NOTICE:     eurlc-wgs datadir=<folder with FASTQ files>");
+        log_message("NOTICE:     cd <folder with FASTQ files>");
+        log_message("NOTICE:     eurlc-wgs");
+        log_message("NOTICE:   (or from anywhere: eurlc-wgs datadir=<folder with FASTQ files>)");
     }
     unless ($sealed) {
         my @others = grep { my $k = $_; !grep { $_ eq $k } @scope_keys } map { $_->[0] } @SETUP_SPECIES;

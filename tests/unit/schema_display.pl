@@ -8,11 +8,11 @@ use File::Basename qw(basename dirname);
 use File::Path qw(make_path);
 my $src = do { local $/; open my $f, '<', $ARGV[0] or die "cannot read the script\n"; <$f> };
 my $code = "";
-for my $n (qw(clustering_schema_info clustering_schema_text clustering_schema_html _write_schema_ini)) {
+for my $n (qw(clustering_schema_info clustering_schema_text clustering_schema_html _write_schema_ini report_database_rows)) {
     my ($sub) = $src =~ /^(sub \Q$n\E \{.*?^\})/ms or die "sub $n not found\n";
     $code .= "$sub\n";
 }
-our $R_cfg;
+our ( $R_cfg, %rundata, $R_samples );
 sub fill_placeholders { $_[0] }
 sub encode_entities   { my $t = $_[0]; $t =~ s/&/&amp;/g; $t =~ s/</&lt;/g; $t }
 sub log_message       { }
@@ -45,6 +45,25 @@ for my $l ( 1 .. 4 ) { open my $o, '>', "$d/frozen/chewbbaca_CAMP/$md5b/l$l.fast
 { open my $o, '>', "$d/frozen/chewbbaca_CAMP/$md5b/filters/cg.txt" or die; print $o "l1\nl2\n"; close $o; }
 $R_cfg->{chewbbaca_schemas}{CAMP} = { path => "$d/schemas/CAMP", filter => "$d/schemas/CAMP/filters/cg.txt", version => "8" };
 print "frozen-live-path\t", clustering_schema_text( { schema => $md5b } ), "\n";
+
+# the "Database versions" table: resolved databases (with Bracken beside
+# Kraken2), the schemas of the clustering results, then databases inside
+# tool environments -- each once
+%rundata = (
+    provenance => { run => { db_versions => {
+        kraken2    => { fingerprint => "k" x 32, version => "Standard-8", status => "OK [FROZEN]", files => { a => 1, b => 2, c => 3 } },
+        mashscreen => { fingerprint => "m" x 32, version => "RefSeq sketch", status => "OK [LIVE]", files => { a => 1 } },
+    } } },
+    clustering => { results => [ { species => "Campylobacter jejuni", schema => $md5b }, { species => "Campylobacter coli", schema => $md5b },
+                                 { species => "Other species", schema => "live" } ] },
+);
+$R_samples = [ { main_results => { taxonomy => { species => "Campylobacter coli" } } } ];
+my $old = { Mashscreen => { md5 => "x", version_label => "old" }, mlst => { md5 => "l" x 32, version_label => "mlst db", file_date => "2026-11-12" } };
+my @all = report_database_rows( [ "Mashscreen", "mlst" ], $old, undef );
+print "dbrows-run\t", join( " / ", map { "$_->[0]=$_->[3]" } @all ), "\n";
+my @one = report_database_rows( [ "Mashscreen", "mlst" ], $old, 0 );
+print "dbrows-sample\t", join( " / ", map { $_->[0] } @one ), "\n";
+print "dbrows-schema\t", join( "|", @{ ( grep { $_->[0] =~ /^cgMLST schema CAMP/ } @all )[0] } ), "\n";
 
 # schema.ini: plain ASCII where the pipeline writes the text itself, and a
 # non-ASCII character of an entry is written once, not encoded twice

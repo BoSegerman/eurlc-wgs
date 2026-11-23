@@ -57,6 +57,14 @@ Changes that a user of the pipeline can notice. The newest version first.
   now show the schema's name and the number of loci typed, with the frozen
   version as a detail: "CAMPISO-PubMLST-8 (1142 loci; frozen version ...)".
   Folder and file names are unchanged.
+- **The "Database versions" table of the reports was incomplete.** With a
+  `db_freeze.config` it listed only the Mash sketch and the databases
+  inside tool environments (mlst, AMRFinderPlus); Kraken2, ResFinder,
+  VirulenceFinder, PlasmidFinder and the cgMLST schemas were missing. It
+  now lists every database resolved for the run, with its version, the MD5
+  of its marker files and whether the frozen or the live copy was used,
+  Bracken beside Kraken2 (same database), and the cgMLST schemas the
+  clustering was made with (name, version, loci, frozen version).
 - **`schema.ini` was written with characters encoded twice**: the dash in
   its first line and in the CAMPISO label showed as "â" and two control
   characters, and each time a filter was set, every non-ASCII character of

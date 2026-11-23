@@ -529,6 +529,10 @@ check "report: a clustering result shows the schema's name and loci, the frozen 
       bash -c "grep -q '^live	LIVE-1 (5 loci)$' <<<'$SD' && grep -q '^frozen	FROZEN-8 (3 loci, filter cg.txt; frozen version 0123456789abcdef0123456789abcdef)$' <<<'$SD' && grep -q '^html	<b>FROZEN-8</b>' <<<'$SD'"
 check "  ... also when only the reports are rebuilt (summarize): the frozen copy is found, and its own filter counted" \
       bash -c "grep -q '^frozen-live-path	CAMP (2 loci, filter cg.txt; frozen version fedcba9876543210fedcba9876543210)$' <<<'$SD'"
+check "report: Database versions lists every resolved database (Bracken with Kraken2), the schemas used and the databases inside tool environments, each once" \
+      bash -c "grep -q '^dbrows-run	kraken2=frozen copy | MD5 of 3 marker files / bracken=frozen copy / mashscreen=live copy / cgMLST schema CAMP=frozen copy / cgMLST schema LIVE-1=live copy / mlst=date: 2026-11-12$' <<<'$SD'"
+check "  ... in a sample's report only the schema of its species; the schema row has version, loci and the frozen version" \
+      bash -c "grep -q '^dbrows-sample	kraken2 / bracken / mashscreen / cgMLST schema CAMP / mlst$' <<<'$SD' && grep -q '^dbrows-schema	cgMLST schema CAMP|version 8, 2 loci, filter cg.txt|fedcba9876543210fedcba9876543210|frozen copy$' <<<'$SD'"
 check "schema.ini is written as plain bytes: no character encoded twice" \
       bash -c "grep -q '^ini-header-ascii	1$' <<<'$SD' && grep -q '^ini-not-double-encoded	1$' <<<'$SD'"
 

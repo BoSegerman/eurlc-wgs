@@ -23419,6 +23419,66 @@ sub first_defined_numeric {
 }
 ###########################################################################
 
+## The rows of the "Database versions" table: [ name, version/label, MD5,
+## info ]. Three sources, because the databases are recorded in three ways:
+##   1. every database of db_freeze.config that was resolved for the run
+##      (Kraken2, Mash, ResFinder, VirulenceFinder, ...): provenance
+##      db_versions, with the fingerprint of its marker files and whether
+##      the frozen or the live copy was used. Bracken uses Kraken2's.
+##   2. the cgMLST schemas the run's clustering results were made with
+##      (for one sample: of its species), from clustering_schema_info
+##   3. databases that live inside a tool's conda environment (mlst,
+##      AMRFinderPlus): the older record of their test file
+## Before, only 3. was shown, which is why Kraken2 and the others were
+## missing from the table.
+sub report_database_rows {
+    my ($old_list, $old, $samplenr) = @_;
+    my ( @rows, %shown );
+
+    my $v = $rundata{provenance}{run}{db_versions};
+    for my $name ( sort keys %{ ref $v eq 'HASH' ? $v : {} } ) {
+        my $e = $v->{$name};
+        next unless ref $e eq 'HASH';
+        my $status = ( $e->{status} // "" ) =~ /\[(FROZEN|LIVE)\]/ ? lc($1) . " copy" : ( $e->{status} // "" );
+        my $n      = scalar keys %{ $e->{files} // {} };
+        push @rows, [ $name, $e->{version} // "n/a", $e->{fingerprint} // "n/a",
+                      join( " | ", grep { $_ ne "" } $status, ( $n > 1 ? "MD5 of $n marker files" : () ) ) || "n/a" ];
+        $shown{ lc $name } = 1;
+        if ( lc $name eq "kraken2" && ( $R_cfg->{bracken}{enabled} // 1 ) ) {
+            push @rows, [ "bracken", "the Kraken2 database (its k-mer distribution files)", $e->{fingerprint} // "n/a", $status || "n/a" ];
+            $shown{bracken} = 1;
+        }
+    }
+
+    my $sample_species = defined $samplenr && ref $R_samples->[$samplenr] eq 'HASH'
+        ? ( $R_samples->[$samplenr]{main_results}{taxonomy}{species} // "" ) : undef;
+    my %schema_seen;
+    for my $entry ( @{ ref $rundata{clustering}{results} eq 'ARRAY' ? $rundata{clustering}{results} : [] } ) {
+        next unless ref $entry eq 'HASH' && defined $entry->{schema};
+        next if defined $sample_species && lc( $entry->{species} // "" ) ne lc $sample_species;
+        next if $schema_seen{ $entry->{schema} }++;
+        my $i = clustering_schema_info($entry);
+        push @rows, [ "cgMLST schema $i->{name}",
+                      join( ", ", grep { $_ ne "" } ( $i->{version} ne "" ? "version $i->{version}" : "" ),
+                                                    ( $i->{loci} ne "" ? "$i->{loci} $i->{loci_kind}" : "" ) ) || "n/a",
+                      $i->{frozen} ne "" ? $i->{frozen} : "n/a",
+                      $i->{frozen} ne "" ? "frozen copy" : "live copy" ];
+    }
+
+    for my $db ( @{ $old_list // [] } ) {
+        next if $shown{ lc $db }++;
+        my $R_info = $old->{$db};
+        next if !defined $R_info || ref($R_info) ne 'HASH';
+        my $label = $R_info->{version_label} // $R_info->{description} // "n/a";
+        my @info_parts;
+        push @info_parts, "date: "   . $R_info->{file_date}     if defined $R_info->{file_date}     && $R_info->{file_date} ne "";
+        push @info_parts, "size: "   . $R_info->{file_size}     if defined $R_info->{file_size}     && $R_info->{file_size} ne "";
+        push @info_parts, "status: " . $R_info->{lookup_status} if defined $R_info->{lookup_status} && $R_info->{lookup_status} ne "";
+        push @rows, [ $db, $label, $R_info->{md5} // "n/a", @info_parts ? join( " | ", @info_parts ) : "n/a" ];
+    }
+    return @rows;
+}
+
 sub short_report_section_versions {
     my ($samplenr) = @_;
 
@@ -23504,29 +23564,14 @@ sub short_report_section_versions {
     $html .= "<th>Info</th>";
     $html .= "</tr>\n";
 
-    if (@database_list) {
-        foreach my $db (@database_list) {
-            my $R_info = $R_databases->{$db};
-            next if !defined $R_info || ref($R_info) ne 'HASH';
-
-            my $label = $R_info->{version_label}
-                     // $R_info->{description}
-                     // "n/a";
-
-            my $md5   = $R_info->{md5} // "n/a";
-
-            my @info_parts;
-            push @info_parts, "date: "   . $R_info->{file_date}     if defined $R_info->{file_date}     && $R_info->{file_date} ne "";
-            push @info_parts, "size: "   . $R_info->{file_size}     if defined $R_info->{file_size}     && $R_info->{file_size} ne "";
-            push @info_parts, "status: " . $R_info->{lookup_status} if defined $R_info->{lookup_status} && $R_info->{lookup_status} ne "";
-
-            my $info = @info_parts ? join(" | ", @info_parts) : "n/a";
-
+    my @db_rows = report_database_rows( \@database_list, $R_databases, $samplenr );
+    if (@db_rows) {
+        foreach my $r (@db_rows) {
             $html .= "<tr>";
-            $html .= "<td>" . encode_entities($db) . "</td>";
-            $html .= "<td>" . encode_entities($label) . "</td>";
-            $html .= "<td>" . encode_entities($md5) . "</td>";
-            $html .= "<td>" . encode_entities($info) . "</td>";
+            $html .= "<td>" . encode_entities( $r->[0] ) . "</td>";
+            $html .= "<td>" . encode_entities( $r->[1] ) . "</td>";
+            $html .= "<td>" . encode_entities( $r->[2] ) . "</td>";
+            $html .= "<td>" . encode_entities( $r->[3] ) . "</td>";
             $html .= "</tr>\n";
         }
     }

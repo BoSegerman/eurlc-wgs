@@ -524,6 +524,12 @@ check "install.sh: an unknown species stops it before anything is installed" \
 check "install.sh: --species is refused for a sealed database folder" \
       bash -c "touch '$DBN/config_seal.ini'; out=\$(bash '$IS' --species=listeria --database='$DBN' 2>&1); rc=\$?; rm '$DBN/config_seal.ini'; [[ \$rc == 1 ]] && grep -q 'sealed installation' <<<\"\$out\""
 
+SD=$(perl "$(dirname "$0")/unit/schema_display.pl" "$SCRIPT" 2>&1)
+check "report: a clustering result shows the schema's name and loci, the frozen version as a detail (not as the name)" \
+      bash -c "grep -q '^live	LIVE-1 (5 loci)$' <<<'$SD' && grep -q '^frozen	FROZEN-8 (3 loci, filter cg.txt; frozen version 0123456789abcdef0123456789abcdef)$' <<<'$SD' && grep -q '^html	<b>FROZEN-8</b>' <<<'$SD'"
+check "schema.ini is written as plain bytes: no character encoded twice" \
+      bash -c "grep -q '^ini-header-ascii	1$' <<<'$SD' && grep -q '^ini-not-double-encoded	1$' <<<'$SD'"
+
 # --- eurlc-cgmlst-compare -------------------------------------------------
 echo "cgMLST comparison"
 CGC="$(cd "$(dirname "$0")/.." && pwd)/scripts/eurlc-cgmlst-compare"

@@ -51,6 +51,18 @@ Changes that a user of the pipeline can notice. The newest version first.
 
 ### Fixed
 
+- **The reports named a frozen cgMLST schema by its checksum.** In the
+  Clustering table, the matrix viewer and the download page, the schema of
+  a frozen database was shown as its 32-character version checksum. They
+  now show the schema's name and the number of loci typed, with the frozen
+  version as a detail: "CAMPISO-PubMLST-8 (1142 loci; frozen version ...)".
+  Folder and file names are unchanged.
+- **`schema.ini` was written with characters encoded twice**: the dash in
+  its first line and in the CAMPISO label showed as "â" and two control
+  characters, and each time a filter was set, every non-ASCII character of
+  the file was encoded once more. The file is now written as it is, and the
+  pipeline's own text in it is plain ASCII. Existing files work as they are
+  (the label and the comment are not used for anything).
 - **`--setup` could report a database as present when only its folder
   was.** After a failed download, the next `--setup` did not offer the
   database again (seen with the Mash database). The database's files must

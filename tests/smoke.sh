@@ -527,6 +527,8 @@ check "install.sh: --species is refused for a sealed database folder" \
 SD=$(perl "$(dirname "$0")/unit/schema_display.pl" "$SCRIPT" 2>&1)
 check "report: a clustering result shows the schema's name and loci, the frozen version as a detail (not as the name)" \
       bash -c "grep -q '^live	LIVE-1 (5 loci)$' <<<'$SD' && grep -q '^frozen	FROZEN-8 (3 loci, filter cg.txt; frozen version 0123456789abcdef0123456789abcdef)$' <<<'$SD' && grep -q '^html	<b>FROZEN-8</b>' <<<'$SD'"
+check "  ... also when only the reports are rebuilt (summarize): the frozen copy is found, and its own filter counted" \
+      bash -c "grep -q '^frozen-live-path	CAMP (2 loci, filter cg.txt; frozen version fedcba9876543210fedcba9876543210)$' <<<'$SD'"
 check "schema.ini is written as plain bytes: no character encoded twice" \
       bash -c "grep -q '^ini-header-ascii	1$' <<<'$SD' && grep -q '^ini-not-double-encoded	1$' <<<'$SD'"
 

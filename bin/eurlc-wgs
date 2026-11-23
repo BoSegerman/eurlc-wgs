@@ -25779,14 +25779,37 @@ sub clustering_schema_info {
     my %i = ( name => $dirname, dirname => $dirname, loci => "", loci_kind => "", version => "", frozen => "" );
     $i{frozen} = $dirname if $dirname =~ /^[0-9a-f]{32}$/i;
     my $schemas = $R_cfg->{chewbbaca_schemas};
-    for my $n ( sort keys %{ ref $schemas eq 'HASH' ? $schemas : {} } ) {
+    $schemas = {} unless ref $schemas eq 'HASH';
+    # The schema whose folder has this name. In a run the configured path of
+    # a frozen schema already points at its frozen copy; when only the
+    # reports are rebuilt (summarize) it is still the live path, so the
+    # frozen copy <frozen_dbs_root>/chewbbaca_<name>/<checksum> is looked
+    # for as well.
+    my @cand;
+    for my $n ( sort keys %$schemas ) {
         my $c = $schemas->{$n};
         next unless ref $c eq 'HASH';
         my $p = fill_placeholders( $c->{path} // "" );
-        next unless $p ne "" && basename($p) eq $dirname;
+        next if $p eq "";
+        push @cand, [ $n, $c, $p, $c->{filter} // "" ] if basename($p) eq $dirname;
+    }
+    if ( !@cand && $i{frozen} ne "" ) {
+        for my $n ( sort keys %$schemas ) {
+            my $c = $schemas->{$n};
+            next unless ref $c eq 'HASH';
+            my $live = fill_placeholders( $c->{path} // "" );
+            next if $live eq "";
+            my $fz = eval { get_frozen_dbs_root( dirname($live) ) . "/chewbbaca_$n/$dirname" } // "";
+            next unless $fz ne "" && -d $fz;
+            my $filter = $c->{filter} // "";
+            $filter = $fz . substr( $filter, length $live ) if $filter ne "" && index( $filter, "$live/" ) == 0;
+            push @cand, [ $n, $c, $fz, $filter ];
+        }
+    }
+    for my $cand ( @cand ? $cand[0] : () ) {
+        my ( $n, $c, $p, $filter ) = @$cand;
         $i{name}    = $n;
         $i{version} = $c->{version} // "";
-        my $filter  = $c->{filter} // "";
         if ( $filter ne "" && $filter ne "unfiltered" && -f $filter && open( my $fh, '<', $filter ) ) {
             my $k = grep { /\S/ } <$fh>;
             close $fh;

@@ -291,6 +291,39 @@ if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
     run "$T/ic3.out" --installation-check=NoSuchSet
     check "installation check: an unknown set is an error that names the sets (exit 1)" \
           bash -c "[[ $RC == 1 ]] && grep -q 'no check set named NoSuchSet.*sets there: T1' '$T/ic3.out'"
+
+    # --make-installation-check: a check set from a validation dataset
+    DS="$T/dataset"; mkdir -p "$DS/fastq"
+    cp "$D/A_S1_L001_R1_001.fastq.gz" "$D/A_S1_L001_R2_001.fastq.gz" "$D/Lonely_R1.fastq.gz" "$DS/fastq/"
+    cp "$VDATA/T1_validation_profile.yml" "$DS/"
+    { head -1 "$ICS/T1_expected_results.tsv"
+      for id in A Lonely SET_D1_011 SET_D2_011; do printf '%s\tn/a\tyes\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tno\tn/a\n' "$id"; done; } > "$DS/T1_expected_results.tsv"
+    run "$T/mk0.out" --make-installation-check=M1 from="$DS" samples=A --assume-yes disable=chewbbaca
+    check "make installation check: refused on an installation without a seal" \
+          bash -c "[[ $RC == 1 ]] && grep -q 'has no configuration seal' '$T/mk0.out' && [[ ! -e '$HOME/eurlc-wgs_db/installation_check/M1' ]]"
+    run "$T/mk1.out" --make-installation-check=M1 from="$DS" samples=011,Nope --assume-yes --allow-unsealed
+    check "  ... a sample that is not there, or an end that fits two samples, stops it and says which" \
+          bash -c "[[ $RC == 1 ]] && grep -q 'Nope: no such sample' '$T/mk1.out' && grep -q '011: fits more than one sample (SET_D1_011, SET_D2_011)' '$T/mk1.out'"
+    run "$T/mk2.out" --make-installation-check=M1 from="$DS" samples=D1_011 --assume-yes --allow-unsealed
+    check "  ... a sample without read files stops it" bash -c "[[ $RC == 1 ]] && grep -q 'no read files in .* for: SET_D1_011' '$T/mk2.out'"
+    run "$T/mk3.out" --make-installation-check=M1 from="$DS" samples=A --assume-yes --allow-unsealed disable=chewbbaca
+    MK="$HOME/eurlc-wgs_db/installation_check/M1"
+    check "make installation check: the set is made (exit 0)" bash -c "[[ $RC == 0 ]] && grep -q 'set \[M1\] made' '$T/mk3.out' && [[ -d '$MK' ]]"
+    check "  ... with the sample's reads only, its row of the expected results, the profile, a reference and a description" \
+          bash -c "[[ \$(ls '$MK/fastq' | wc -l) == 2 ]] && [[ \$(grep -c . '$MK/T1_expected_results.tsv') == 2 ]] && grep -q '^A	' '$MK/T1_expected_results.tsv' && [[ -s '$MK/T1_validation_profile.yml' ]] && ls '$MK'/reference/*.json.gz > /dev/null && grep -q '^  A$' '$MK/M1_about.txt'"
+    check "  ... and an .md5 list of all six files that holds" bash -c "[[ \$(grep -c . '$MK/M1.md5') == 6 ]] && ( cd '$MK' && md5sum -c --quiet M1.md5 )"
+    check "  ... nothing is left of the building folder" bash -c "! ls -a '$HOME/eurlc-wgs_db/installation_check' | grep -q building"
+    run "$T/mk4.out" --installation-check=M1 disable=chewbbaca
+    check "  ... the set it made passes the installation check, reference run included" \
+          bash -c "[[ $RC == 0 ]] && grep -q 'Installation check \[M1\]: PASSED' '$T/mk4.out' && grep -q 'ok   reference run: NO UNEXPECTED DIFFERENCES' '$T/mk4.out'"
+    run "$T/mk5.out" --make-installation-check=M1 from="$DS" samples=A --assume-yes --allow-unsealed
+    check "  ... an existing set is not overwritten" bash -c "[[ $RC == 1 ]] && grep -q 'already exists' '$T/mk5.out'"
+    printf 'sample_id\texpected_species\texpected_species_is_target\texpected_st\texpected_mlst_alleles\texpected_qc_status\talternative_qc_status\texpected_qc_issue\texpected_cgmlst_min_called_percent\texpected_cluster\texpected_max_pairwise_distance_within_cluster\texpected_reportable\texpected_non_reportable_reason\nA\tn/a\tyes\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tn/a\tyes\tn/a\n' > "$DS/T1_expected_results.tsv"
+    run "$T/mk6.out" --make-installation-check=M2 from="$DS" samples=A --assume-yes --allow-unsealed disable=chewbbaca
+    check "  ... results that do not agree with the expected ones: no set is made, nothing is left behind" \
+          bash -c "[[ $RC == 1 ]] && grep -q 'do not agree with the expected results' '$T/mk6.out' && [[ ! -e '$HOME/eurlc-wgs_db/installation_check/M2' ]] && ! ls -a '$HOME/eurlc-wgs_db/installation_check' | grep -q building"
+    run "$T/mk7.out" samples=A datadir="$D"
+    check "  ... samples= without --make-installation-check is refused" bash -c "[[ $RC != 0 ]] && grep -q 'used together with --make-installation-check' '$T/mk7.out'"
     rm -rf "$HOME/eurlc-wgs_db/installation_check" "$ICR"
 fi
 
@@ -381,7 +414,7 @@ check "  ... another species is a disagreement, and says what each gave" \
       bash -c "grep -q '^disagree	1	Mash screen says Campylobacter upsaliensis, Kraken2 says Campylobacter helveticus$' <<<'$SA' && grep -q '^disagree-target	1	' <<<'$SA'"
 check "  ... not judged when one of them gave no species" \
       bash -c "grep -q '^no-mash	n/a	$' <<<'$SA' && grep -q '^mash-na	n/a	$' <<<'$SA' && grep -q '^no-kraken	n/a	$' <<<'$SA' && grep -q '^no-species	n/a	$' <<<'$SA'"
-check "  ... and the default is CRITICAL" grep -q 'critical_taxonomy_species_disagree *=> *">0"' "$SCRIPT"
+check "  ... and the default is a WARNING, not CRITICAL" bash -c "grep -q 'warning_taxonomy_species_disagree *=> *\">0\"' '$SCRIPT' && ! grep -q '^ *critical_taxonomy_species_disagree *=>' '$SCRIPT'"
 
 # --- validated species of the configuration ---------------------------------
 echo "Validated species"
@@ -393,6 +426,10 @@ check "  ... a genus covers its species; a failed sample keeps its QC reason; no
 check "  ... nothing declared: nothing is marked" bash -c "grep -q '^undeclared		yes		Yes$' <<<'$VS'"
 check "report: CRITICAL is shown as Assess, FAIL as No" \
       bash -c "grep -q '^critical		no	QC CRITICAL	Assess$' <<<'$VS' && grep -q '^fail		no	QC FAIL	No$' <<<'$VS'"
+check "a sample where a step failed or that was abandoned is CRITICAL, never PASS; steps failing on failed data do not count" \
+      bash -c "grep -q '^runproblem-ok	-$' <<<'$VS' && grep -q '^runproblem-failed	Analysis not finished: step(s) failed: skesa (timeout)' <<<'$VS' && grep -q '^runproblem-abandoned	Analysis not finished: the sample was abandoned at step downsample' <<<'$VS' && grep -q '^runproblem-expected-only	-$' <<<'$VS'"
+check "  ... it is not reportable, shown as No (not Assess), with what to do; QC FAIL on the data keeps its own reason" \
+      bash -c "grep -q '^step-failed		no	step(s) failed: skesa (timeout) -- run the analysis again with --resume	No$' <<<'$VS' && grep -q '^step-failed-datafail		no	QC FAIL	No$' <<<'$VS' && grep -q '^abandoned		no	abandoned: reformat failed	No$' <<<'$VS'"
 run "$T/vs1.out" datadir="$D" outdir="$T/out_vs" --assume-yes disable=chewbbaca validated_species="Campylobacter jejuni, Campylobacter coli"
 check "main report: the sample table has a Reportable column" \
       bash -c "grep -q '>Reportable</th>' '$T/out_vs/report/main_report.html' && grep -q '<span class=\"rep-pill rep-[a-z]*\" title=\"[^\"]*\">\(Yes\|No\)</span>' '$T/out_vs/report/main_report.html' && grep -q 'class=\"rep-legend\"' '$T/out_vs/report/main_report.html' && grep -q 'rep-pill' '$T/out_vs/report/assets/style.css'"
@@ -419,9 +456,73 @@ check "  ... one that differs is removed and made again; not without permission"
       bash -c "grep -q '^differs-from-list	1	remove,create-from-list	yes$' <<<'$EL' && grep -q '^differs-not-allowed	1	nothing	no$' <<<'$EL'"
 check "  ... without a list the YML file is used, as before" bash -c "grep -q '^no-list	1	create-from-yml	-$' <<<'$EL'"
 check "install.sh: shell syntax" bash -n "$(dirname "$0")/../install.sh"
-check "--version prints 1.0.0-rc2" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc2'"
+check "--version prints 1.0.0-rc3" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc3'"
 check "downsampling reads gzip with Java's own reader (unbgzip=f unpigz=f), paired and single" \
       bash -c "[[ \$(grep -c '^       unbgzip=f unpigz=f \$' '$SCRIPT') == 2 ]]"
+
+# --- setup: species, configuration file, what is in the database folder ---
+echo "Setup"
+# stand-ins, so that nothing is downloaded: wget and git clone fail at once
+printf '#!/bin/sh\nexit 4\n' > "$T/conda/bin/wget"
+printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "git version 2.0"; exit 0; }\nexit 1\n' > "$T/conda/bin/git"
+chmod +x "$T/conda/bin/wget" "$T/conda/bin/git"
+US=$(perl "$(dirname "$0")/unit/setup_species.pl" "$SCRIPT" 2>&1)
+check "species choice: names, numbers, a species of the genus; unknown ones are named" \
+      bash -c "grep -q '^species\[2, Listeria\]	salmonella,listeria	-$' <<<'$US' && grep -q '^species\[Campylobacter jejuni, E.coli, campy\]	campylobacter,ecoli	-$' <<<'$US' && grep -q '^species\[1,foo\]	campylobacter	foo$' <<<'$US'"
+check "a database is there when its marker files are: not an empty folder, a .part file or an empty file" \
+      bash -c "grep -q '^db-empty-folder	0$' <<<'$US' && grep -q '^db-part-file	0$' <<<'$US' && grep -q '^db-empty-file	0$' <<<'$US' && grep -q '^db-complete	1$' <<<'$US' && grep -q '^db-one-marker-missing	0$' <<<'$US'"
+check "a schema is installed when it has loci and a schema.ini" \
+      bash -c "grep -q '^schema-no-ini	0$' <<<'$US' && grep -q '^schema-complete	1$' <<<'$US'"
+check "the Mash download never leaves a half file under the database's name" \
+      grep -q 'wget -O refseq.genomes.k21s1000.msh.part .* && mv refseq.genomes.k21s1000.msh.part refseq.genomes.k21s1000.msh' "$SCRIPT"
+
+DBN="$T/db_new"; mkdir -p "$DBN"
+run "$T/setup1.out" --setup --assume-yes species=campylobacter,2 database="$DBN"
+check "new installation: says so, and names the species" bash -c "grep -q 'New installation' '$T/setup1.out' && grep -q 'Species: Campylobacter, Salmonella$' '$T/setup1.out'"
+check "  ... writes a configuration file with species_scope as the only setting in use" \
+      bash -c "[[ \$(grep -v '^[#;\[]' '$DBN/eurlc-wgs.config' | grep -c .) == 1 ]] && grep -q '^species_scope=Campylobacter, Salmonella$' '$DBN/eurlc-wgs.config'"
+check "  ... every other setting is listed, commented out" bash -c "grep -q '^#threads=' '$DBN/eurlc-wgs.config' && grep -q '^\[species__' '$DBN/eurlc-wgs.config'"
+check "  ... schemas that could not be installed: not ready, exit 1" \
+      bash -c "[[ $RC == 1 ]] && grep -q 'Salmonella  *cgMLST schema chewie_ns_salmonella is not installed' '$T/setup1.out'"
+check "  ... setup keeps a log in the database folder (setup_logs/<time>/log/log.txt)" \
+      bash -c "f=\$(ls '$DBN'/setup_logs/*/log/log.txt | head -1) && grep -q 'New installation' \"\$f\" && [[ ! -d '$T/work/eurlc-wgs' ]]"
+check "  ... freezing and sealing are not given as commands, only as a pointer to the manual" \
+      bash -c "! grep -q -- '--freeze-databases\|--generate-seal' '$T/setup1.out' && grep -q 'user manual, section 12' '$T/setup1.out'"
+run "$T/setup1b.out" datadir="$D" outdir="$T/out_cfg" database="$DBN" --assume-yes
+check "  ... the written file is read without complaint by a run" bash -c "! grep -q 'could not parse\|Could not parse' '$T/setup1b.out'"
+
+run "$T/setup2.out" --setup --assume-yes species=listeria,campylobacter database="$DBN"
+check "existing installation: recognised; a species is added, none removed" \
+      bash -c "grep -q 'Found an existing installation' '$T/setup2.out' && grep -q '^species_scope = Campylobacter, Salmonella, Listeria$' '$DBN/eurlc-wgs.config'"
+
+# everything in place: databases and the three schemas
+mkdir -p "$DBN/kraken2" "$DBN/mash" "$DBN/resfinder/resfinder_db"
+for f in kraken2/hash.k2d kraken2/database150mers.kmer_distrib mash/refseq.genomes.k21s1000.msh resfinder/resfinder_db/all.fsa; do echo x > "$DBN/$f"; done
+for n in CAMPISO-PubMLST-8 chewie_ns_salmonella chewie_ns_listeria; do
+    mkdir -p "$DBN/chewbbaca/schemas/$n"; echo ">a" > "$DBN/chewbbaca/schemas/$n/l1.fasta"; printf '[schema]\nname=%s\n' "$n" > "$DBN/chewbbaca/schemas/$n/schema.ini"
+done
+run "$T/setup3.out" --setup --assume-yes database="$DBN"
+check "  ... complete: ready for its three species, exit 0" \
+      bash -c "[[ $RC == 0 ]] && grep -q 'Setup complete. This installation is ready for:' '$T/setup3.out' && [[ \$(grep -c 'cgMLST schema [Cc]' '$T/setup3.out') == 3 ]]"
+rm "$DBN/chewbbaca/schemas/chewie_ns_listeria/schema.ini"
+run "$T/setup4.out" --setup --assume-yes database="$DBN"
+check "  ... a schema folder left by an interrupted installation is moved aside, not used" \
+      bash -c "[[ $RC == 1 ]] && ls '$DBN/chewbbaca/incomplete' | grep -q '^chewie_ns_listeria-' && [[ ! -d '$DBN/chewbbaca/schemas/chewie_ns_listeria' ]]"
+
+touch "$DBN/config_seal.ini"
+run "$T/setup5.out" --setup --assume-yes species=ecoli database="$DBN"
+check "sealed installation: species= is refused" bash -c "[[ $RC != 0 ]] && grep -q 'sealed installation' '$T/setup5.out'"
+run "$T/setup6.out" --setup --assume-yes database="$DBN"
+check "  ... used as it is: the missing schema is reported, not downloaded" \
+      bash -c "[[ $RC == 1 ]] && grep -q 'Found a sealed installation' '$T/setup6.out' && ! grep -q 'Download & install' '$T/setup6.out'"
+rm "$DBN/config_seal.ini"
+run "$T/setup7.out" species=listeria datadir="$D"
+check "species= without --setup is refused" bash -c "[[ $RC != 0 ]] && grep -q 'used together with --setup' '$T/setup7.out'"
+IS="$(cd "$(dirname "$0")/.." && pwd)/install.sh"
+check "install.sh: an unknown species stops it before anything is installed" \
+      bash -c "out=\$(bash '$IS' --species=campylobacter,foo 2>&1); [[ \$? == 1 ]] && grep -q 'choose from campylobacter' <<<\"\$out\""
+check "install.sh: --species is refused for a sealed database folder" \
+      bash -c "touch '$DBN/config_seal.ini'; out=\$(bash '$IS' --species=listeria --database='$DBN' 2>&1); rc=\$?; rm '$DBN/config_seal.ini'; [[ \$rc == 1 ]] && grep -q 'sealed installation' <<<\"\$out\""
 
 # --- eurlc-cgmlst-compare -------------------------------------------------
 echo "cgMLST comparison"

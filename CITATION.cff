@@ -12,7 +12,7 @@ authors:
     affiliation: >-
       Swedish Veterinary Agency (SVA), European Union Reference Laboratory
       for Campylobacter, Uppsala, Sweden
-version: 1.0.0-rc2
+version: 1.0.0-rc3
 license: GPL-3.0-or-later
 repository-code: "https://github.com/BoSegerman/eurlc-wgs"
 abstract: >-

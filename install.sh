@@ -8,7 +8,9 @@ set -euo pipefail
 # 'eurlc-wgs --setup' which installs tool environments and databases.
 #
 # Usage:
-#   ./install.sh                    install eurlc-wgs + run setup
+#   ./install.sh                    install eurlc-wgs + run setup (asks which species)
+#   ./install.sh --species=LIST     the species to set the installation up for, e.g.
+#                                   --species=campylobacter,salmonella  (or: all)
 #   ./install.sh --no-setup         install eurlc-wgs only, skip setup
 #   ./install.sh --optional         include optional tool environments in setup
 #   ./install.sh --assume-yes       non-interactive (for scripts/CI)
@@ -52,6 +54,8 @@ ASSUME_YES=0
 RESOURCES_ONLY=0
 UNINSTALL=0
 DB_DIR="${HOME}/eurlc-wgs_db"
+SPECIES=""
+SPECIES_KEYS="campylobacter salmonella ecoli listeria"
 
 # -----------------------------------------------------------------------------
 # Parse options
@@ -72,9 +76,14 @@ for arg in "$@"; do
             UNINSTALL=1 ;;
         --database=*)
             DB_DIR="${arg#--database=}" ;;
+        --species=*)
+            SPECIES="${arg#--species=}" ;;
         -h|--help)
             echo "Usage:"
-            echo "  ./install.sh                   install eurlc-wgs + run setup"
+            echo "  ./install.sh                   install eurlc-wgs + run setup; asks which species"
+            echo "                                 to set the installation up for"
+            echo "  ./install.sh --species=LIST    the species, without asking: campylobacter, salmonella,"
+            echo "                                 ecoli, listeria (comma-separated), or all"
             echo "  ./install.sh --no-setup        install eurlc-wgs only, skip setup"
             echo "  ./install.sh --optional        include optional tools in setup"
             echo "  ./install.sh --assume-yes      non-interactive"
@@ -93,6 +102,89 @@ done
 
 echo ">>> EURLC-WGS installer"
 echo ">>> Source directory: ${SRC_DIR}"
+
+# -----------------------------------------------------------------------------
+# Which species? Asked first, so that the rest runs without anyone watching.
+# The database folder decides (the same rule as in eurlc-wgs --setup):
+#   config_seal.ini     a sealed installation: used as it is, no choice
+#   eurlc-wgs.config    an existing installation: keeps its species
+#                       (--species adds to them)
+#   neither             a new installation: --species, or the question below,
+#                       or all species when there is no terminal to ask in
+# -----------------------------------------------------------------------------
+
+# "1, Salmonella,ecoli" -> "campylobacter,salmonella,ecoli"; fails on anything else
+species_list() {
+    local out="" tok key n
+    local -a keys=(${SPECIES_KEYS})
+    local -a toks=()
+    IFS=',' read -r -a toks <<< "$1"
+    for tok in ${toks[@]+"${toks[@]}"}; do
+        tok="$(echo "${tok}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        [[ -z "${tok}" ]] && continue
+        key=""
+        case "${tok}" in
+            all)                               echo "all"; return 0 ;;
+            [1-9])                             n=$((tok - 1)); key="${keys[$n]:-}" ;;
+            campylobacter|campy)               key="campylobacter" ;;
+            salmonella)                        key="salmonella" ;;
+            ecoli|e.coli|e_coli|escherichia|escherichiacoli) key="ecoli" ;;
+            listeria)                          key="listeria" ;;
+        esac
+        [[ -z "${key}" ]] && return 1
+        [[ ",${out}," == *",${key},"* ]] || out="${out:+${out},}${key}"
+    done
+    [[ -z "${out}" ]] && return 1
+    echo "${out}"
+}
+
+if [[ "${UNINSTALL}" -eq 0 && "${RUN_SETUP}" -eq 1 ]]; then
+    if [[ -n "${SPECIES}" ]]; then
+        if ! SPECIES="$(species_list "${SPECIES}")"; then
+            echo "ERROR: --species: choose from campylobacter, salmonella, ecoli, listeria (comma-separated), or all."
+            exit 1
+        fi
+    fi
+    if [[ -f "${DB_DIR}/config_seal.ini" ]]; then
+        echo ">>> Sealed installation found in ${DB_DIR}: it is used as it is."
+        if [[ -n "${SPECIES}" ]]; then
+            echo "ERROR: --species cannot be used with a sealed installation: its species are part of what"
+            echo "       the seal covers. Leave --species out, or give another folder with --database=DIR."
+            exit 1
+        fi
+    elif [[ -f "${DB_DIR}/eurlc-wgs.config" ]]; then
+        echo ">>> Existing installation found in ${DB_DIR}: it keeps its species; what is missing is installed."
+        if [[ -n "${SPECIES}" ]]; then echo ">>> Species to add: ${SPECIES}"; fi
+    elif [[ -z "${SPECIES}" ]]; then
+        if [[ "${ASSUME_YES}" -eq 0 && -t 0 && -t 1 ]]; then
+            echo
+            echo "Which species should this installation be set up for?"
+            echo "(The tools and the cgMLST schema of each chosen species are installed."
+            echo " More can be added later with: eurlc-wgs --setup species=<name>)"
+            n=1
+            for key in ${SPECIES_KEYS}; do
+                case "${key}" in
+                    campylobacter) label="Campylobacter" ;;
+                    salmonella)    label="Salmonella" ;;
+                    ecoli)         label="Escherichia coli" ;;
+                    listeria)      label="Listeria" ;;
+                esac
+                echo "  ${n}) ${label}"
+                n=$((n + 1))
+            done
+            while true; do
+                read -r -p "Numbers or names separated by commas, e.g. 1,2 [Enter = all]: " answer
+                [[ -z "${answer}" ]] && answer="all"
+                if SPECIES="$(species_list "${answer}")"; then break; fi
+                echo "Not recognised: ${answer}"
+            done
+        else
+            SPECIES="all"
+            echo ">>> No --species given and no terminal to ask in: all species are installed."
+        fi
+        echo ">>> Species: ${SPECIES}"
+    fi
+fi
 
 # -----------------------------------------------------------------------------
 # Uninstall
@@ -397,6 +489,7 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     SETUP_ARGS="--setup --assume-yes"
     [[ "${DB_DIR}" != "${HOME}/eurlc-wgs_db" ]] && SETUP_ARGS="${SETUP_ARGS} database=${DB_DIR}"
     [[ "${INSTALL_OPTIONAL}" -eq 1 ]] && SETUP_ARGS="${SETUP_ARGS} --optional"
+    [[ -n "${SPECIES}" ]] && SETUP_ARGS="${SETUP_ARGS} species=${SPECIES}"
 
     # Run setup from HOME to avoid the pipeline treating the source
     # directory as its input directory.
@@ -405,7 +498,8 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     # shellcheck disable=SC1091
     source "$(conda info --base)/etc/profile.d/conda.sh"
     conda activate "${MAIN_ENV}"
-    eurlc-wgs ${SETUP_ARGS}
+    SETUP_RC=0
+    eurlc-wgs ${SETUP_ARGS} || SETUP_RC=$?
     conda deactivate
 else
     echo
@@ -420,16 +514,26 @@ fi
 # -----------------------------------------------------------------------------
 
 echo
-echo ">>> Installation complete."
-echo
-echo "Activate with:"
-echo "    conda activate ${MAIN_ENV}"
-echo
-echo "Run with:"
-echo "    eurlc-wgs --help"
-echo
-if [[ "${RUN_SETUP}" -eq 0 ]]; then
-    echo "Tool environments not yet installed. Complete setup with:"
+if [[ "${RUN_SETUP}" -eq 1 && "${SETUP_RC:-0}" -ne 0 ]]; then
+    # setup has said what is missing and what is ready (see above)
+    echo ">>> Installation is NOT complete: setup reported problems (see above)."
+    echo ">>> When they are solved, finish with:"
+    echo "    conda activate ${MAIN_ENV}"
     echo "    eurlc-wgs --setup"
     echo
+    exit 1
 fi
+echo ">>> Installation complete."
+echo
+echo "Start with:"
+echo "    conda activate ${MAIN_ENV}"
+if [[ "${RUN_SETUP}" -eq 1 ]]; then
+    echo "    eurlc-wgs datadir=<folder with FASTQ files>"
+    echo
+    echo "Help:  eurlc-wgs --help   (user manual: docs/eurlc-wgs-user-manual.md)"
+else
+    echo
+    echo "Tool environments, databases and cgMLST schemas are not yet installed. Complete with:"
+    echo "    eurlc-wgs --setup species=<campylobacter,salmonella,ecoli,listeria or all>"
+fi
+echo

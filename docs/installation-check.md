@@ -58,6 +58,26 @@ A check set is a folder laid out as a validation dataset:
         fastq/                           the reads (or directly in the set folder)
         reference/<date>_<version>.json.gz   optional: results fingerprint of the approved run
 
+The command that makes one, on the installation where the configuration is
+sealed:
+
+    eurlc-wgs --make-installation-check=<set> from=<validation dataset folder> samples=<id,id,...>
+
+It finds the samples in the dataset's expected results (an unambiguous end
+of the sample id is enough) and their reads in `<from>/fastq/` or `<from>/`,
+copies the reads and the profile, writes the expected results with only
+those samples' rows, runs the set once, and requires that the run finished,
+that the seal is `SEAL VERIFIED` and that every required check against the
+expected results agrees. Then it copies the run's
+`report/tables/eurlc_results_fingerprint.json.gz` to
+`reference/<date>_<version>.json.gz`, writes `<set>_about.txt` and
+`<set>.md5`, and moves the set into place. Until then the set is in a hidden
+folder (`.<set>.building-<time>`), which is removed if a step fails, so a
+half-made set is never run. An existing set is not overwritten.
+`--allow-unsealed` skips the seal requirement (for trying out).
+
+By hand, the same thing is:
+
 1. Copy the reads, the validation profile and the expected results for the
    chosen samples into the folder.
 2. Run the set once with the approved version and copy

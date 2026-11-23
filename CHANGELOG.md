@@ -2,6 +2,67 @@
 
 Changes that a user of the pipeline can notice. The newest version first.
 
+## 1.0.0-rc3 (23 November 2026)
+
+### Changed
+
+- **Installation is done in one step, for the species you choose.**
+  `install.sh` asks which species the installation is for (or takes
+  `--species=campylobacter,salmonella`; without a terminal: all), and
+  `eurlc-wgs --setup` then installs the tools, the databases and the cgMLST
+  schema of each chosen species. It ends with the species the installation
+  is ready for. Schemas no longer need a separate
+  `--install-efsa-schemas` (which still works).
+- **`eurlc-wgs --setup species=<name>`** adds a species to an existing
+  installation.
+- **A new installation gets a configuration file**
+  (`<database>/eurlc-wgs.config`) with `species_scope` set and every other
+  setting listed, commented out, with its built-in value.
+- **`--setup` looks at what is in the database folder**: a sealed
+  installation is used as it is (nothing downloaded, `species=` refused),
+  an existing one is checked and completed, a new one is installed.
+- **With `database=<folder>` the configuration file is
+  `<folder>/eurlc-wgs.config`.** Before, the file in the default database
+  folder was used unless `configfile=` was given.
+- **`--make-installation-check=<set> from=<dataset folder> samples=<ids>`**
+  makes a check set for `--installation-check` from a validation dataset in
+  one step: the samples' reads and expected results, a run on the sealed
+  installation, and that run's results as the set's reference. Before, a
+  set was put together by hand.
+- **A sample that was not analysed to the end is CRITICAL, not PASS.** When
+  a step failed or hit its time limit, or the sample was abandoned, its QC
+  status stayed at PASS (with Reportable: No), so a run where many samples
+  had failed could look fine at first sight. The status is now CRITICAL,
+  with what happened as the reason; Reportable is No as before. The run
+  summary has a new block "Not finished:" with the samples and the
+  `--resume` command that runs the failed steps again. Results made with an
+  earlier version show these samples as PASS in `qc_status`; a comparison
+  with such a reference reports the difference.
+- **Kraken2 and Mash screen naming different species is a WARNING**, not
+  CRITICAL (`warning_taxonomy_species_disagree`), until it is better
+  understood. The reported species is Kraken2's. It can be raised per
+  species with `critical_taxonomy_species_disagree = >0`.
+- **`--setup` writes a log**, to
+  `<database>/setup_logs/<date-time>/log/log.txt`. Before, its messages
+  were only on the screen, and an empty `eurlc-wgs/log` folder was left in
+  the folder it was started from.
+- The closing message of `--setup` no longer lists `--freeze-databases` and
+  `--generate-seal` as next steps; it points to the manual.
+
+### Fixed
+
+- **`--setup` could report a database as present when only its folder
+  was.** After a failed download, the next `--setup` did not offer the
+  database again (seen with the Mash database). The database's files must
+  now be there and not empty.
+- The Mash database is downloaded under a temporary name, so an interrupted
+  download cannot be taken for the database. The Kraken2 download stops at
+  the first failing step.
+- A cgMLST schema folder left by an interrupted installation is moved to
+  `chewbbaca/incomplete/` and the schema installed again.
+- `install.sh` ends with "Installation is NOT complete" and exit code 1
+  when setup reported problems.
+
 ## 1.0.0-rc2 (21 November 2026)
 
 ### Fixed

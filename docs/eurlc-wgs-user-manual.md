@@ -90,21 +90,84 @@ cd eurlc-wgs
 bash install.sh
 ```
 
-`install.sh` creates the conda environment `eurlc-wgs`, installs the
-program into it, and then runs `eurlc-wgs --setup`, which creates one conda
-environment per tool and downloads the databases to `~/eurlc-wgs_db`. This
-takes a while.
+`install.sh` first asks which species the installation is for:
+
+```
+Which species should this installation be set up for?
+  1) Campylobacter
+  2) Salmonella
+  3) Escherichia coli
+  4) Listeria
+Numbers or names separated by commas, e.g. 1,2 [Enter = all]:
+```
+
+It then runs without further questions: it creates the conda environment
+`eurlc-wgs`, installs the program into it, and runs `eurlc-wgs --setup`,
+which creates one conda environment per tool, downloads the databases to
+`~/eurlc-wgs_db`, and installs the species tools and the cgMLST schema of
+each chosen species. This takes a while. When it ends with
+
+```
+Setup complete. This installation is ready for:
+    Campylobacter      cgMLST schema CAMPISO-PubMLST-8
+    Salmonella         cgMLST schema chewie_ns_salmonella
+```
+
+the installation is ready to use for those species
+([section 3](#3-your-first-run)). If something could not be downloaded, it
+says what is not ready; `eurlc-wgs --setup` then installs only what is
+missing. Every setup writes a log to
+`~/eurlc-wgs_db/setup_logs/<date-time>/log/log.txt`.
+
+To give the species without being asked (in a script, or over a connection
+without a terminal):
+
+```bash
+bash install.sh --species=campylobacter,salmonella
+```
+
+Without `--species` and without a terminal to ask in, all four species are
+installed.
 
 | `install.sh` option | Effect |
 |---|---|
-| `--no-setup` | Install the program only; run `eurlc-wgs --setup` yourself later |
-| `--assume-yes` | No questions |
+| `--species=LIST` | The species: `campylobacter`, `salmonella`, `ecoli`, `listeria` (comma-separated), or `all` |
+| `--database=DIR` | The database folder, if not `~/eurlc-wgs_db` |
+| `--no-setup` | Install the program only; run `eurlc-wgs --setup species=...` yourself later |
+| `--assume-yes` | No questions (all species, unless `--species` is given) |
 | `--resources-only` | Reinstall the program, templates and assets only (after `git pull`) |
 | `--optional` | Also install the tools that are off by default (Bakta, CheckM, ...). CheckM is experimental, see [section 13](#13-known-limitations) |
 | `--uninstall` | Remove all `eurlc-wgs*` environments and shared files (not the database folder) |
 
 Tool versions come from the environment files in `envs/`; every
 installation of one pipeline version gets the same tool versions.
+
+### What is already in the database folder
+
+`install.sh` and `eurlc-wgs --setup` look at the database folder first, and
+say what they found:
+
+| In the folder | Taken as | What happens |
+|---|---|---|
+| Nothing, or no `eurlc-wgs.config` | A new installation | Installed for the chosen species; `eurlc-wgs.config` is written |
+| `eurlc-wgs.config` | An existing installation | Keeps its species. Every tool, database and schema is checked, and what is missing is installed. This also finishes an installation that was interrupted |
+| `config_seal.ini` | A sealed installation ([section 12](#12-keeping-an-installation-under-control)) | Used as it is: no question, nothing downloaded, the environments made from the seal's package lists. Anything missing is reported as an error |
+
+A database or schema counts as present when its files are, not when its
+folder is: the folder of an interrupted download is not taken for a
+database, and a half-installed schema folder is moved to
+`chewbbaca/incomplete/` and the schema installed again.
+
+### Add a species later
+
+```bash
+eurlc-wgs --setup species=listeria
+```
+
+installs the tools and the schema for it and adds it to `species_scope` in
+`eurlc-wgs.config`. Species are only added this way, never removed; to stop
+running the tools of a species, edit `species_scope` in the file. A sealed
+installation cannot be changed.
 
 ### Check the installation
 
@@ -113,10 +176,11 @@ conda activate eurlc-wgs
 eurlc-wgs --setup
 ```
 
-`--setup` can be run as often as you like. It lists every tool and database
-with `✓` or `✗` and offers to install what is missing. If something could
-not be installed it ends with `ERROR: Setup finished with problems: ...`
-and a list, and exit code 1; otherwise with "Setup complete".
+`--setup` can be run as often as you like. It lists every tool, database
+and cgMLST schema with `✓` or `✗` and offers to install what is missing. If
+something could not be installed it ends with `ERROR: Setup finished with
+problems: ...`, the species that are not ready, and exit code 1; otherwise
+with "Setup complete" and the species the installation is ready for.
 
 `--setup` shows that everything is in place. To see that the installation
 also gives the results it should, run a small set of samples with known
@@ -127,23 +191,18 @@ results: `eurlc-wgs --installation-check`
 environment. Anything else started outside it stops with
 `Perl module(s) not found ... Activate it first (conda activate eurlc-wgs)`.
 
-### Only some species?
+### The configuration file
 
-By default the tools for *Campylobacter*, *Salmonella*, *E. coli* and
-*Listeria* are installed. A lab that only works with Campylobacter can say
-so at installation, and nothing for the other species is installed or run:
+A new installation gets `~/eurlc-wgs_db/eurlc-wgs.config`. It lists every
+setting with its built-in value, commented out with `#`; only
+`species_scope` is set. To change a setting, remove the `#` and edit the
+value ([section 9](#9-settings)). Settings left commented follow the
+pipeline's defaults, also after an update.
 
-```bash
-eurlc-wgs --setup species_scope=Campylobacter
-```
+### Other cgMLST schemas
 
-### cgMLST schemas
-
-Schemas are installed separately ([section 11](#11-cgmlst-schemas)):
-
-```bash
-eurlc-wgs --install-efsa-schemas
-```
+Each species gets its standard schema at installation. Other schemas, and
+schemas of your own, are in [section 11](#11-cgmlst-schemas).
 
 ---
 
@@ -376,7 +435,8 @@ What is checked by default:
 | Share of bases ≥ Q30 (raw reads) | warning < 80 %, critical < 70 %, fail < 50 % |
 | Depth counting Q30 bases, after trimming | fail < 30× |
 | Largest other species / other genus in the reads | fail > 5 % |
-| The two species methods (Kraken2 and Mash screen) | critical when the species Kraken2 reports is not among those Mash screen finds. Mash screen finding a second species as well is contamination, judged by the measures above |
+| The two species methods (Kraken2 and Mash screen) | warning when the species Kraken2 reports is not among those Mash screen finds (the reported species is Kraken2's). Mash screen finding a second species as well is contamination, judged by the measures above. To make it critical: `critical_taxonomy_species_disagree = >0` in the species' section |
+| The analysis itself | critical when the sample was not analysed to the end: a step failed or hit its time limit, or the sample was abandoned ([below](#a-step-failed-or-hit-its-time-limit)). Not a threshold; cannot be switched off |
 | Mean read length after trimming | warning < 50 bp |
 | Assembly size (*C. jejuni*) | warning outside 1.56–1.98 Mb, critical outside 1.40–2.30 Mb, fail outside 1.37–2.60 Mb |
 | Assembly size (*C. coli*) | warning outside 1.56–2.06 Mb, critical outside 1.40–2.30 Mb, fail outside 1.37–2.60 Mb |
@@ -403,7 +463,9 @@ judge those values yourself.
 
 Problems that happen during the run (a tool that failed, a time limit, a
 missing input) are listed for the sample as well, separately from the
-threshold checks.
+threshold checks. Such a sample is never shown as PASS: the results that
+are there may look fine, but some are missing, so its status is CRITICAL
+(or FAIL, when the data failed as well) and it is not reportable.
 
 ### Can the results be reported?
 
@@ -414,7 +476,7 @@ sample's own report a line with the reason:
 |---|---|
 | Yes | QC status PASS or WARNING |
 | Assess | QC status CRITICAL: not reportable as it is, but a bioinformatician may approve it after looking at the details |
-| No | QC status FAIL, an abandoned sample, or a step that failed |
+| No | QC status FAIL; or the analysis did not finish (an abandoned sample, or a step that failed). In the second case the QC status is CRITICAL, but there is nothing to assess: run the sample again ([below](#a-step-failed-or-hit-its-time-limit)) |
 | Not validated | The species is not one of the configuration's validated species (below). Shown in grey: the sample is not bad, the method is not validated for it |
 
 Hold the pointer over the value for the reason; it is also written out in
@@ -439,12 +501,45 @@ species and the samples outside them, and the run summary has a line
 the setting is in the config file, a config seal covers it
 ([section 12](#12-keeping-an-installation-under-control)).
 
+### A step failed or hit its time limit
+
+The run summary lists the samples and gives the command:
+
+```
+  Not finished: 1 sample(s) where a step failed or hit its time limit (QC CRITICAL, not reportable):
+    D1_023: skesa (timeout)
+    to run the failed steps again, keeping all other results:
+      eurlc-wgs outdir=/data/run192/eurlc-wgs --resume skesa.timeout=<longer, e.g. 6h>
+```
+
+In the report the sample is CRITICAL and Reportable is No, with the failed
+step as the reason. `--resume` runs only what is missing, for all samples
+of the run, and rebuilds the reports; the finished results are kept.
+
+- **Time limit** (`timeout`): give the tool more time in the same command
+  (`skesa.timeout=6h`; assemblers have 2 hours by default).
+- **Exit code**: look in `log/stderr.txt` for the tool's own message first.
+  If the cause was temporary (a full disk, the computer was busy), the same
+  `--resume` is enough.
+- If the step fails again and the tool is not needed, it can be left out:
+  `--resume disable=skesa`. Note that this changes what the result is based
+  on (here: the main assembly is chosen among the remaining assemblers), so
+  in a validated configuration it is a decision for whoever is responsible
+  for the method.
+
+The run ends with exit code 5 when a step failed.
+
 ### Abandoned samples
 
 A sample below the minimum depth (`fatal_mindepth` and
 `fatal_q30_mindepth`, default 30×) is stopped as soon as that is known. It
 appears in the report with the reason, and the run ends with exit code 3.
 The fix is normally more sequencing, not a setting.
+
+A sample is also abandoned when a step that everything else depends on
+fails (trimming, downsampling). It is then CRITICAL and not reportable,
+with the step and the tool's message as the reason. When the cause is
+solved, `--resume` analyses it again.
 
 ### Species and contamination
 
@@ -934,13 +1029,22 @@ changed on the command line.
 
 ### Create and edit a config file
 
+A new installation already has `~/eurlc-wgs_db/eurlc-wgs.config`, written
+by `--setup`: every setting is there with its built-in value, as a line
+starting with `#`. Remove the `#` and edit the value to change a setting.
+Lines left with `#` keep the built-in value, also when a later version of
+the pipeline changes it.
+
 ```bash
 eurlc-wgs configfile=write
 ```
 
-writes all current settings to `~/eurlc-wgs_db/eurlc-wgs.config`. Edit that
-file, or keep only the lines you want to change: anything not in the file
-keeps its default.
+writes a file where every setting is in use with its current value. That
+fixes all of them, also against later changes of the defaults -- for when
+the file itself should show every value that applied. It does not overwrite
+an existing file without asking.
+
+With `database=<folder>` the file used is `eurlc-wgs.config` in that folder.
 
 The format:
 
@@ -1150,6 +1254,13 @@ conda activate eurlc-wgs && eurlc-wgs --setup
 `--setup` notices changed tool definitions and offers to update those
 environments.
 
+The pipeline does not look for new versions itself, and contacts nothing
+outside the computer during a run. To be told about a new version, open
+<https://github.com/BoSegerman/eurlc-wgs>, choose *Watch → Custom →
+Releases*, and GitHub sends an e-mail for each release. What changed is in
+`CHANGELOG.md`. A sealed installation stays at its version: whether and
+when it is updated is decided by whoever is responsible for the method.
+
 **Freeze the databases.** Copies each database to a folder named after its
 checksum and records it, so that later runs use, and can be shown to have
 used, exactly that version:
@@ -1230,9 +1341,8 @@ eurlc-wgs --installation-check=<set>      # one set, or several: set1,set2
 ```
 
 A *check set* is a small folder of samples with known results in
-`~/eurlc-wgs_db/installation_check/<set>/`, put there by the person
-responsible for the method (how: `docs/installation-check.md`). For each
-set the command checks, in this order:
+`~/eurlc-wgs_db/installation_check/<set>/`, made by the person responsible
+for the method (below). For each set the command checks, in this order:
 
 | Check | Passes when |
 |---|---|
@@ -1253,6 +1363,36 @@ The test data are read where they are. Other arguments (`threads=`,
 
 A larger set for verifying an update can be kept in the same place and run
 by name; `--installation-check` without a name runs every set in the folder.
+
+**Make a check set.** On the installation where the configuration is
+sealed, from a validation dataset (a folder with
+`<ID>_validation_profile.yml`, its expected results and the reads):
+
+```bash
+eurlc-wgs --make-installation-check=K1 from=/data/D1 samples=D1_011,D1_014
+```
+
+An unambiguous end of the sample id is enough (`D1_011` for
+`EURLCAMPY_WGSVAL_D1_v1_011`). The command copies those samples' reads and
+the profile, writes the expected results with only their rows, runs the set
+once here, and, when the run finished with a verified seal and agrees with
+the expected results, keeps its results fingerprint as the set's reference
+and writes the `.md5` list. The set is then in
+`~/eurlc-wgs_db/installation_check/K1/`, with a description
+(`K1_about.txt`: who made it, when, pipeline version, seal, dataset,
+samples), and is copied to other computers with the database folder. The
+run it was made from is kept in `installation_check_runs/K1/`.
+
+- If anything fails (a sample not found, the seal not verified, a result
+  that does not agree), no set is made and the reason is given.
+- An existing set is never overwritten: records refer to a set by name and
+  MD5, so a changed set gets a new name.
+- A set takes its samples from one dataset. For samples from two datasets,
+  make two sets; `--installation-check` runs both.
+- `--allow-unsealed` makes a set on an installation without a seal, for
+  trying it out. Arguments such as `threads=16` are passed on to the run;
+  arguments that change the configuration make the seal `VERIFIED WITH
+  OVERRIDES`, and the set is then not made.
 
 **What each run records**, in `log/versioning_explicit/`: the checksum of
 each config file and the seal status, which database (path, version,
@@ -1306,8 +1446,9 @@ This version, 1.0.0-rc2.
 
 **Reproducibility**
 - With the default assemblers (SPAdes and SKESA), two runs on the same
-  reads with the same settings and number of threads give the same
-  results, down to the assembly file.
+  reads with the same settings give the same results, down to the assembly
+  file. In tests (November 2026) the assembly files of both were also
+  identical when the number of threads was changed.
 - **Shovill does not.** With Shovill as the assembler, the assembly differs
   slightly from run to run, also with identical settings and number of
   threads (tested with Shovill and SPAdes on two *C. jejuni* samples: the
@@ -1464,12 +1605,13 @@ eurlc-wgs database /other/db
 eurlc-wgs --assume-yes --resume
 
 # installation and maintenance
-eurlc-wgs --setup [--optional] [species_scope=<species,...>]
+eurlc-wgs --setup [--optional] [species=<campylobacter,salmonella,ecoli,listeria|all>]
 eurlc-wgs infotool=<tool> | installtool=<tool> | reinstalltool=<tool> | removetool=<tool>
 eurlc-wgs --list-schemas | --install-efsa-schemas[=<species>] | --install-schema=<name>
 eurlc-wgs --freeze-databases[=<db,...>] | --verify-databases
 eurlc-wgs --generate-seal[=<name>]
 eurlc-wgs --installation-check[=<set>]      # does this installation give the right results?
+eurlc-wgs --make-installation-check=<set> from=<dataset folder> samples=<id,...>   # make a check set
 eurlc-wgs --help | --version | --versions
 
 # control a running pipeline

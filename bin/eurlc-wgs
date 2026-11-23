@@ -17,7 +17,7 @@
 use strict;
 use warnings;
  
-our $PIPELINE_VERSION = '1.0.0-rc2';
+our $PIPELINE_VERSION = '1.0.0-rc3';
 
 # The conda environment the pipeline itself runs in (envs/core/eurlc-wgs.yml):
 # Perl with its modules, and the Python that hashes the cgMLST alleles.
@@ -112,7 +112,7 @@ my %rundata;
 $rundata{pipeline_info} = {
     name        => "eurlc-wgs",
     version     => $PIPELINE_VERSION,
-    versiondate => "2026-11-21",
+    versiondate => "2026-11-23",
     author      => "Bo Segerman",
     contact     => "bo.segerman\@sva.se",
 };
@@ -216,6 +216,18 @@ my $ASSUME_YES = 0;
 # of each _cmd_* function so the utility output itself is never suppressed.
 my $S_SUPPRESS_STARTUP_LOG = 0;
 my $S_SETUP_OPTIONAL = 0;   # --setup --optional: also install tools that are off (A10)
+## Species an installation can be set up for (--setup species=..., and
+## install.sh --species=...): key, name as used in species_scope, the
+## cgMLST schema installed for it by default, other accepted spellings.
+our @SETUP_SPECIES = (
+    [ "campylobacter", "Campylobacter",    "CAMPISO-PubMLST-8",    [qw(campy)] ],
+    [ "salmonella",    "Salmonella",       "chewie_ns_salmonella", [] ],
+    [ "ecoli",         "Escherichia coli", "chewie_ns_ecoli",      [qw(e.coli escherichia shigella)] ],
+    [ "listeria",      "Listeria",         "chewie_ns_listeria",   [] ],
+);
+our $S_SETUP_KIND          = "";   # sealed | existing | new (set when --setup is given)
+our $S_SETUP_SCOPE_CHANGED = 0;    # species= changed the scope of an existing installation
+
 
 foreach my $arg (@ARGV) {
     if ($arg =~ /^(?:--?)?assume-yes$/)               { $ASSUME_YES = 1; }
@@ -224,6 +236,7 @@ foreach my $arg (@ARGV) {
     if ($arg =~ /^(?:--?)?freeze-databases(?:=|$)/)   { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?verify-databases$/)         { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?installation-check(?:=|$)/) { $S_SUPPRESS_STARTUP_LOG = 1; }
+    if ($arg =~ /^(?:--?)?make-installation-check(?:=|$)/) { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?generate-seal(?:=|$)/)        { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?install-scheme(?:=|$)/)       { $S_SUPPRESS_STARTUP_LOG = 1; }
     if ($arg =~ /^(?:--?)?install-efsa-schemas(?:=|$)/){ $S_SUPPRESS_STARTUP_LOG = 1; }
@@ -1690,7 +1703,7 @@ $rundata{config}{defaults} = {
             test_command  => "kraken2 --version",
             db_path   => "__DB__/kraken2",
             db_test   => "__DB__/kraken2/hash.k2d",
-            install_db => "cd __DB__/kraken2;wget https://genome-idx.s3.amazonaws.com/kraken/k2_standard_08_GB_20251015.tar.gz;echo 'uncompressing';tar -xvf k2_*.tar.gz && rm -f k2_*.tar.gz",
+            install_db => "cd __DB__/kraken2 && wget https://genome-idx.s3.amazonaws.com/kraken/k2_standard_08_GB_20251015.tar.gz && echo 'uncompressing' && tar -xvf k2_*.tar.gz && rm -f k2_*.tar.gz",
     },
     bracken => {
             version_check => "loose",
@@ -1735,7 +1748,9 @@ $rundata{config}{defaults} = {
             program_name => "mash",
             db_path   => "__DB__/mash",
             db_test   => "__DB__/mash/refseq.genomes.k21s1000.msh",
-            install_db => "cd __DB__/mash;wget https://gembox.cbcb.umd.edu/mash/refseq.genomes.k21s1000.msh",
+            # Downloaded under a temporary name: an interrupted download must
+            # not leave a file that looks like the database.
+            install_db => "cd __DB__/mash && wget -O refseq.genomes.k21s1000.msh.part https://gembox.cbcb.umd.edu/mash/refseq.genomes.k21s1000.msh && mv refseq.genomes.k21s1000.msh.part refseq.genomes.k21s1000.msh",
     },
     spades => {
             version_check => "loose",
@@ -2201,11 +2216,13 @@ $rundata{config}{defaults} = {
             # the other results stay valid. To be reviewed per species with
             # more data (E. coli, Listeria).
             # The two species methods disagree (Nov 2026): the species Kraken2
-            # reports is not among those Mash screen finds. The species is a
-            # reported result, so this needs a bioinformatician: CRITICAL.
+            # reports is not among those Mash screen finds. A WARNING until
+            # it is better understood (the reported species is Kraken2's,
+            # which is the method trusted more). To make it CRITICAL for a
+            # species: critical_taxonomy_species_disagree = >0 in its section.
             # (Mash screen finding a second species as well is not this: that
             # is contamination, and the contamination measures judge it.)
-            critical_taxonomy_species_disagree     => ">0",
+            warning_taxonomy_species_disagree      => ">0",
             warning_typing_mlst_incomplete_alleles => ">0",
             warning_typing_mlst_st_disagree        => ">0",
             warning_typing_serotype_missing        => ">0",
@@ -2572,6 +2589,11 @@ HELP
 
     setdir("db", abs_path($resolved_db));
     log_message("NOTICE: Using custom database directory: [" . peekdir("db") . "]");
+    # The configuration file belongs to the database folder: with
+    # database=<folder> it is that folder's eurlc-wgs.config, not the one in
+    # the default folder (configfile=, applied after this, still decides).
+    $rundata{config}{path} = peekdir("db") . "/" . $rundata{config}{filename}
+        if ( $rundata{config}{filename} // "" ) ne "";
     },
     outdir => sub {
     my $arg = shift;
@@ -2646,7 +2668,7 @@ our @LATER_ARG_NAMES = qw(
     assume-yes no-color non-interactive overwrite recursive resume verbose
     infotool installtool reinstalltool removetool
     color colour no-colour docker optional qc-screen qcscreen
-    setup freeze-databases verify-databases installation-check generate-seal import-schema install-efsa-schemas install-schema install-scheme list-schemas update-catalog
+    setup species freeze-databases verify-databases installation-check make-installation-check from samples allow-unsealed generate-seal import-schema install-efsa-schemas install-schema install-scheme list-schemas update-catalog
     enable disable fastq fasta summarize summarise
 );
 {
@@ -2695,6 +2717,13 @@ our @LATER_ARG_NAMES = qw(
         elsif ( @saved ) {
             log_message("WARNING: Resume: the recorded data folder [$saved[-1]] is not there -- give datadir= for the folder that holds the raw data", "yellow");
         }
+    }
+    # --setup has no data folder: its log goes to the database folder,
+    # <database>/setup_logs/<time>/log, one folder per setup, so that it can
+    # be found afterwards (before: <current folder>/eurlc-wgs/log, which
+    # from install.sh was the home folder).
+    if ( exists $args{setup} && !defined $S_OUTDIR_ARG && -d ( peekdir("db") // "" ) ) {
+        $S_OUTDIR_ARG = peekdir("db") . "/setup_logs/" . strftime( "%Y%m%d-%H%M%S", localtime );
     }
     set_output_paths( $S_OUTDIR_ARG // ( peekdir("in") . "/$S_DEFAULT_OUT_NAME" ) );
     $S_logdir      = peekdir("out,log");
@@ -3432,6 +3461,7 @@ foreach my $key ( sort keys %args ) {
         log_message("NOTICE: Overriding from launch-arguments: $section.enabled=$want{$section}");
         $rundata{config}{overrides} .= "$section.enabled=$want{$section}\n";
     }
+    apply_setup_species();
     resolve_auto_enabled();
 
     # Shovill master switch and variants that do not agree: say so, instead
@@ -3544,6 +3574,10 @@ my %early_handled_args = (
     "freeze-databases" => 1,
     "verify-databases" => 1,   # B12: full MD5 of every database, ignoring remembered values
     "installation-check" => 1, # run the installation check set(s) in <database>/installation_check
+    "make-installation-check" => 1, # build a check set from a validation dataset (with from= samples=)
+    "from"             => 1,
+    "samples"          => 1,
+    "allow-unsealed"   => 1,
     "generate-seal"    => 1,   # also matches --generate-seal=Name (prefix match below)
     "install-scheme"   => 1,   # also matches --install-scheme=Species (prefix match below) [LEGACY alias]
     "install-schema"   => 1,   # also matches --install-schema=Name (prefix match below)
@@ -3552,6 +3586,7 @@ my %early_handled_args = (
     "update-catalog"   => 1,   # also matches --update-catalog[=url]
     "install-efsa-schemas" => 1,  # install EFSA One Health cgMLST schemas (also matches =species,...)
     "optional"         => 1,   # --setup --optional, checked directly against @ARGV
+    "species"          => 1,   # --setup species=<list>: species to set the installation up for
     "qc-screen"        => 1,   # QC screen mode, checked directly against @ARGV ($S_QCSCREEN)
     "qcscreen"         => 1,
 );
@@ -3750,6 +3785,12 @@ if ( $R_cfg->{general}{archive_results} ) {
     };
 
     if ($found_setup) {
+        # Setup keeps a log of its own (<database>/setup_logs/<time>/log/log.txt,
+        # see "Output folder"); before, its messages were only on the screen.
+        if ( ( peekdir("out") // "" ) =~ m{/setup_logs/} ) {
+            getdir("out,log");
+            initiate_logfile();
+        }
         $utility_exit->( _cmd_setup() );
     }
     if ($found_freeze) {
@@ -3765,6 +3806,16 @@ if ( $R_cfg->{general}{archive_results} ) {
         my $failed = _cmd_installation_check( $args{"installation-check"} );
         close_logfile();
         exit( $failed ? 1 : 0 );
+    }
+    if ( exists $args{"make-installation-check"} ) {
+        my $failed = _cmd_make_installation_check( $args{"make-installation-check"}, $args{from}, $args{samples},
+                                                   exists $args{"allow-unsealed"} ? 1 : 0 );
+        close_logfile();
+        exit( $failed ? 1 : 0 );
+    }
+    for my $a (qw(from samples allow-unsealed)) {
+        graceful_die("$a" . ( $a eq "allow-unsealed" ? "" : "=" ) . " is used together with --make-installation-check=<name>")
+            if exists $args{$a};
     }
     if ($found_seal) {
         my $seal_name = $args{"generate-seal"};
@@ -5691,6 +5742,95 @@ sub species_lists_overlap {
         }
     }
     return 0;
+}
+
+# "campylobacter, Salmonella enterica, 3" -> ( [keys], [not recognised] ).
+# Accepts the key, the name, a species of the genus, another spelling, the
+# number in the list (as install.sh asks for it), and "all".
+sub setup_species_keys {
+    my ($text) = @_;
+    my ( @keys, @unknown, %seen );
+    for my $tok ( split /,/, $text // "" ) {
+        ( my $t = lc $tok ) =~ s/_/ /g;
+        $t =~ s/^\s+|\s+$//g;
+        $t =~ s/\s+/ /g;
+        next if $t eq "";
+        my @hit;
+        if ( $t eq "all" ) { @hit = map { $_->[0] } @SETUP_SPECIES; }
+        elsif ( $t =~ /^[1-9]\d*$/ && $t <= @SETUP_SPECIES ) { @hit = ( $SETUP_SPECIES[ $t - 1 ][0] ); }
+        else {
+            for my $sp (@SETUP_SPECIES) {
+                my ( $key, $name, undef, $alias ) = @$sp;
+                my $genus = lc( ( split / /, $name )[0] );
+                if (   $t eq $key || $t eq lc $name || ( grep { $t eq $_ } @$alias )
+                    || $t eq $genus || index( $t, "$genus " ) == 0 || $t eq "e coli" ) {
+                    @hit = ($key);
+                    last;
+                }
+            }
+        }
+        if   (@hit) { push @keys, grep { !$seen{$_}++ } @hit; }
+        else        { push @unknown, $tok =~ s/^\s+|\s+$//gr; }
+    }
+    return ( \@keys, \@unknown );
+}
+
+# The species keys covered by a species_scope text.
+sub setup_species_keys_in_scope {
+    my ($scope) = @_;
+    my @scope = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, $scope // "";
+    return () unless @scope;
+    return map { $_->[0] } @SETUP_SPECIES if grep { lc $_ eq "all" } @scope;
+    return map { $_->[0] } grep { species_lists_overlap( \@scope, [ $_->[1] ] ) } @SETUP_SPECIES;
+}
+
+# What --setup finds in the database folder:
+#   sealed    a configuration seal: the installation is used as it is
+#   existing  a configuration file: an installation to check and complete
+#   new       neither: a new installation
+sub setup_installation_kind {
+    my $db   = peekdir("db") // "";
+    my $seal = $R_cfg->{general}{seal} // "";
+    return "sealed"   if ( $db ne "" && -f "$db/config_seal.ini" ) || ( $seal ne "" && -f $seal );
+    return "existing" if ( $rundata{config}{path} // "" ) ne "" && -f $rundata{config}{path};
+    return "new";
+}
+
+# --setup species=<list>: decide the species scope before the species tools
+# are switched on (resolve_auto_enabled). A new installation gets exactly the
+# species given; an existing one keeps its species and gets the new ones
+# added (nothing is ever removed here); a sealed one cannot be changed.
+sub apply_setup_species {
+    my $given = exists $args{species} ? ( $args{species} // "" ) : undef;
+    unless ( exists $args{setup} ) {
+        graceful_die("species= is used together with --setup (eurlc-wgs --setup species=<"
+                   . join( "|", map { $_->[0] } @SETUP_SPECIES ) . ">)") if defined $given;
+        return;
+    }
+    $S_SETUP_KIND = setup_installation_kind();
+    return unless defined $given;
+    my ( $keys, $unknown ) = setup_species_keys($given);
+    graceful_die( "--setup species=$given: not recognised: " . join( ", ", @$unknown )
+                . " -- choose from: " . join( ", ", map { $_->[0] } @SETUP_SPECIES ) . ", all" ) if @$unknown;
+    graceful_die( "--setup species= needs at least one species: " . join( ", ", map { $_->[0] } @SETUP_SPECIES ) . ", all" ) unless @$keys;
+    if ( $S_SETUP_KIND eq "sealed" ) {
+        graceful_die("This is a sealed installation (" . peekdir("db") . ") -- its species are part of what the seal "
+                   . "covers and cannot be changed with species=. Run --setup without species=, or set up an unsealed "
+                   . "installation in another database folder (database=<folder>).");
+    }
+    my %name = map { $_->[0] => $_->[1] } @SETUP_SPECIES;
+    my $old  = $R_cfg->{general}{species_scope} // "";
+    my $new;
+    if ( $S_SETUP_KIND eq "existing" ) {
+        my %have = map { $_ => 1 } setup_species_keys_in_scope($old);
+        my @add  = grep { !$have{$_} } @$keys;
+        $new = join( ", ", ( grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, $old ), map { $name{$_} } @add );
+        $S_SETUP_SCOPE_CHANGED = 1 if @add;
+    } else {
+        $new = join( ", ", map { $name{$_} } @$keys );
+    }
+    $R_cfg->{general}{species_scope} = $new;
+    $args_handled{species} = 1;
 }
 
 # enabled = auto -> 1 if the tool's species overlap general.species_scope,
@@ -23560,7 +23700,7 @@ sub main_report_section_sample_overview {
     $html .= "</table>\n";
     # the tooltips do not reach a printed report
     $html .= "<p class=\"rep-legend\">Reportable: <b>Yes</b> = QC PASS or WARNING; <b>Assess</b> = QC CRITICAL, to be assessed by a bioinformatician; "
-           . "<b>No</b> = QC FAIL, or the sample could not be analysed; <b>Not validated</b> = a species the configuration is not validated for. "
+           . "<b>No</b> = QC FAIL, or the analysis of the sample did not finish (a step failed: run it again); <b>Not validated</b> = a species the configuration is not validated for. "
            . "The reason is shown when the pointer is held over the value, and in the sample's own report.</p>\n";
 
     return $html;
@@ -25315,10 +25455,37 @@ sub evaluate_sample_qc {
         evaluate_qc_measure($samplenr, $measure);
     }
 
+    # A sample that was not analysed to the end is never shown as PASS:
+    # CRITICAL, with what happened. (QC FAIL on the data still wins.)
+    {
+        my $t = run_problem_text( $R_samples->[$samplenr] );
+        set_report_issue( $samplenr, "run", "critical", $t ) if defined $t;
+    }
+
     sync_qc_from_report_issues($samplenr);
     set_reportable($samplenr);
 
     return 1;
+}
+
+## A sample that was not analysed to the end: abandoned, or a step failed
+## or hit its time limit (steps that failed as a consequence of data that
+## had already failed are not counted, see expected_failed_steps). Returns
+## the text for the report, or undef. The QC measures cannot see this --
+## the results that are there may look fine -- so without it such a sample
+## kept the PASS it started with.
+sub run_problem_text {
+    my ($s) = @_;
+    return undef unless ref $s eq 'HASH';
+    if ( $s->{fatal_error} ) {
+        my $step = ( $s->{fatal_error_runstep} // "" ) ne "" ? " at step $s->{fatal_error_runstep}" : "";
+        return "Analysis not finished: the sample was abandoned$step -- results are missing or incomplete";
+    }
+    my @f = @{ $s->{failed_steps} // [] };
+    return undef unless @f;
+    return "Analysis not finished: step(s) failed: "
+         . join( ", ", map { ref $_ eq 'HASH' ? "$_->{runstep} ($_->{reason})" : $_ } @f )
+         . " -- results are missing or incomplete; run the analysis again with --resume";
 }
 
 ## Can the sample's results be reported? (EURL convention, also used by the
@@ -25360,12 +25527,18 @@ sub set_reportable {
         $m = join("; ", @$m) if ref $m eq 'ARRAY';
         ( $value, $reason ) = ( "no", "abandoned" . ( defined $m && $m ne "" ? ": $m" : "" ) );
     }
-    elsif ( $status eq "FAIL" || $status eq "CRITICAL" ) {
+    elsif ( $status eq "FAIL" ) {
         my $i = qc_root_cause_message( $s, $status ) // $first->( lc $status );
         ( $value, $reason ) = ( "no", "QC $status" . ( $i ne "" ? ": $i" : "" ) );
     }
     elsif ( @{ $s->{failed_steps} // [] } ) {
-        ( $value, $reason ) = ( "no", "step(s) failed: " . join(", ", map { ref $_ eq 'HASH' ? "$_->{runstep} ($_->{reason})" : $_ } @{ $s->{failed_steps} }) );
+        # before CRITICAL: the failed step is the reason, and what to do
+        ( $value, $reason ) = ( "no", "step(s) failed: " . join(", ", map { ref $_ eq 'HASH' ? "$_->{runstep} ($_->{reason})" : $_ } @{ $s->{failed_steps} })
+                                    . " -- run the analysis again with --resume" );
+    }
+    elsif ( $status eq "CRITICAL" ) {
+        my $i = qc_root_cause_message( $s, $status ) // $first->( lc $status );
+        ( $value, $reason ) = ( "no", "QC $status" . ( $i ne "" ? ": $i" : "" ) );
     }
     elsif ( $status eq "WARNING" ) {
         my $i = qc_root_cause_message( $s, "WARNING" ) // $first->("warning");
@@ -31667,6 +31840,30 @@ sub print_run_summary {
         }
     }
 
+    # Samples where a step failed or hit its time limit: which, and the
+    # command that finishes them.
+    {
+        my @fs = grep { !$_->{fatal_error} && @{ $_->{failed_steps} // [] } } @$samples;
+        if (@fs) {
+            $add->(sprintf( "  %-12s %d sample(s) where a step failed or hit its time limit (QC CRITICAL, not reportable):", "Not finished:", scalar @fs ), "red");
+            my %timed_out;
+            for my $s ( @fs[ 0 .. ( $#fs < 9 ? $#fs : 9 ) ] ) {
+                $add->("    " . ( $s->{name} // "?" ) . ": "
+                     . join(", ", map { ref $_ eq 'HASH' ? "$_->{runstep} ($_->{reason})" : $_ } @{ $s->{failed_steps} }), "red");
+            }
+            $add->("    ... and " . ( @fs - 10 ) . " more -- see the log", "red") if @fs > 10;
+            for my $s (@fs) {
+                $timed_out{ $_->{runstep} } = 1 for grep { ref $_ eq 'HASH' && ( $_->{reason} // "" ) eq "timeout" } @{ $s->{failed_steps} };
+            }
+            my $out = eval { getdir("out") } // "<output folder>";
+            my @more = map { ( ref $R_cfg->{$_} eq 'HASH' ? $_ : "<tool>" ) . ".timeout=<longer, e.g. 6h>" } sort keys %timed_out;
+            my %u; @more = grep { !$u{$_}++ } @more;
+            $add->("    to run the failed steps again, keeping all other results:");
+            $add->("      eurlc-wgs outdir=$out --resume" . ( @more ? " " . join( " ", @more ) : "" ));
+            $add->("    (a step that hit its time limit needs a longer one; other failures: see log/stderr.txt first)") ;
+        }
+    }
+
     # Steps skipped because an earlier step of the sample failed
     {
         my @sk = grep { @{ $_->{skipped_upstream} // [] } } @$samples;
@@ -33706,28 +33903,50 @@ sub _cmd_setup {
     if ($custom_ymls) {
         log_message("NOTICE: Found YML files in $db_dir/yml/ -- will use these for environment installation.");
     }
-    if (-f $custom_config && ($rundata{config}{path} // "") ne $custom_config) {
-        log_message("NOTICE: Found config file in db directory.", "yellow");
-        log_message("NOTICE: For a fully configured installation, run with:");
-        log_message("NOTICE:   eurlc-wgs --setup configfile=$custom_config");
+
+    # ── 2b. What is here, species, configuration file ────────────────
+    # The database folder decides what setup does (setup_installation_kind):
+    # a sealed installation is used as it is, an existing one is checked
+    # and completed, a new one is installed for the chosen species.
+    my $kind   = $S_SETUP_KIND || setup_installation_kind();
+    my $sealed = $kind eq "sealed" ? 1 : 0;
+    my $scope_text = $R_cfg->{general}{species_scope} // "";
+    my @scope_keys = setup_species_keys_in_scope($scope_text);
+    log_message("NOTICE:");
+    if ($sealed) {
+        log_message("NOTICE: Found a sealed installation in this folder -- it is used as it is:");
+        log_message("NOTICE:   nothing is downloaded and no setting is changed; the tool environments");
+        log_message("NOTICE:   are made from the package lists of the seal. Anything missing is reported.");
+    } elsif ( $kind eq "existing" ) {
+        log_message("NOTICE: Found an existing installation in this folder ($custom_config).");
+        log_message("NOTICE:   Every tool, database and cgMLST schema is checked; what is missing is installed.");
+    } else {
+        log_message("NOTICE: New installation.");
+    }
+    log_message("NOTICE: Species: " . ( $scope_text ne "" ? $scope_text : "(none)" ));
+    unless ( $ASSUME_YES || prompt_yes_no("Continue?", 1) ) {
+        log_message("NOTICE: Setup cancelled -- nothing was changed.");
+        return 0;
     }
 
-    # ── 2b. Species scope ────────────────────────────────────────────
-    # Species-specific tools are installed for general.species_scope
-    # (resolved before this point). Given on the command line
-    # (--setup species_scope="Campylobacter"), it is also written to the
-    # configuration file in use, so later runs use the same scope.
-    log_message("NOTICE:");
-    log_message("NOTICE: Species scope: " . ( $R_cfg->{general}{species_scope} // "" ));
-    if ( ( $rundata{config}{overrides} // "" ) =~ /general\.species_scope=/ ) {
-        my $cfg_path = $rundata{config}{path} // "";
-        if ( $cfg_path ne "" && -f $cfg_path ) {
-            if ( set_config_file_value( $cfg_path, "general", "species_scope", $R_cfg->{general}{species_scope} ) ) {
-                log_message("NOTICE: Saved species_scope in $cfg_path", "green");
+    my $cfg_path = $rundata{config}{path} // "";
+    if ( $kind eq "new" ) {
+        # A configuration file with every setting listed but commented out,
+        # and the species of this installation set.
+        if ( $cfg_path ne "" && !-e $cfg_path ) {
+            if ( write_commented_config( $cfg_path, $scope_text ) ) {
+                log_message("NOTICE: Configuration file written: $cfg_path", "green");
+                log_message("NOTICE:   (species_scope is set; every other setting is listed, commented out, with its default)");
+            } else {
+                log_message("WARNING: Could not write $cfg_path -- the species choice applies to this setup only.", "yellow");
             }
+        }
+    } elsif ( !$sealed
+              && ( $S_SETUP_SCOPE_CHANGED || ( $rundata{config}{overrides} // "" ) =~ /general\.species_scope=/ ) ) {
+        if ( $cfg_path ne "" && -f $cfg_path && set_config_file_value( $cfg_path, "general", "species_scope", $scope_text ) ) {
+            log_message("NOTICE: Saved species_scope in $cfg_path", "green");
         } else {
-            log_message("NOTICE: No configuration file in use -- species_scope applies to this setup only.", "yellow");
-            log_message("NOTICE: To keep it, write a config (configfile=write) and set species_scope in its [general] section.", "yellow");
+            log_message("WARNING: Could not save species_scope in the configuration file -- it applies to this setup only.", "yellow");
         }
     }
 
@@ -33865,14 +34084,20 @@ sub _cmd_setup {
 
             if ($frozen ne "" && -d $frozen) {
                 log_message(sprintf("NOTICE:   ✓  %-28s (frozen %s)", $name, substr($ref_md5, 0, 8)), "green");
-            } elsif ($live ne "" && -d $live) {
+            } elsif ( live_db_present($name, $db, $live) ) {
                 my $why = $ref_md5 ne "" ? "frozen copy missing -- live database will be used"
                                          : "live, not frozen";
                 log_message(sprintf("NOTICE:   ○  %-28s (%s)", $name, $why), "yellow");
             } else {
                 log_message(sprintf("NOTICE:   ✗  %-28s (not found: %s)", $name, $live || "no db_path for " . ($db->{config_key} // '?')), "red");
-                my $tool = _find_tool_for_db($name, $db);
-                $db_result->( defined $tool ? _setup_offer_db_install($tool, $name, $live) : undef );
+                if ($sealed) {
+                    # never downloaded: it would be another version than the sealed one
+                    log_message("NOTICE:      missing from the sealed installation -- copy it from where the seal was made", "red");
+                    $n_db_failed++;
+                } else {
+                    my $tool = _find_tool_for_db($name, $db);
+                    $db_result->( defined $tool ? _setup_offer_db_install($tool, $name, $live) : undef );
+                }
             }
         }
     } else {
@@ -33896,9 +34121,53 @@ sub _cmd_setup {
                 log_message(sprintf("NOTICE:   ✓  %-28s (%s)", $tool, $display_path), "green");
             } else {
                 log_message(sprintf("NOTICE:   ✗  %-28s (%s)", $tool, $display_path), "red");
-                $db_result->( _setup_offer_db_install($tool, $tool, $db_path) );
+                if ($sealed) { $n_db_failed++; }
+                else         { $db_result->( _setup_offer_db_install($tool, $tool, $db_path) ); }
             }
         }
+    }
+
+    # ── 4b. cgMLST schemas ────────────────────────────────────────────
+    # The default schema of every species of the installation. A schema
+    # counts as installed when its folder has loci and a schema.ini (written
+    # last by the installer); a folder without them is the rest of an
+    # interrupted installation and is moved aside.
+    log_message("NOTICE:");
+    log_message("NOTICE: ── cgMLST schemas ───────────────────────────────");
+    my $schemas_root = ( peekdir("db") // "" ) . "/chewbbaca/schemas";
+    my %sp_def       = map { $_->[0] => $_ } @SETUP_SPECIES;
+    my $n_schema_failed = 0;
+    my @schema_missing;
+    for my $key (@scope_keys) {
+        my ( undef, $name, $schema ) = @{ $sp_def{$key} };
+        if ( schema_is_installed("$schemas_root/$schema") ) {
+            log_message(sprintf("NOTICE:   ✓  %-18s %s", $name, $schema), "green");
+        } else {
+            log_message(sprintf("NOTICE:   ✗  %-18s %s (not installed)", $name, $schema), $sealed ? "red" : "yellow");
+            push @schema_missing, $key;
+        }
+    }
+    log_message("NOTICE:   (no species chosen)") unless @scope_keys;
+    if ( @schema_missing && $sealed ) {
+        $n_schema_failed = @schema_missing;
+        log_message("NOTICE:      missing from the sealed installation -- copy it from where the seal was made", "red");
+        @schema_missing = ();
+    }
+    if ( @schema_missing && ( $ASSUME_YES || prompt_yes_no("  Download and install the missing schema(s)?", 1) ) ) {
+        for my $key (@schema_missing) {
+            my $dir = "$schemas_root/$sp_def{$key}[2]";
+            next unless -d $dir;
+            # outside the schemas folder, so that it is never taken for a schema
+            my $aside_root = ( peekdir("db") // "" ) . "/chewbbaca/incomplete";
+            ensure_dir($aside_root);
+            my $aside = "$aside_root/$sp_def{$key}[2]-" . strftime( "%Y%m%d-%H%M%S", localtime );
+            if ( rename( $dir, $aside ) ) { log_message("NOTICE:   Incomplete schema folder moved aside: $aside", "yellow"); }
+            else                          { log_message("WARNING:  Could not move aside the incomplete folder $dir: $!", "red"); }
+        }
+        _cmd_install_efsa_schemas( join( ",", @schema_missing ), from_setup => 1 );
+        my @still = grep { !schema_is_installed("$schemas_root/$sp_def{$_}[2]") } @schema_missing;
+        $n_schema_failed = @still;
+        @schema_missing  = @still;
     }
 
     # ── 5. Configuration seal status ──────────────────────────────────
@@ -33915,56 +34184,140 @@ sub _cmd_setup {
                   : $result->{status} eq "SEAL BROKEN"   ? "red" : "yellow";
         log_message("NOTICE:   $result->{status}: $result->{name}", $color);
     } elsif ($seal_path ne "") {
-        log_message("NOTICE:   UNSEALED -- $seal_path not found", "yellow");
-        log_message("NOTICE:   Run --freeze-databases then --generate-seal to create a seal.");
+        log_message("NOTICE:   UNSEALED -- no seal in this installation (see the user manual, section 12)");
     } else {
-        log_message("NOTICE:   UNSEALED -- no seal configured", "yellow");
+        log_message("NOTICE:   UNSEALED -- no seal configured");
     }
 
     # ── 6. Summary ────────────────────────────────────────────────────
+    # What the installation is ready for and how to go on. Freezing and
+    # sealing are not listed as next steps: they are for whoever is
+    # responsible for a validated method, and are described in the manual.
     log_message("NOTICE:");
     log_message("NOTICE: ─────────────────────────────────────────────────");
-    my $n_failures = $n_failed + $n_db_failed;
+    my $n_failures = $n_failed + $n_db_failed + $n_schema_failed;
+    my $skipped    = ( $n_missing > 0 || $n_db_missing > 0 || ( @schema_missing && !$n_schema_failed ) ) ? 1 : 0;
     if ($n_failures) {
         # Exit code 1 (A14), so install.sh and scripts see it.
         log_message("ERROR: Setup finished with problems: "
-            . join(", ", ( $n_failed ? "$n_failed conda environment(s)" : () ), ( $n_db_failed ? "$n_db_failed database(s)" : () ))
-            . " could not be installed -- see the lines marked ✗ above", "red");
+            . join(", ", ( $n_failed        ? "$n_failed conda environment(s)" : () ),
+                         ( $n_db_failed     ? "$n_db_failed database(s)"       : () ),
+                         ( $n_schema_failed ? "$n_schema_failed cgMLST schema(s)" : () ))
+            . ( $sealed ? " missing" : " could not be installed" ) . " -- see the lines marked ✗ above", "red");
     }
-    log_message("NOTICE: " . ( $n_failures ? "Next steps:" : "Setup complete. Next steps:" ));
-    if ($n_failures) {
-        log_message("NOTICE:   - Fix the failed installations (log: " . getdir("out,log") . ") and run --setup again.");
+    my %schema_gone = map { $_ => 1 } @schema_missing;
+    my @ready     = grep { !$schema_gone{$_} } @scope_keys;
+    my @not_ready = grep {  $schema_gone{$_} } @scope_keys;
+    my $basics_ok = ( $n_failed + $n_db_failed == 0 && !$n_missing && !$n_db_missing ) ? 1 : 0;
+    if ( $basics_ok && @ready ) {
+        log_message("NOTICE: " . ( $n_failures || @not_ready ? "Setup is not complete. Ready so far:" : "Setup complete. This installation is ready for:" ),
+                    $n_failures || @not_ready ? "yellow" : "green");
+        log_message(sprintf("NOTICE:     %-18s cgMLST schema %s", $sp_def{$_}[1], $sp_def{$_}[2]), "green") for @ready;
+    } elsif ( $basics_ok && !@scope_keys ) {
+        log_message("NOTICE: Setup complete. No species is chosen: the general analyses run, but no cgMLST and no species tools.", "yellow");
+    } else {
+        log_message("NOTICE: Setup is not complete.", "yellow");
     }
-    if ($n_missing > 0 || $n_db_missing > 0) {
-        log_message("NOTICE:   - Some environments or databases were skipped. Re-run --setup to install them.");
+    if (@not_ready) {
+        log_message("NOTICE: Not ready:", "yellow");
+        log_message(sprintf("NOTICE:     %-18s cgMLST schema %s is not installed", $sp_def{$_}[1], $sp_def{$_}[2]), "yellow") for @not_ready;
     }
-    # cgMLST schemas are installed separately: name the EFSA ones that are
-    # missing for the species in scope, as a ready command.
-    {
-        my %efsa = ( campylobacter => [ "CAMPISO-PubMLST-8",    "Campylobacter" ],
-                     ecoli         => [ "chewie_ns_ecoli",      "Escherichia coli" ],
-                     salmonella    => [ "chewie_ns_salmonella", "Salmonella" ],
-                     listeria      => [ "chewie_ns_listeria",   "Listeria" ] );
-        my $schemas = ( peekdir("db") // "" ) . "/chewbbaca/schemas";
-        my $scope   = [ grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $R_cfg->{general}{species_scope} // "" ) ];
-        my @missing = grep {
-            !-d "$schemas/$efsa{$_}[0]"
-            && ( !@$scope || grep( { lc $_ eq 'all' } @$scope ) || species_lists_overlap( $scope, [ $efsa{$_}[1] ] ) )
-        } sort keys %efsa;
-        if (@missing) {
-            log_message("NOTICE:   - Install the cgMLST schemas (EFSA):");
-            log_message("NOTICE:       eurlc-wgs --install-efsa-schemas"
-                      . ( @missing == keys %efsa ? "" : "=" . join( ",", @missing ) ));
-            log_message("NOTICE:     (--list-schemas shows all available schemas)");
+    if ( $n_failures || $skipped ) {
+        log_message("NOTICE:");
+        log_message("NOTICE: To finish: " . ( $sealed
+            ? "copy what is missing from the installation where the seal was made, then run eurlc-wgs --setup again."
+            : "run eurlc-wgs --setup again -- it installs only what is missing. (log: " . getdir("out,log") . ")" ));
+    }
+    if ( $basics_ok && @ready ) {
+        log_message("NOTICE:");
+        log_message("NOTICE: Run an analysis:");
+        log_message("NOTICE:     eurlc-wgs datadir=<folder with FASTQ files>");
+    }
+    unless ($sealed) {
+        my @others = grep { my $k = $_; !grep { $_ eq $k } @scope_keys } map { $_->[0] } @SETUP_SPECIES;
+        if (@others) {
+            log_message("NOTICE: Add a species later (" . join( ", ", @others ) . "):");
+            log_message("NOTICE:     eurlc-wgs --setup species=<name>");
         }
+        log_message("NOTICE: Settings: $cfg_path") if $cfg_path ne "" && -f $cfg_path;
+        log_message("NOTICE: Log of this setup: " . peekdir("out,log") . "/log.txt") if $logfile_open;
+        log_message("NOTICE: Other cgMLST schemas: eurlc-wgs --list-schemas");
+        log_message("NOTICE: For validated use, the tool and database versions of an installation can be locked");
+        log_message("NOTICE:   and sealed. See the user manual, section 12 (Keeping an installation under control).");
+    } elsif ( !$n_failures ) {
+        log_message("NOTICE: Check the installation against its control set: eurlc-wgs --installation-check");
     }
-    if (!-f ($seal_path // "")) {
-        log_message("NOTICE:   - Run --freeze-databases to lock database versions.");
-        log_message("NOTICE:   - Run --generate-seal=\"<name>\" after validation to create a seal.");
-    }
-    log_message("NOTICE:   - Run eurlc-wgs --versions to see every tool's version.");
     log_message("NOTICE: ─────────────────────────────────────────────────");
     return $n_failures;
+}
+
+# A cgMLST schema folder that the installer finished: loci and a schema.ini
+# (the installer writes schema.ini after the loci are in place).
+sub schema_is_installed {
+    my ($dir) = @_;
+    return 0 unless defined $dir && -d $dir && -s "$dir/schema.ini";
+    my @loci = glob("$dir/*.fasta");
+    return @loci ? 1 : 0;
+}
+
+# A configuration file for a new installation: every setting with its
+# built-in value, commented out ("#name=value"), so that the file shows what
+# can be changed without fixing anything -- a later version's new defaults
+# still apply to every line left commented. Only species_scope is set.
+# (configfile=write writes the full, active file: for a sealed configuration,
+# where every value is meant to be fixed.)
+sub write_commented_config {
+    my ($path, $scope) = @_;
+    my $def = $rundata{config}{defaults};
+    return 0 unless ref $def eq 'HASH';
+    my $tmp = "$path.tmp$$";
+    open( my $fh, '>', $tmp ) or do { log_message("WARNING: Cannot write [$tmp]: $!"); return 0; };
+    print $fh "; EURLC-WGS configuration file\n";
+    print $fh "; Written by eurlc-wgs --setup (version " . $PIPELINE_VERSION . ") on " . strftime( "%Y-%m-%d", localtime ) . "\n";
+    print $fh ";\n";
+    print $fh "; Every setting is listed with its built-in value. Lines that start with '#' are\n";
+    print $fh "; not in use: the built-in value applies, also after an update of the pipeline.\n";
+    print $fh "; To change a setting, remove the '#' at the start of its line and edit the value.\n";
+    print $fh "; Lines that start with ';' are explanations.\n";
+    print $fh "; A changed setting can also be given for one run: eurlc-wgs <section>.<name>=<value>\n";
+    print $fh "; (settings in [general] without the section: eurlc-wgs threads=16)\n\n";
+    for my $section ( "general", grep { $_ ne "general" } sort keys %$def ) {
+        next if $section eq "chewbbaca_schemas" || $section eq "species";
+        next unless ref $def->{$section} eq 'HASH';
+        print $fh "[$section]\n";
+        if ( $section eq "general" ) {
+            print $fh "; Species this installation is set up for (chosen at installation).\n";
+            print $fh "; Add one with: eurlc-wgs --setup species=<name>\n";
+            print $fh "species_scope=$scope\n";
+        }
+        for my $param ( sort keys %{ $def->{$section} } ) {
+            next if $section eq "general" && $param eq "species_scope";
+            my $value = $def->{$section}{$param};
+            if    ( ref $value eq 'ARRAY' && !grep { ref } @$value ) { $value = join( ", ", @$value ); }
+            elsif ( ref $value )                                     { next; }
+            $value //= "";
+            print $fh "; Live database path -- used unless a frozen version is defined in db_freeze.config\n" if $param eq "db_path";
+            print $fh "#$param=$value\n";
+        }
+        print $fh "\n";
+    }
+    print $fh "; chewBBACA schemas are discovered from db/chewbbaca/schemas/<name>/schema.ini\n";
+    print $fh "; To override a schema setting, add a section: [chewbbaca_schema_<name>] with e.g. enabled=0\n\n";
+    if ( ref $def->{species} eq 'HASH' ) {
+        for my $species_name ( sort keys %{ $def->{species} } ) {
+            my $sp = $def->{species}{$species_name};
+            next unless ref $sp eq 'HASH';
+            print $fh "[species__$species_name]\n";
+            for my $k ( sort keys %$sp ) {
+                my $v = $sp->{$k} // "";
+                next if ref $v;
+                print $fh "#$k=$v\n";
+            }
+            print $fh "\n";
+        }
+    }
+    close $fh or do { log_message("WARNING: Cannot write [$tmp]: $!"); unlink $tmp; return 0; };
+    return rename( $tmp, $path ) ? 1 : 0;
 }
 
 # Find which tool config section corresponds to a db_freeze.config entry.
@@ -34007,6 +34360,24 @@ sub get_live_db_root {
         $root = fill_placeholders($db->{path});
     }
     return $root;
+}
+
+# Is the live database of a db_freeze.config entry there? The folder alone
+# does not show it: a failed or interrupted download leaves an empty folder,
+# and --setup then reported the database as present and never offered it
+# again. The marker files must exist. chewBBACA schemas are judged by their
+# folder: their marker file is first written by --freeze-databases.
+sub live_db_present {
+    my ($name, $db, $live) = @_;
+    return 0 unless defined $live && $live ne "" && -d $live;
+    return 1 if ( $db->{config_key} // "" ) =~ /^chewbbaca_schemas\./;
+    my @markers = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, ( $db->{marker_file} // "" );
+    return 1 unless @markers;
+    for my $m (@markers) {
+        my @hit = grep { -e $_ && -s _ } glob("$live/$m");
+        return 0 unless @hit;
+    }
+    return 1;
 }
 
 # Program a db_freeze.config entry belongs to (for the enabled check).
@@ -35080,6 +35451,215 @@ sub _cmd_installation_check {
     return $failed;
 }
 
+## --make-installation-check=<name> from=<validation dataset folder> samples=<id,id,...>
+##
+## Builds a check set for --installation-check from a validation dataset
+## (a folder with <ID>_validation_profile.yml, its expected results and the
+## reads), for whoever is responsible for the sealed configuration:
+##   1. finds the samples (an unambiguous end of the sample id is enough)
+##      and their read files (in <from>/fastq/ or <from>/)
+##   2. copies the reads and the profile; writes the expected results with
+##      only the rows of those samples
+##   3. runs the set once on this installation and compares with the
+##      expected results
+##   4. keeps that run's results fingerprint as the set's reference
+##   5. writes the .md5 list, and moves the set to
+##      <database>/installation_check/<name>/
+## The set is built in a hidden folder beside its final place and moved there
+## only when every step worked, so a half-made set is never taken for one.
+## An existing set is never overwritten: a changed set is a new set.
+## The reference is the results of the configuration that is sealed, so a
+## SEAL VERIFIED run is required; --allow-unsealed is for trying it out.
+## Returns the number of problems (0 = the set is made).
+sub make_check_pick_samples {
+    my ($ids, $wanted) = @_;   # all sample ids of the dataset; what was asked for
+    my ( @picked, @problems, %seen );
+    for my $w (@$wanted) {
+        my @hit = grep { $_ eq $w } @$ids;
+        @hit = grep { length($_) > length($w) && substr( $_, -length($w) ) eq $w } @$ids unless @hit;
+        if    ( !@hit )    { push @problems, "$w: no such sample"; }
+        elsif ( @hit > 1 ) { push @problems, "$w: fits more than one sample (" . join( ", ", @hit[ 0 .. ( $#hit < 3 ? $#hit : 3 ) ] ) . ( @hit > 4 ? ", ..." : "" ) . ")"; }
+        else               { push @picked, $hit[0] unless $seen{ $hit[0] }++; }
+    }
+    return ( \@picked, \@problems );
+}
+
+sub _cmd_make_installation_check {
+    my ($name, $from, $samples, $allow_unsealed) = @_;
+    $S_SUPPRESS_STARTUP_LOG = 0;
+    require Sys::Hostname;
+    my $usage = "eurlc-wgs --make-installation-check=<name> from=<validation dataset folder> samples=<id,id,...>";
+    my $stop  = sub { log_message( "ERROR: Make installation check: $_[0]", "red" ); return 1; };
+
+    # --- what was asked for
+    return $stop->("give the set a name, the dataset and the samples: $usage")
+        if !defined $name || $name eq "" || !defined $from || $from eq "" || !defined $samples || $samples eq "";
+    return $stop->("the name [$name] may hold letters, digits, '.', '_' and '-' only") unless $name =~ /^[A-Za-z0-9][\w.-]*$/;
+    my $db   = peekdir("db") // "";
+    my $root = "$db/installation_check";
+    my $dir  = "$root/$name";
+    return $stop->("a check set named [$name] already exists ($dir). A check set is not changed once made "
+                 . "(records in the method log refer to it): give the new one another name.") if -e $dir;
+    $from = File::Spec->rel2abs($from);
+    return $stop->("the dataset folder [$from] does not exist") unless -d $from;
+    my @prof = glob("$from/*_validation_profile.yml $from/*_validation_profile.yaml");
+    return $stop->("[$from] is not a validation dataset: it has " . ( @prof ? "more than one" : "no" ) . " *_validation_profile.yml") if @prof != 1;
+    my $profile = $prof[0];
+    my ( $exp_name, $id_col ) = ( "", "sample_id" );
+    if ( open( my $fh, '<', $profile ) ) {
+        while ( my $l = <$fh> ) {
+            $exp_name = $1 if $l =~ /^\s*expected_results_file:\s*["']?([^"'\s#]+)/;
+            $id_col   = $1 if $l =~ /^\s*sample_id_column:\s*["']?([^"'\s#]+)/;
+        }
+        close $fh;
+    }
+    return $stop->("the validation profile " . basename($profile) . " names no expected_results_file") if $exp_name eq "";
+    my $exp = "$from/$exp_name";
+    return $stop->("the expected results [$exp] are not there") unless -f $exp;
+
+    # --- the samples
+    open( my $efh, '<', $exp ) or return $stop->("cannot read [$exp]: $!");
+    my @exp_lines = <$efh>;
+    close $efh;
+    return $stop->("[$exp] is empty") unless @exp_lines;
+    ( my $hdr = $exp_lines[0] ) =~ s/[\r\n]+$//;
+    my @cols = split /\t/, $hdr;
+    my ($ci) = grep { $cols[$_] eq $id_col } 0 .. $#cols;
+    return $stop->("[$exp_name] has no column [$id_col]") unless defined $ci;
+    my %row;
+    my @ids;
+    for my $l ( @exp_lines[ 1 .. $#exp_lines ] ) {
+        ( my $t = $l ) =~ s/[\r\n]+$//;
+        next if $t eq "";
+        my $id = ( split /\t/, $t, -1 )[$ci] // "";
+        next if $id eq "";
+        push @ids, $id unless exists $row{$id};
+        $row{$id} = $l;
+    }
+    my @wanted = grep { $_ ne "" } map { s/^\s+|\s+$//gr } split /,/, $samples;
+    my ( $picked, $problems ) = make_check_pick_samples( \@ids, \@wanted );
+    return $stop->( "samples not found in $exp_name -- " . join( "; ", @$problems ) ) if @$problems;
+    return $stop->("no samples given (samples=<id,id,...>)") unless @$picked;
+
+    # --- their reads
+    my $read_dir = -d "$from/fastq" ? "$from/fastq" : $from;
+    opendir( my $dh, $read_dir ) or return $stop->("cannot read [$read_dir]: $!");
+    my @fq = sort grep { /\.(?:fastq|fq)(?:\.gz)?$/i && -f "$read_dir/$_" } readdir $dh;
+    closedir $dh;
+    my ( %reads, @none );
+    for my $id (@$picked) {
+        my @f = grep { index( $_, $id ) == 0 && substr( $_, length $id ) =~ /^[^A-Za-z0-9]/ } @fq;
+        if (@f) { $reads{$id} = \@f; } else { push @none, $id; }
+    }
+    return $stop->( "no read files in [$read_dir] for: " . join( ", ", @none ) ) if @none;
+
+    # --- the configuration it is made for
+    my $seal_file = $R_cfg->{general}{seal} // "";
+    my $sealed    = ( $seal_file ne "" && -f $seal_file ) ? 1 : 0;
+    return $stop->("this installation has no configuration seal. The reference of a check set is the result of the "
+                 . "sealed configuration: seal first (user manual, section 12), or add --allow-unsealed to try it out.")
+        if !$sealed && !$allow_unsealed;
+
+    log_message("NOTICE: ─────────────────────────────────────────────────");
+    log_message("NOTICE: Make installation check: set [$name]");
+    log_message("NOTICE:   dataset : $from (" . basename($profile) . ")");
+    log_message("NOTICE:   samples : " . scalar(@$picked) . " of " . scalar(@ids));
+    log_message( "NOTICE:     $_  (" . join( ", ", @{ $reads{$_} } ) . ")" ) for @$picked;
+    log_message( "NOTICE:   seal    : " . ( $sealed ? $seal_file : "none (--allow-unsealed): for trying out only" ), $sealed ? undef : "yellow" );
+    unless ( $ASSUME_YES || prompt_yes_no( "Copy the reads, run the set once on this installation and make it?", 1 ) ) {
+        log_message("NOTICE: Cancelled -- nothing was made.");
+        return 0;
+    }
+
+    # --- build it beside its final place
+    my $host  = Sys::Hostname::hostname() // "unknown";
+    my $user  = $ENV{USER} // $ENV{LOGNAME} // ( getpwuid($<) )[0] // "unknown";
+    my $stamp = strftime( "%Y%m%d-%H%M%S", localtime );
+    my $build = "$root/.$name.building-$stamp";
+    File::Path::make_path("$build/fastq");
+    my $fail = sub {
+        my ($why, $keep) = @_;
+        File::Path::remove_tree($build) if -d $build && $build =~ m{/\.[^/]+\.building-\d{8}-\d{6}$};
+        log_message("NOTICE: Make installation check: nothing was made" . ( $keep ? " (the run is kept for a look: $keep)" : "" ), "red");
+        return $stop->($why);
+    };
+    for my $id (@$picked) {
+        for my $f ( @{ $reads{$id} } ) {
+            File::Copy::copy( "$read_dir/$f", "$build/fastq/$f" ) or return $fail->("could not copy $f: $!");
+        }
+    }
+    File::Copy::copy( $profile, "$build/" . basename($profile) ) or return $fail->("could not copy the validation profile: $!");
+    {
+        open( my $o, '>', "$build/$exp_name" ) or return $fail->("cannot write the expected results: $!");
+        print {$o} $exp_lines[0], map { $row{$_} } @$picked;
+        close $o or return $fail->("cannot write the expected results: $!");
+    }
+
+    # --- run it once here
+    my $self = eval { abs_path($0) } // $0;
+    my @pass = grep { !/^-{0,2}(?:make-installation-check|from|samples|allow-unsealed|installation-check|datadir|outdir|validate|verify_reference|resume|overwrite|rerun|assume-yes)(?:=|$)/i } @ORIGINAL_ARGV;
+    my $out  = "$db/installation_check_runs/$name/${stamp}_" . ( $host =~ s/[^\w.-]/_/gr ) . "_reference";
+    File::Path::make_path( dirname($out) );
+    my @cmd = ( $^X, $self, "datadir=$build/fastq", "outdir=$out", "validate=$build", "verify_reference=off", "--assume-yes", @pass );
+    log_message( "NOTICE: Make installation check: running " . join( " ", map { _shell_quote_arg($_) } basename($self), @cmd[ 2 .. $#cmd ] ) );
+    my $rc = system(@cmd);
+    $rc = $rc == -1 ? 1 : ( $rc & 127 ) ? 4 : ( $rc >> 8 );
+    my $st = -f "$out/log/run_status.json" ? ( eval { read_json_file("$out/log/run_status.json") } // {} ) : {};
+    return $fail->( "the run did not finish (exit code $rc) -- see $out/log/log.txt", $out ) unless ( $st->{state} // "" ) eq "finished";
+    my $seal = $st->{seal} // {};
+    my $seal_status = $seal->{status} // "UNSEALED";
+    return $fail->( "the run was not made with a verified seal ($seal_status"
+                  . join( "", map { "; $_" } @{ $seal->{mismatches} // [] }, @{ $seal->{overrides} // [] } )
+                  . "). Run without arguments that change the configuration, or see why the seal does not verify.", $out )
+        if $sealed && $seal_status ne "SEAL VERIFIED";
+    my $v = -f "$out/report/validation/validation.json" ? ( eval { read_json_file("$out/report/validation/validation.json") } // {} ) : {};
+    my $verdict = ( $v->{meta} // {} )->{verdict};
+    return $fail->( "the results do not agree with the expected results (" . ( $verdict // "not compared" )
+                  . ") -- see $out/report/validation/. A check set must pass where it is made.", $out )
+        unless defined $verdict && $verdict =~ /^ALL .*AGREE/;
+    log_message("NOTICE:   ok   run finished; expected results: $verdict", "green");
+
+    # --- the reference, the description, the list
+    my $fp = "$out/report/tables/eurlc_results_fingerprint.json.gz";
+    return $fail->( "the run has no results fingerprint ($fp)", $out ) unless -s $fp;
+    File::Path::make_path("$build/reference");
+    my $ref_name = strftime( "%Y-%m-%d", localtime ) . "_$PIPELINE_VERSION.json.gz";
+    File::Copy::copy( $fp, "$build/reference/$ref_name" ) or return $fail->("could not copy the results fingerprint: $!");
+    {
+        open( my $o, '>', "$build/${name}_about.txt" ) or return $fail->("cannot write the description: $!");
+        print {$o} "EURLC-WGS installation check set\n\n";
+        printf {$o} "%-12s %s\n", @$_ for (
+            [ "Set:", $name ], [ "Made:", iso_timestamp() ], [ "By:", "$user on $host" ],
+            [ "Pipeline:", "$rundata{pipeline_info}{name} $PIPELINE_VERSION" ],
+            [ "Seal:", $seal_status . ( $seal->{name} ? " ($seal->{name})" : "" ) ],
+            [ "Dataset:", "$from (" . basename($profile) . ")" ],
+            [ "Expected:", "$exp_name: $verdict" ],
+            [ "Reference:", "reference/$ref_name (from $out)" ] );
+        print {$o} "\nSamples:\n";
+        print {$o} "  $_\n" for @$picked;
+        close $o or return $fail->("cannot write the description: $!");
+    }
+    {
+        my @files = ( ( map { "fastq/$_" } map { @{ $reads{$_} } } @$picked ), $exp_name, basename($profile), "${name}_about.txt", "reference/$ref_name" );
+        open( my $o, '>', "$build/$name.md5" ) or return $fail->("cannot write the .md5 list: $!");
+        for my $f ( sort @files ) {
+            my $sum = md5_file("$build/$f");
+            return $fail->("cannot read $f for its MD5") if $sum =~ /^ERROR/;
+            print {$o} "$sum  $f\n";
+        }
+        close $o or return $fail->("cannot write the .md5 list: $!");
+    }
+    rename( $build, $dir ) or return $fail->("could not move the set to $dir: $!");
+
+    log_message("NOTICE: Make installation check: set [$name] made: $dir", "green");
+    log_message("NOTICE:   " . scalar(@$picked) . " sample(s), expected results and reference (pipeline $PIPELINE_VERSION, $seal_status"
+              . ( $seal->{name} ? " $seal->{name}" : "" ) . ")");
+    log_message("NOTICE:   It is copied with the database folder. On every installation, run: eurlc-wgs --installation-check=$name");
+    log_message("NOTICE:   Made without a seal: for trying out only, not for a validated installation.", "yellow") unless $sealed;
+    log_message("NOTICE: ─────────────────────────────────────────────────");
+    return 0;
+}
+
 sub _cmd_list_schemas {
     $S_SUPPRESS_STARTUP_LOG = 0;
 
@@ -35682,7 +36262,9 @@ sub _cmd_update_catalog {
 # ---------------------------------------------------------------------------
 sub _cmd_install_efsa_schemas {
     $S_SUPPRESS_STARTUP_LOG = 0;
-    my ($arg) = @_;
+    # from_setup => 1: called by --setup for schemas it found missing --
+    # no closing "next steps" (setup writes its own).
+    my ($arg, %opt) = @_;
     $arg //= "";
 
     my $EFSA_REPO_URL  = "https://dev.azure.com/efsa-devops/EFSA/_git/efsa.wgs.onehealth";
@@ -35788,7 +36370,7 @@ sub _cmd_install_efsa_schemas {
     log_message("NOTICE: ── Download & install EFSA One Health schemas ────────────");
     log_message("NOTICE:   Source    : $EFSA_REPO_URL");
     log_message("NOTICE:   Species   : " . join(", ", @selected));
-    log_message("NOTICE:   After this command your pipeline is ready to run.");
+    log_message("NOTICE:   After this command your pipeline is ready to run.") unless $opt{from_setup};
     log_message("NOTICE:");
 
     # ── Prerequisites ─────────────────────────────────────────────────────────
@@ -36030,13 +36612,15 @@ sub _cmd_install_efsa_schemas {
     }
 
     log_message("NOTICE:");
-    if ($all_ok) {
+    if ( $opt{from_setup} ) {
+        # setup checks the result itself and writes the next steps
+    } elsif ($all_ok) {
         log_message("NOTICE: ✓  All done. Run analyses normally — schemas and filters are wired.", "green");
     } else {
         log_message("NOTICE: Some steps need attention (see above).", "yellow");
         log_message("NOTICE: Re-run --install-efsa-schemas after resolving to complete setup.");
     }
-    log_message("NOTICE: Run --list-schemas to verify installed schemas.");
+    log_message("NOTICE: Run --list-schemas to verify installed schemas.") unless $opt{from_setup};
     log_message("NOTICE: ════════════════════════════════════════════════════════");
     log_message("NOTICE:");
 }

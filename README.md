@@ -22,7 +22,7 @@ Sweden, which is the **European Union Reference Laboratory for
 the methods and cgMLST schemas used by the EU network of national
 reference laboratories.
 
-> **Status: release candidate (1.0.0-rc2).** Feature-frozen and under test
+> **Status: release candidate (1.0.0-rc3).** Feature-frozen and under test
 > before version 1.0.0; only corrections are made. Feedback is very welcome.
 > What has changed is in [CHANGELOG.md](CHANGELOG.md).
 
@@ -89,26 +89,37 @@ cd eurlc-wgs
 bash install.sh
 ```
 
-`install.sh` creates the conda environment `eurlc-wgs` and then runs
-`eurlc-wgs --setup`, which installs one environment per tool and downloads
-the databases to `~/eurlc-wgs_db`. This takes a while the first time.
+`install.sh` asks which species the installation is for (*Campylobacter*,
+*Salmonella*, *E. coli*, *Listeria*; any combination), and then runs without
+further questions: it creates the conda environment `eurlc-wgs` and runs
+`eurlc-wgs --setup`, which installs one environment per tool, downloads the
+databases to `~/eurlc-wgs_db`, and installs the species tools and the cgMLST
+schema of each chosen species. This takes a while the first time. When it
+ends with "Setup complete. This installation is ready for: ...", it is ready
+to use.
 
-Then install the cgMLST schemas:
+To give the species without being asked:
+
+```bash
+bash install.sh --species=campylobacter,salmonella     # or --species=all
+```
+
+Add a species later:
 
 ```bash
 conda activate eurlc-wgs
-eurlc-wgs --install-efsa-schemas
-```
-
-Only working with some of the species? Say so, and nothing for the others
-is installed or run:
-
-```bash
-eurlc-wgs --setup species_scope=Campylobacter
+eurlc-wgs --setup species=listeria
 ```
 
 `eurlc-wgs --setup` can be run at any time to check the installation: it
-lists every tool and database and offers to install what is missing.
+lists every tool, database and cgMLST schema and installs what is missing.
+Locking the tool and database versions of an installation for validated use
+(freezing and sealing) is described in section 12 of the user manual.
+
+**New versions.** The pipeline does not look for updates itself. To get an
+e-mail for each release, choose *Watch → Custom → Releases* on the GitHub
+page. Changes are listed in `CHANGELOG.md`; how to update is in section 12
+of the user manual.
 
 ---
 

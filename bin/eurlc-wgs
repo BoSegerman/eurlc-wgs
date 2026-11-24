@@ -5188,18 +5188,18 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
-    zcat __R1T__ | head -n 400000 | gzip > __OUTDIR__/tmpR1.fastq.gz
+    zcat __R1T__ | head -n 400000 | gzip > __OUTDIR__/__BASE__.tmpR1.fastq.gz
     __NEWCOMMAND__
-    zcat __R2T__ | head -n 400000 | gzip > __OUTDIR__/tmpR2.fastq.gz
+    zcat __R2T__ | head -n 400000 | gzip > __OUTDIR__/__BASE__.tmpR2.fastq.gz
     __NEWCOMMAND__  
     { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/kraken2-__BASE__.report 
        --threads __THREADS__ 
        --db __KRAKENDB__
-       --paired __OUTDIR__/tmpR1.fastq.gz __OUTDIR__/tmpR2.fastq.gz
-       > __OUTDIR__/tmp.krakenout.txt
+       --paired __OUTDIR__/__BASE__.tmpR1.fastq.gz __OUTDIR__/__BASE__.tmpR2.fastq.gz
+       > __OUTDIR__/__BASE__.tmp.krakenout.txt
        __HIDE-STDERR__ ;
-      rc=\$? ; rm -f __OUTDIR__/tmpR1.fastq.gz __OUTDIR__/tmpR2.fastq.gz __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
+      rc=\$? ; rm -f __OUTDIR__/__BASE__.tmpR1.fastq.gz __OUTDIR__/__BASE__.tmpR2.fastq.gz __OUTDIR__/__BASE__.tmp.krakenout.txt ; ( exit \$rc ) ; }
     __NEWCOMMAND__
     conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
        -d __BRACKENDB__
@@ -5219,16 +5219,16 @@ CMD
 
 
 $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
-    zcat __SET__ | head -n 400000 | gzip > __OUTDIR__/tmpSE.fastq.gz
+    zcat __SET__ | head -n 400000 | gzip > __OUTDIR__/__BASE__.tmpSE.fastq.gz
     __NEWCOMMAND__
     { conda run -n $R_cfg->{kraken2}->{env} --no-capture-output kraken2 
        --report __OUTDIR__/kraken2-__BASE__.report 
        --threads __THREADS__ 
        --db __KRAKENDB__
-       __OUTDIR__/tmpSE.fastq.gz
-       > __OUTDIR__/tmp.krakenout.txt
+       __OUTDIR__/__BASE__.tmpSE.fastq.gz
+       > __OUTDIR__/__BASE__.tmp.krakenout.txt
        __HIDE-STDERR__ ;
-      rc=\$? ; rm -f __OUTDIR__/tmpSE.fastq.gz __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
+      rc=\$? ; rm -f __OUTDIR__/__BASE__.tmpSE.fastq.gz __OUTDIR__/__BASE__.tmp.krakenout.txt ; ( exit \$rc ) ; }
     __NEWCOMMAND__
     conda run -n $R_cfg->{bracken}->{env} --no-capture-output bracken
        -d __BRACKENDB__
@@ -5252,9 +5252,9 @@ $runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
        --threads __THREADS__  
        --db __KRAKENDB__
        __FASTA__
-       > __OUTDIR__/tmp.krakenout.txt
+       > __OUTDIR__/__BASE__.tmp.krakenout.txt
        __HIDE-STDERR__ ;
-       rc=\$? ; rm -f __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
+       rc=\$? ; rm -f __OUTDIR__/__BASE__.tmp.krakenout.txt ; ( exit \$rc ) ; }
 CMD
 
 
@@ -8731,9 +8731,9 @@ $runstep{$runstep_name}{cmd_template}{FASTA} = wrap_cmd(<<CMD);
        --threads __THREADS__
        --db __KRAKENDB__
        __FASTA__
-       > __OUTDIR__/tmp.krakenout.txt
+       > __OUTDIR__/__BASE__.tmp.krakenout.txt
        __HIDE-STDERR__ ;
-       rc=\$? ; rm -f __OUTDIR__/tmp.krakenout.txt ; ( exit \$rc ) ; }
+       rc=\$? ; rm -f __OUTDIR__/__BASE__.tmp.krakenout.txt ; ( exit \$rc ) ; }
 CMD
 
 # TEST---------------------------------

@@ -79,6 +79,14 @@ Changes that a user of the pipeline can notice. The newest version first.
 
 ### Fixed
 
+- **Parallel mode: the Kraken2 pre-check of two samples could use the same
+  temporary files.** The first 100 000 read pairs of every sample were
+  written to one file name in a shared folder. When two samples reached
+  the step at the same time, the files were overwritten or removed while
+  Kraken2 read them: the step could hang until its time limit, or finish
+  on a few thousand reads, possibly from the other sample. Each sample now
+  has its own files. Sequential runs were not affected.
+
 - **Parallel mode could start a step on reads that were still being
   written.** A step's input counted as ready as soon as the file existed
   and was not empty, which it is from the moment the step before starts

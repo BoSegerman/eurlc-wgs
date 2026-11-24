@@ -2291,7 +2291,10 @@ my $R_cfg_species     = $rundata{config}{effective}{species};
     # rewritten here, so that the configfile handler (which runs after
     # database=) does the work for both.
     for my $arg (@ARGV) {
-        if    ( $arg =~ /^(?:--?)?write-configfile$/i )      { $arg = "configfile=write"; }
+        # --parallel / --no-parallel: short for parallel_mode=on / off
+        if    ( $arg =~ /^--?parallel$/i )                   { $arg = "parallel_mode=on"; }
+        elsif ( $arg =~ /^--?no-parallel$/i )                { $arg = "parallel_mode=off"; }
+        elsif ( $arg =~ /^(?:--?)?write-configfile$/i )      { $arg = "configfile=write"; }
         elsif ( $arg =~ /^(?:--?)?write-configfile=(.+)$/i ) { $arg = "configfile=write:$1"; }
     }
     my %path_taking_arg = map { lc($_) => 1 } qw(datadir outdir database configfile);
@@ -32010,7 +32013,18 @@ sub print_run_summary {
                 $timed_out{ $_->{runstep} } = 1 for grep { ref $_ eq 'HASH' && ( $_->{reason} // "" ) eq "timeout" } @{ $s->{failed_steps} };
             }
             my $out = eval { getdir("out") } // "<output folder>";
-            my @more = map { ( ref $R_cfg->{$_} eq 'HASH' ? $_ : "<tool>" ) . ".timeout=<longer, e.g. 6h>" } sort keys %timed_out;
+            # the settings section of the step, as get_runstep_timeout finds it
+            # (downsampling_bbmap -> downsampling), else the general limit
+            my $tool_of = sub {
+                my @parts = split /_/, ( get_runstep_config_section( $_[0] ) // $_[0] );
+                while (@parts) {
+                    my $c = join '_', @parts;
+                    return $c if ref $R_cfg->{$c} eq 'HASH' && $c ne 'general';
+                    pop @parts;
+                }
+                return "";
+            };
+            my @more = map { my $t = $tool_of->($_); ( $t ne "" ? "$t." : "" ) . "timeout=<longer, e.g. 6h>" } sort keys %timed_out;
             my %u; @more = grep { !$u{$_}++ } @more;
             $add->("    to run the failed steps again, keeping all other results:");
             $add->("      eurlc-wgs outdir=$out --resume" . ( @more ? " " . join( " ", @more ) : "" ));
@@ -35462,9 +35476,22 @@ sub _cmd_installation_check {
         return scalar @unknown;
     }
     if ( !@sets ) {
-        log_message("ERROR: Installation check: no check set in [$root]. A check set is a folder there with a "
-                  . "validation profile (<ID>_validation_profile.yml), its expected results, the reads and an .md5 list "
-                  . "-- see the user manual, Installation check.", "red");
+        # Not an error of the installation: there is nothing to check it
+        # with. Said as that, with what to do -- and still exit code 1, so
+        # that a script does not take "nothing was checked" for "passed".
+        log_message("NOTICE: ─────────────────────────────────────────────────");
+        log_message("NOTICE: Installation check: this installation has no check set, so nothing was checked.", "yellow");
+        log_message("NOTICE:");
+        log_message("NOTICE: A check set is a few samples with known results. It is not part of the pipeline:");
+        log_message("NOTICE: the right results depend on the configuration, so it comes with a sealed");
+        log_message("NOTICE: installation, or is made by whoever is responsible for the installation.");
+        log_message("NOTICE:   - Got this installation from someone (a sealed database folder)? Ask them for");
+        log_message("NOTICE:     its check set; it belongs in $root/");
+        log_message("NOTICE:   - Making one, from samples whose results you know (a validation dataset):");
+        log_message("NOTICE:       eurlc-wgs --make-installation-check=<name> from=<dataset-folder> samples=<id,...>");
+        log_message("NOTICE:     (user manual, section 12: eurlc-wgs --manual)");
+        log_message("NOTICE:   - To see that everything is installed, without samples: eurlc-wgs --setup");
+        log_message("NOTICE: ─────────────────────────────────────────────────");
         return 1;
     }
     my $host  = Sys::Hostname::hostname() // "unknown";
@@ -39350,6 +39377,38 @@ sub run_parallel_runsteps {
     # key_unreachable_reason (shared with the sequential scheduler, A9).
     my $key_unreachable = sub { key_unreachable_reason( $_[0], $_[1], $runstep_names ) ? 1 : 0 };
 
+    # Is a data key not to be used yet, although its check says it is there?
+    # The checks of file keys look at the file (exists, not empty), and a
+    # file is there from the moment its producer starts writing it. Without
+    # this, a step could start on reads that were still being written:
+    # downsampling read the trimmed reads while fastp was writing them, and
+    # the assemblers read the downsampled reads while reformat.sh was
+    # writing them (seen 24 Nov 2026 on a large sample; small samples were
+    # finished before the next tool had opened the file). So a key counts
+    # only when every step of this phase that produces it for the sample
+    #   - is not waiting to run and not running, and
+    #   - did not fail, time out or get skipped (its file may be half
+    #     written; the steps that need it are then skipped as "an earlier
+    #     step failed", not run on what is there).
+    # Returns "" (use it), "wait" (a producer is still to run or running) or
+    # "broken" (a producer ran without making it).
+    my %S_par_notmade;        # "$i,$name" = 1: ran or was skipped without making its output
+    my $key_not_ready = sub {
+        my ($key, $i) = @_;
+        my $wait = 0;
+        for my $p (@$runstep_names) {
+            my $d = $runstep{$p};
+            next unless defined $d && grep { $_ eq $key } @{ $d->{produces} // [] };
+            return "broken" if $S_par_notmade{"$i,$p"};
+            if ( grep { $_->{sample} == $i && $_->{runstep} eq $p } values %S_par_active ) { $wait = 1; next; }
+            next if $S_par_done{"$i,$p"};
+            my $applies = eval { exists $d->{applies_if} ? $d->{applies_if}->($i) : 1 };
+            $applies = 0 if $applies && !runstep_species_applies($d, $i);
+            $wait = 1 if $applies;   # still to run
+        }
+        return $wait ? "wait" : "";
+    };
+
     # While the live board is on screen, every line written to the terminal
     # that the renderer does not know about shifts the board down, so the
     # next cursor-up lands too low and the top of the old board is left
@@ -39473,6 +39532,7 @@ sub run_parallel_runsteps {
 
             $S_par_done{"$i,$name"} = 1;
             $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
+            $S_par_notmade{"$i,$name"} = 1 if $job_status ne 'success';
             $done_count++;
 
             my $elapsed = format_elapsed(time() - $job->{start_time});
@@ -39573,7 +39633,16 @@ sub run_parallel_runsteps {
                 }
 
                 # requires
-                my @unmet = grep { !( exists $data_key{$_} && eval { $data_key{$_}{check}->($i) } ) } @{ $def->{requires} // [] };
+                my ( @unmet, $producer_busy );
+                for my $key ( @{ $def->{requires} // [] } ) {
+                    my $state = $key_not_ready->($key, $i);
+                    if    ( $state eq "wait" )   { $producer_busy = 1; }
+                    elsif ( $state eq "broken" ) { push @unmet, $key; }
+                    elsif ( !( exists $data_key{$key} && eval { $data_key{$key}{check}->($i) } ) ) { push @unmet, $key; }
+                }
+                # the output of a step that is still to run or running is
+                # waited for, whatever is on disk already
+                next RUNSTEP if $producer_busy;
                 if (@unmet) {
                     # Never coming (an earlier step failed): skip now instead
                     # of waiting for the deadlock detector (A9). Marked as
@@ -39581,6 +39650,7 @@ sub run_parallel_runsteps {
                     unless ( grep { !$key_unreachable->($_, $i) } @unmet ) {
                         $S_par_done{"$i,$name"} = 1;
                         $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
+                        $S_par_notmade{"$i,$name"} = 1;
                         $total_work-- if $applicability->{applicable}{"$i,$name"} && $total_work > $done_count;
                         note_skipped_step($i, $name, \@unmet, $runstep_names);
                         next RUNSTEP;
@@ -39614,6 +39684,7 @@ sub run_parallel_runsteps {
                     log_message("ERROR: [PIPELINE BUG] preprocessing crashed in [$name]: $err -- skipping", "red");
                     $S_par_done{"$i,$name"} = 1;
                     $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
+                    $S_par_notmade{"$i,$name"} = 1;
                     next RUNSTEP;
                 }
 
@@ -39636,6 +39707,7 @@ sub run_parallel_runsteps {
                     log_message("ERROR: Fork failed for [$name]: $!", "red");
                     $S_par_done{"$i,$name"} = 1;
                     $S_RUNSTEP_ATTEMPTED{"$i,$name"} = 1;
+                    $S_par_notmade{"$i,$name"} = 1;
                     next RUNSTEP;
                 }
 

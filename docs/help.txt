@@ -80,9 +80,13 @@ WHAT IS ANALYSED
 
 RUNNING
     threads=<n>                  Threads per tool
-    parallel_mode=on             Run several samples/steps at once within
-                                 max_threads=<n> / max_ram_gb=<n>
-                                 (default: what the computer has)
+    --parallel                   Run several samples and steps at once, within
+                                 max_threads=<n> and max_ram_gb=<n> (default
+                                 for both: what the computer has). Without
+                                 it, one step at a time. Same as
+                                 parallel_mode=on, which can be set in the
+                                 settings file; --no-parallel then switches
+                                 it off for one run
     --assume-yes                 Answer installation questions with yes
                                  (never: overwriting results or a config file)
     --verbose                    More detail in the log
@@ -106,10 +110,13 @@ INSTALLATION
                                  campylobacter, salmonella, ecoli, listeria
                                  (comma-separated), or all
     --installation-check         Does this installation give the right
-                                 results? Runs the check sets that came with
-                                 the installation (a few samples with known
-                                 results) and compares. Nothing needs to be
-                                 named: without a name every set is run
+                                 results? Runs the check sets of the
+                                 installation (a few samples with known
+                                 results) and compares; without a name every
+                                 set is run. A check set comes with a sealed
+                                 installation or is made by whoever looks
+                                 after it (--help-admin); a plain new
+                                 installation has none
     --list-schemas               The cgMLST schemas that are installed, and
                                  how to install others
 
@@ -153,7 +160,7 @@ COMPANION TOOLS (installed with the pipeline; --help on each)
 
 EXAMPLES
     cd /data/run192; eurlc-wgs
-    eurlc-wgs datadir=/data/run192 threads=8
+    eurlc-wgs datadir=/data/run192 --parallel
     eurlc-wgs datadir /data/run192 outdir /analysis/run192
     eurlc-wgs datadir=/data/run192 --qc-screen
     eurlc-wgs outdir=/analysis/run192 --resume

@@ -896,8 +896,8 @@ elsewhere:</p>
 the run. An existing folder with other content is refused.</p>
 <h3 id="use-more-of-the-computer">Use more of the computer</h3>
 <pre class="bash"><code>eurlc-wgs threads=8                       # threads per tool
-eurlc-wgs parallel_mode=on                # several samples at the same time
-eurlc-wgs parallel_mode=on max_threads=16 max_ram_gb=48</code></pre>
+eurlc-wgs --parallel                      # several samples at the same time
+eurlc-wgs --parallel max_threads=16 max_ram_gb=48</code></pre>
 <p>In parallel mode the screen shows a status board instead of a
 scrolling log: progress, samples finished, and what is running. Without
 limits it uses 85 % of the machine. On a shared or small computer, set
@@ -1565,7 +1565,10 @@ changed</h3>
 <tr class="even">
 <td><code>parallel_mode</code></td>
 <td>off</td>
-<td>Several samples at once</td>
+<td>Several samples at once. On the command line:
+<code>--parallel</code> (= <code>parallel_mode=on</code>) and
+<code>--no-parallel</code> (= <code>parallel_mode=off</code>, for one
+run when the file says on)</td>
 </tr>
 <tr class="odd">
 <td><code>species_scope</code></td>
@@ -2109,7 +2112,7 @@ eurlc-wgs --qc-screen                       # raw-read QC only
 
 # resources
 eurlc-wgs threads=8
-eurlc-wgs parallel_mode=on max_threads=16 max_ram_gb=48
+eurlc-wgs --parallel max_threads=16 max_ram_gb=48
 
 # existing results
 eurlc-wgs --resume                          # continue

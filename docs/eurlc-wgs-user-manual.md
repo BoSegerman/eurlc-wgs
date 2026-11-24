@@ -653,8 +653,8 @@ existing folder with other content is refused.
 
 ```bash
 eurlc-wgs threads=8                       # threads per tool
-eurlc-wgs parallel_mode=on                # several samples at the same time
-eurlc-wgs parallel_mode=on max_threads=16 max_ram_gb=48
+eurlc-wgs --parallel                      # several samples at the same time
+eurlc-wgs --parallel max_threads=16 max_ram_gb=48
 ```
 
 In parallel mode the screen shows a status board instead of a scrolling
@@ -1165,7 +1165,7 @@ correct one.
 | Setting | Default | What |
 |---|---|---|
 | `threads` | 4 | Threads per tool |
-| `parallel_mode` | off | Several samples at once |
+| `parallel_mode` | off | Several samples at once. On the command line: `--parallel` (= `parallel_mode=on`) and `--no-parallel` (= `parallel_mode=off`, for one run when the file says on) |
 | `species_scope` | the four main species | Which species' tools are installed and run |
 | `validated_species` | empty | The species the configuration is validated for; samples of other species are marked and not reportable ([section 6](#can-the-results-be-reported)) |
 | `main_assembly` | `fewest_contigs500` | How the main assembly is chosen; or the name of an assembler |
@@ -1598,7 +1598,7 @@ eurlc-wgs --qc-screen                       # raw-read QC only
 
 # resources
 eurlc-wgs threads=8
-eurlc-wgs parallel_mode=on max_threads=16 max_ram_gb=48
+eurlc-wgs --parallel max_threads=16 max_ram_gb=48
 
 # existing results
 eurlc-wgs --resume                          # continue

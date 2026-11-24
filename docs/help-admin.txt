@@ -74,6 +74,8 @@ CHECKING AN INSTALLATION (manual, section 12; docs/installation-check.md)
                                  (--allow-unsealed to try it out). The set
                                  is copied with <database-folder>
     --installation-check[=<set>[,<set>]]
+                                 (A new installation has no check set; the
+                                 command then says so and how to get one.)
                                  Run the check set(s) in
                                  <database-folder>/installation_check/ and
                                  compare with their expected results and

@@ -195,11 +195,18 @@ På valideringsdatorn, med exakt den version som releasas:
 
 - [ ] Allt incheckat på `dev`, inga ocommittade ändringar.
 - [ ] `dev` sammanfogad till `main`.
+- [ ] **Före första releasen, en gång:** koppla förrådet till Zenodo
+      (logga in på zenodo.org med GitHub-kontot → *GitHub* i kontomenyn →
+      slå på `BoSegerman/eurlc-wgs`). Kopplingen måste vara påslagen när
+      releasen skapas; en release som görs före det får ingen DOI.
 - [ ] Tagg: `git tag -a v1.0.0 -m "eurlc-wgs 1.0.0"` och `git push --tags`.
 - [ ] GitHub-release från taggen med release-text: nytt, ändrat, rättat,
       kända begränsningar, och om omvalidering eller ny försegling behövs.
-- [ ] Om Zenodo är kopplat: kontrollera att releasen fått en DOI, och lägg
-      in den i `CITATION.cff` (`doi:`) och i README.
+- [ ] Kontrollera på Zenodo att releasen har arkiverats och fått en DOI.
+      Lägg posten i communityn EURL-Campylobacter (där valideringsdataseten
+      D1–D3 ligger). För in DOI:n i `CITATION.cff` (`doi:`) och i README;
+      använd den DOI som gäller alla versioner ("concept DOI") i README och
+      versionens egen DOI i valideringsrapporten.
 
 ## 9. Efter releasen
 

@@ -496,6 +496,12 @@ s=open('$(cd "$(dirname "$0")/.." && pwd)/docs/eurlc-wgs-user-manual.html',encod
 ids=set(re.findall(r'id=\"([^\"]+)\"',s)); refs=set(re.findall(r'href=\"#([^\"]+)\"',s))
 ext=re.findall(r'<(?:link|script|img)[^>]+(?:src|href)=\"https?://',s)
 sys.exit(1 if (refs-ids) or ext else 0)"
+run "$T/par1.out" datadir="$DR" outdir="$T/o_par1" --fasta --parallel
+run "$T/par2.out" datadir="$DR" outdir="$T/o_par2" --fasta parallel_mode=on --no-parallel
+check "--parallel is parallel_mode=on; --no-parallel is off (and, like any argument, not accepted twice)" \
+      bash -c "grep -q '\"parallel\" *: *true' '$T/o_par1/log/run_status.json' && [[ $RC != 0 ]]"
+run "$T/par3.out" datadir="$DR" outdir="$T/o_par3" --fasta --no-parallel
+check "  ... --no-parallel alone: off" grep -q '"parallel" *: *false' "$T/o_par3/log/run_status.json"
 run "$T/wc.out" --write-configfile=named.config
 check "--write-configfile=<name>: written in the database folder, every setting in use" \
       bash -c "[[ $RC == 0 ]] && grep -q '^threads=' '$HOME/eurlc-wgs_db/named.config'"

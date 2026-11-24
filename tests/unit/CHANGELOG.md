@@ -24,6 +24,11 @@ Changes that a user of the pipeline can notice. The newest version first.
 - **With `database=<folder>` the configuration file is
   `<folder>/eurlc-wgs.config`.** Before, the file in the default database
   folder was used unless `configfile=` was given.
+- **`--parallel` and `--no-parallel`** are short for `parallel_mode=on` and
+  `parallel_mode=off`.
+- `--installation-check` on an installation without a check set explains
+  what a check set is and how to get or make one, instead of an error line
+  (the exit code is still 1: nothing was checked).
 - **The user manual is installed as one HTML file and as a PDF**, and
   `eurlc-wgs --manual` says where they are. Both are built from
   `docs/eurlc-wgs-user-manual.md` with `scripts/build-manual` and are also
@@ -67,6 +72,21 @@ Changes that a user of the pipeline can notice. The newest version first.
 
 ### Fixed
 
+- **Parallel mode could start a step on reads that were still being
+  written.** A step's input counted as ready as soon as the file existed
+  and was not empty, which it is from the moment the step before starts
+  writing it. Downsampling could read the trimmed reads while fastp was
+  writing them, and the assemblers, Mash screen, Kraken2 and the read
+  statistics could read the downsampled reads while they were being
+  written. Small samples were finished before the next tool had opened the
+  file; a large sample failed (SPAdes, SKESA and Mash screen with errors,
+  downsampling at its time limit), and a tool that does not notice a
+  truncated file could have given a result from part of the reads. A step
+  now waits until every step that produces its input has finished, and is
+  skipped ("an earlier step failed") when that step failed or timed out,
+  instead of running on what was written. Sequential mode (the default) was
+  not affected. **Results made in parallel mode with an earlier version
+  should be compared with a sequential run** (`eurlc-wgs-inspect compare`).
 - **`--recursive` did not look in subfolders.** It now does. Output folders
   of the pipeline itself (this run's, or an earlier run's inside the data
   folder) are not searched, so trimmed reads and assemblies are not taken

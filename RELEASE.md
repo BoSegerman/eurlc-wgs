@@ -36,6 +36,17 @@ Ordningen är den tänkta. Detaljerna för varje steg står i avsnitten nedan.
 - [ ] Funktionsfrysning: efter detta bara rättelser; allt annat i planned.
 - [ ] Manualens Known limitations uppdaterad (avsnitt 13).
 
+### B2. Manualen
+- [ ] Versionsraden överst i `docs/eurlc-wgs-user-manual.md` säger den nya
+      versionen (`scripts/build-manual` vägrar annars).
+- [ ] `scripts/build-manual` kört: bygger `docs/eurlc-wgs-user-manual.html`
+      (en fristående fil) och `.pdf`. Kräver pandoc; PDF:en görs med
+      weasyprint (miljön `eurlc-wgs-weasyprint` används om weasyprint inte
+      finns i sökvägen). Öppna båda och bläddra igenom.
+- [ ] De två filerna och `docs/manual-build/built-from.md5` incheckade.
+      `tests/smoke.sh` faller om de inte är byggda ur den aktuella manualen.
+- [ ] PDF:en bifogad till GitHub-releasen.
+
 ### C. Reproducerbar installation
 - [ ] Versionerna låsta i alla YML-filer (avsnitt 3).
 - [ ] `docs/help.txt` uppdaterad med det som tillkommit (`summarize`,
@@ -184,11 +195,18 @@ På valideringsdatorn, med exakt den version som releasas:
 
 - [ ] Allt incheckat på `dev`, inga ocommittade ändringar.
 - [ ] `dev` sammanfogad till `main`.
+- [ ] **Före första releasen, en gång:** koppla förrådet till Zenodo
+      (logga in på zenodo.org med GitHub-kontot → *GitHub* i kontomenyn →
+      slå på `BoSegerman/eurlc-wgs`). Kopplingen måste vara påslagen när
+      releasen skapas; en release som görs före det får ingen DOI.
 - [ ] Tagg: `git tag -a v1.0.0 -m "eurlc-wgs 1.0.0"` och `git push --tags`.
 - [ ] GitHub-release från taggen med release-text: nytt, ändrat, rättat,
       kända begränsningar, och om omvalidering eller ny försegling behövs.
-- [ ] Om Zenodo är kopplat: kontrollera att releasen fått en DOI, och lägg
-      in den i `CITATION.cff` (`doi:`) och i README.
+- [ ] Kontrollera på Zenodo att releasen har arkiverats och fått en DOI.
+      Lägg posten i communityn EURL-Campylobacter (där valideringsdataseten
+      D1–D3 ligger). För in DOI:n i `CITATION.cff` (`doi:`) och i README;
+      använd den DOI som gäller alla versioner ("concept DOI") i README och
+      versionens egen DOI i valideringsrapporten.
 
 ## 9. Efter releasen
 

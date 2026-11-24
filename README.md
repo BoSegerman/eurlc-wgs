@@ -186,9 +186,12 @@ eurlc-wgs/
 - **[User manual](docs/eurlc-wgs-user-manual.md)** — installation, running,
   reading the results, settings, schemas, keeping an installation under
   control, troubleshooting.
-- `eurlc-wgs --help` — every command-line option.
-- `eurlc-wgs configfile=write` — writes every setting, with its current
-  value, to `~/eurlc-wgs_db/eurlc-wgs.config` for you to read and edit.
+- `eurlc-wgs --manual` — where the user manual is on your computer, as one
+  HTML file for the web browser and as a PDF (both are also in `docs/`).
+- `eurlc-wgs --help` — the options for running an analysis;
+  `eurlc-wgs --help-admin` — installation, maintenance and validation.
+- `~/eurlc-wgs_db/eurlc-wgs.config` — every setting with its built-in
+  value, for you to read and edit.
 
 ---
 

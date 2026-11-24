@@ -414,6 +414,16 @@ echo ">>> Installing help file"
 if [[ -f "${HELP_FILE}" ]]; then
     cp -p "${HELP_FILE}" "${TARGET_SHARE}/help.txt"
     echo ">>> Installed: help.txt"
+    for manual in eurlc-wgs-user-manual.html eurlc-wgs-user-manual.pdf; do
+        if [[ -f "${SRC_DIR}/docs/${manual}" ]]; then
+            cp -p "${SRC_DIR}/docs/${manual}" "${TARGET_SHARE}/${manual}"
+            echo ">>> Installed: ${manual}  (eurlc-wgs --manual says where)"
+        fi
+    done
+    if [[ -f "${HELP_FILE%.txt}-admin.txt" ]]; then
+        cp -p "${HELP_FILE%.txt}-admin.txt" "${TARGET_SHARE}/help-admin.txt"
+        echo ">>> Installed: help-admin.txt"
+    fi
 else
     echo "WARNING: Missing help file: ${HELP_FILE}"
 fi
@@ -466,6 +476,7 @@ for check_file in \
     "${TARGET_TEMPLATES}/short_report.html.tt" \
     "${TARGET_TEMPLATES}/detailed_report.html.tt" \
     "${TARGET_SHARE}/help.txt" \
+    "${TARGET_SHARE}/help-admin.txt" \
     "${TARGET_ASSETS}/genome_sizes.tsv" \
     "${TARGET_ENVS}/core/eurlc-wgs-fastp.yml"
 do

@@ -112,7 +112,7 @@ my %rundata;
 $rundata{pipeline_info} = {
     name        => "eurlc-wgs",
     version     => $PIPELINE_VERSION,
-    versiondate => "2026-11-23",
+    versiondate => "2026-11-24",
     author      => "Bo Segerman",
     contact     => "bo.segerman\@sva.se",
 };
@@ -2091,8 +2091,17 @@ $rundata{config}{defaults} = {
             critical_remap_pairs_diff_contig_pct => ">50",
             # Bases in contigs with low depth: clean at most 1.65.
             warning_remap_low_depth_contig_pct  => ">2",
-            # Mixed windows: clean at most 69; contaminated 189-272.
-            warning_contamination_mixed_windows => ">100",
+            # Mixed windows (two strains of the species): clean at most 69;
+            # contaminated 189-272. CRITICAL: a mixture changes the cgMLST
+            # profile. >350 is about 20 % of the 1-kb windows of the genome,
+            # the same share as the Salmonella limit (1000 of ~4800). Mixture
+            # series Nov 2026 (base + a strain 1052 alleles away): 2 % gives
+            # 135 windows, 3 % 370, 5 % 880, 10 % 1317; the profile is
+            # unchanged (0-1 allele) up to 10 %, 5 alleles differ at 15 % and
+            # 20 at 20 %. A strain 49 alleles away gives at most 68 windows
+            # (20 %: 5 alleles differ) and is not detected.
+            warning_contamination_mixed_windows  => ">100",
+            critical_contamination_mixed_windows => ">350",
         },
         "Campylobacter coli" => {
             genomesize => 1750000,
@@ -29710,10 +29719,12 @@ sub detailed_report_section_mixture {
     $html .= "<tr><td class=\"rowheading\"><b>1-kb windows with mixed positions</b><br>"
            . "<small style=\"opacity:0.75\">&#9733; the measure the sample is judged by</small></td>"
            . "<td><b>" . encode_entities($windows) . "</b><br><small>" . encode_entities($thr) . "</small></td></tr>\n";
-    $html .= $note->( "Clean <i>C. jejuni</i> isolates at about 100&times; usually have 0&ndash;10 windows, a few up to 30. "
-                    . "Above 30: possible mixture of two strains; look at the assembly size, number of contigs and cgMLST call rate, "
-                    . "and consider re-isolating. Hundreds: a second, clearly different strain at a few per cent or more. "
-                    . "A strain below about 5 % of the reads, or one nearly identical to the main strain, does not show: "
+    $html .= $note->( "Clean <i>Campylobacter</i> isolates at about 100&times; usually have 0&ndash;10 windows, a few up to 70. "
+                    . "Above 100: possible mixture of two strains (a clearly different strain at about 2 % of the reads). "
+                    . "Above 350, about a fifth of the genome: a second strain at 3 % or more; the cgMLST profile can be changed at "
+                    . "higher shares, so look at the assembly size, number of contigs, paralogous loci and cgMLST call rate, "
+                    . "and consider re-isolating. The number levels off at about 80 % of the windows. "
+                    . "A strain below about 2 % of the reads, or one close to the main strain (tens of cgMLST alleles), does not show: "
                     . "a low number is not proof of a pure culture. Other species and depths need their own limits." );
 
     # what it is built from

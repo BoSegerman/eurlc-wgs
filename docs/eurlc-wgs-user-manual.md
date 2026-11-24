@@ -560,7 +560,7 @@ reads carry a different base. That number, *1-kb windows with mixed
 positions*, is the measure to look at. It is in the sample's short report
 (Contamination) and has its own section in the detailed sample report, right
 after the remapping: the measure first (marked &#9733;, with its QC status
-or a note that no threshold is set), then what it is built from (the mixed
+or a note that no threshold is set for the species), then what it is built from (the mixed
 positions, how many are isolated, their median minor allele fraction, which
 is roughly the share of a second strain, the depth, why candidate positions
 were set aside, the settings, and a link to every candidate position), and
@@ -568,24 +568,31 @@ last the values of the earlier method, for comparison only. With a
 threshold set (below) it takes part in the sample's QC status like any
 other measure.
 
-How to read it (*C. jejuni*, about 100× depth):
+How to read it (*C. jejuni* and *C. coli*, about 100× depth):
 
-| Windows | What it usually means |
-|---|---|
-| 0–10 | Normal for a clean isolate |
-| 10–30 | Seen in a few clean isolates; no action on this alone |
-| above 30 | Possible mixture: look at the sample (assembly size, number of contigs, cgMLST call rate) and consider re-isolating |
-| hundreds | A second, clearly different strain at a few per cent or more |
+| Windows | What it usually means | QC status |
+|---|---|---|
+| 0–70 | Seen in clean isolates (most have fewer than 10) | PASS |
+| 100–350 | Possible mixture: a clearly different second strain at about 2 % of the reads. The cgMLST profile is normally not affected | WARNING |
+| above 350 | A second strain at about 3 % or more, in at least a fifth of the genome. The cgMLST profile may be changed (5 alleles at 15 % and 20 alleles at 20 % in the validation series): look at the assembly size, the number of contigs, the paralogous loci and the call rate, and consider re-isolating | CRITICAL |
 
-What it cannot do: a second strain below about 5 % of the reads, or one
-that is nearly identical to the main strain (same outbreak, a few cgMLST
-alleles apart), does not show. A low number is therefore not proof of a
-pure culture. Samples with single reads get no value.
+The measure levels off at about 80 % of the windows (reached at roughly
+10 % of a second strain), so the number does not tell 10 % from 20 %; the
+median minor allele fraction in the detailed sample report does.
 
-No limit is built in yet. To get a QC warning, add
-`warning_contamination_mixed_windows=>30` to the species section of your
-config file ([section 9](#9-settings)). The value is provisional and was
-set on *Campylobacter*; a species with a larger genome needs its own.
+What it cannot do: a second strain below about 2 % of the reads, or one
+that is close to the main strain, does not show. In the validation series
+a strain 49 cgMLST alleles from the main strain gave at most 68 windows,
+also at 20 %, where 5 alleles of the profile were changed. A low number is
+therefore not proof of a pure culture. Samples with single reads get no
+value.
+
+The limits are built in for *Campylobacter* (WARNING above 100, CRITICAL
+above 350) and *Salmonella* (WARNING above 500, CRITICAL above 1 000; the
+genome is almost three times as large). Other species have none: add, for
+example, `warning_contamination_mixed_windows=>100` to the species section
+of your config file ([section 9](#9-settings)), with a value that fits the
+genome size.
 
 If the species could not be determined, the species-specific tools do not
 run for that sample and the species thresholds fall back to the general
@@ -1439,7 +1446,8 @@ This version, 1.0.0-rc2.
   the cgMLST paralogous loci, the assembly size and the call rate.
 - The check for two strains of the same species is validated for
   *C. jejuni* (about 100×) and *Salmonella*; it does not see a mixture below
-  about 5 % or between nearly identical strains.
+  about 2 % or between closely related strains (49 cgMLST alleles apart in
+  the validation series), also when the mixture changes the cgMLST profile.
 - The cgMLST call rate depends on the schema: the same isolate can get a
   somewhat different call rate with another schema for the species. The
   call-rate thresholds are set per schema.

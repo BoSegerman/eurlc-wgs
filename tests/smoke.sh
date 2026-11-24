@@ -415,6 +415,7 @@ check "  ... another species is a disagreement, and says what each gave" \
 check "  ... not judged when one of them gave no species" \
       bash -c "grep -q '^no-mash	n/a	$' <<<'$SA' && grep -q '^mash-na	n/a	$' <<<'$SA' && grep -q '^no-kraken	n/a	$' <<<'$SA' && grep -q '^no-species	n/a	$' <<<'$SA'"
 check "  ... and the default is a WARNING, not CRITICAL" bash -c "grep -q 'warning_taxonomy_species_disagree *=> *\">0\"' '$SCRIPT' && ! grep -q '^ *critical_taxonomy_species_disagree *=>' '$SCRIPT'"
+check "strain mixture: Campylobacter has WARNING >100 and CRITICAL >350" bash -c "grep -q 'warning_contamination_mixed_windows *=> *\">100\"' '$SCRIPT' && grep -q 'critical_contamination_mixed_windows *=> *\">350\"' '$SCRIPT'"
 
 # --- validated species of the configuration ---------------------------------
 echo "Validated species"

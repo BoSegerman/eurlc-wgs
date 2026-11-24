@@ -2,7 +2,7 @@
 
 Changes that a user of the pipeline can notice. The newest version first.
 
-## 1.0.0-rc3 (23 November 2026)
+## 1.0.0-rc3 (24 November 2026)
 
 ### Changed
 
@@ -59,6 +59,13 @@ Changes that a user of the pipeline can notice. The newest version first.
   `--resume` command that runs the failed steps again. Results made with an
   earlier version show these samples as PASS in `qc_status`; a comparison
   with such a reference reports the difference.
+- **A mixture of two strains of the same species is CRITICAL for
+  *Campylobacter*** when more than 350 1-kb windows have mixed positions
+  (`critical_contamination_mixed_windows`; about a fifth of the genome, the
+  same share as the *Salmonella* limit). Before, there was only the WARNING
+  above 100, so a sample with 20 % of a second strain, where 20 cgMLST
+  alleles were changed, was reportable without review. The limit can be
+  changed in the species' section of the config file.
 - **Kraken2 and Mash screen naming different species is a WARNING**, not
   CRITICAL (`warning_taxonomy_species_disagree`), until it is better
   understood. The reported species is Kraken2's. It can be raised per

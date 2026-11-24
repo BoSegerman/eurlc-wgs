@@ -6,7 +6,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <title>EURLC-WGS User Manual</title>
   <style>
-
 code{white-space: pre-wrap;}
 span.smallcaps{font-variant: small-caps;}
 div.columns{display: flex; gap: min(4vw, 1.5em);}
@@ -110,64 +109,64 @@ not species-specific.</p>
 <p>For each sample, in this order:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Stage</th>
 <th>What</th>
 <th>Tools</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Raw reads</td>
 <td>Checksums, read-length and adapter scan</td>
 <td>built in</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Trimming</td>
 <td>Adapter and quality trimming</td>
 <td>fastp</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Species</td>
 <td>Species and genus from the reads</td>
 <td>Kraken2 + Bracken</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Downsampling</td>
 <td>Reduce very deep samples to a target depth</td>
 <td>BBMap</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Contamination</td>
 <td>Other species/genera in the reads</td>
 <td>Kraken2, Mash screen</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Assembly</td>
 <td>One or more assemblies; the best becomes the main assembly</td>
 <td>SPAdes, SKESA (optional: Shovill)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Assembly QC</td>
 <td>Size, contigs, N50; reads mapped back</td>
 <td>QUAST, Bowtie2</td>
 </tr>
-<tr>
+<tr class="even">
 <td>MLST</td>
 <td>Sequence type and clonal complex</td>
 <td>FastMLST, mlst</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>AMR</td>
 <td>Resistance genes and point mutations</td>
 <td>AMRFinderPlus, ResFinder</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Typing</td>
 <td>Serotype, virulence genes (by species)</td>
 <td>SISTR, SeqSero2, ECTyper, LisSero, VirulenceFinder</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>cgMLST</td>
 <td>Allele profile</td>
 <td>chewBBACA</td>
@@ -225,44 +224,44 @@ connection without a terminal):</p>
 four species are installed.</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th><code>install.sh</code> option</th>
 <th>Effect</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><code>--species=LIST</code></td>
 <td>The species: <code>campylobacter</code>, <code>salmonella</code>,
 <code>ecoli</code>, <code>listeria</code> (comma-separated), or
 <code>all</code></td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>--database=DIR</code></td>
 <td>The database folder, if not <code>~/eurlc-wgs_db</code></td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>--no-setup</code></td>
 <td>Install the program only; run
 <code>eurlc-wgs --setup species=...</code> yourself later</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>--assume-yes</code></td>
 <td>No questions (all species, unless <code>--species</code> is
 given)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>--resources-only</code></td>
 <td>Reinstall the program, templates and assets only (after
 <code>git pull</code>)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>--optional</code></td>
 <td>Also install the tools that are off by default (Bakta, CheckM, ...).
 CheckM is experimental, see <a href="#13-known-limitations">section
 13</a></td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>--uninstall</code></td>
 <td>Remove all <code>eurlc-wgs*</code> environments and shared files
 (not the database folder)</td>
@@ -278,27 +277,27 @@ database folder</h3>
 the database folder first, and say what they found:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>In the folder</th>
 <th>Taken as</th>
 <th>What happens</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Nothing, or no <code>eurlc-wgs.config</code></td>
 <td>A new installation</td>
 <td>Installed for the chosen species; <code>eurlc-wgs.config</code> is
 written</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>eurlc-wgs.config</code></td>
 <td>An existing installation</td>
 <td>Keeps its species. Every tool, database and schema is checked, and
 what is missing is installed. This also finishes an installation that
 was interrupted</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>config_seal.ini</code></td>
 <td>A sealed installation (<a href="#12-keeping-an-installation-under-control">section 12</a>)</td>
 <td>Used as it is: no question, nothing downloaded, the environments
@@ -392,13 +391,13 @@ If your files are in a subfolder, try recursive=yes.</code></pre>
 <h3 id="what-is-recognised">What is recognised</h3>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Type</th>
 <th>File names</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Paired reads</td>
 <td><code>&lt;name&gt;_R1.fastq.gz</code> +
 <code>&lt;name&gt;_R2.fastq.gz</code>. Also
@@ -406,12 +405,12 @@ If your files are in a subfolder, try recursive=yes.</code></pre>
 <code>_R1_001</code>/<code>_R2_001</code>, with <code>-</code> instead
 of <code>_</code>, <code>.fq</code>, and uncompressed</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Single reads</td>
 <td>Any other <code>.fastq</code>, <code>.fq</code>,
 <code>.fastq.gz</code>, <code>.fq.gz</code></td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Assemblies</td>
 <td><code>.fasta</code>, <code>.fa</code>, <code>.fna</code>, also
 <code>.gz</code></td>
@@ -549,22 +548,22 @@ that needs the reads again fails.</p>
   RESULT:  FINISHED WITH PROBLEMS -- check the errors / abandoned / FAIL samples above</code></pre>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>RESULT</th>
 <th>Means</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><code>FINISHED OK</code></td>
 <td>No warnings, all samples PASS</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>FINISHED WITH WARNINGS</code></td>
 <td>Warnings, a sample with QC WARNING or CRITICAL, or tools that did
 not run</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>FINISHED WITH PROBLEMS</code></td>
 <td>Errors, abandoned samples, or a sample with QC FAIL</td>
 </tr>
@@ -581,25 +580,25 @@ shows how much of the computer the run used.</p>
 species. The sample&#39;s status is the worst one reached:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Status</th>
 <th>Meaning</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>PASS</td>
 <td>All measures within limits</td>
 </tr>
-<tr>
+<tr class="even">
 <td>WARNING</td>
 <td>Something to look at; results are normally usable</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>CRITICAL</td>
 <td>Look carefully before using the results</td>
 </tr>
-<tr>
+<tr class="even">
 <td>FAIL</td>
 <td>Results are probably not reliable</td>
 </tr>
@@ -608,25 +607,25 @@ species. The sample&#39;s status is the worst one reached:</p>
 <p>What is checked by default:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Measure</th>
 <th>Default limits</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Share of bases ≥ Q30 (raw reads)</td>
 <td>warning &lt; 80 %, critical &lt; 70 %, fail &lt; 50 %</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Depth counting Q30 bases, after trimming</td>
 <td>fail &lt; 30×</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Largest other species / other genus in the reads</td>
 <td>fail &gt; 5 %</td>
 </tr>
-<tr>
+<tr class="even">
 <td>The two species methods (Kraken2 and Mash screen)</td>
 <td>warning when the species Kraken2 reports is not among those Mash
 screen finds (the reported species is Kraken2&#39;s). Mash screen finding a
@@ -635,57 +634,57 @@ To make it critical:
 <code>critical_taxonomy_species_disagree = &gt;0</code> in the species&#39;
 section</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>The analysis itself</td>
 <td>critical when the sample was not analysed to the end: a step failed
 or hit its time limit, or the sample was abandoned (<a href="#a-step-failed-or-hit-its-time-limit">below</a>). Not a threshold;
 cannot be switched off</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Mean read length after trimming</td>
 <td>warning &lt; 50 bp</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Assembly size (<em>C. jejuni</em>)</td>
 <td>warning outside 1.56–1.98 Mb, critical outside 1.40–2.30 Mb, fail
 outside 1.37–2.60 Mb</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Assembly size (<em>C. coli</em>)</td>
 <td>warning outside 1.56–2.06 Mb, critical outside 1.40–2.30 Mb, fail
 outside 1.37–2.60 Mb</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>cgMLST loci called (<em>C. jejuni</em>, <em>C. coli</em>)</td>
 <td>warning &lt; 95 %, critical &lt; 90 %, fail &lt; 85 %</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Assembly size (<em>S. enterica</em>)</td>
 <td>warning outside 4.47–5.37 Mb, critical outside 4.4–5.8 Mb, fail
 outside 4.1–6.0 Mb</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Assembly size (<em>E. coli</em>)</td>
 <td>warning outside 4.42–5.81 Mb, fail outside 4.0–6.3 Mb</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Assembly size (<em>L. monocytogenes</em>)</td>
 <td>warning outside 2.82–3.2 Mb, critical outside 2.8–3.39 Mb, fail
 outside 2.5–3.6 Mb</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Assembly N50 (<em>S. enterica</em>)</td>
 <td>warning &lt; 50 kb, critical &lt; 30 kb, fail &lt; 15 kb</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Contigs ≥ 500 bp (<em>S. enterica</em>)</td>
 <td>warning &gt; 150, critical &gt; 300, fail &gt; 500</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Assembly GC (<em>S. enterica</em>)</td>
 <td>warning outside 51.5–53 %, fail outside 50–54.5 %</td>
 </tr>
-<tr>
+<tr class="even">
 <td>cgMLST loci called (<em>S. enterica</em>)</td>
 <td>warning &lt; 98 %, critical &lt; 95 %, fail &lt; 90 %</td>
 </tr>
@@ -712,28 +711,28 @@ reportable.</p>
 the reason:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Reportable</th>
 <th>When</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Yes</td>
 <td>QC status PASS or WARNING</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Assess</td>
 <td>QC status CRITICAL: not reportable as it is, but a bioinformatician
 may approve it after looking at the details</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>No</td>
 <td>QC status FAIL; or the analysis did not finish (an abandoned sample,
 or a step that failed). In the second case the QC status is CRITICAL,
 but there is nothing to assess: run the sample again (<a href="#a-step-failed-or-hit-its-time-limit">below</a>)</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Not validated</td>
 <td>The species is not one of the configuration&#39;s validated species
 (below). Shown in grey: the sample is not bad, the method is not
@@ -808,50 +807,64 @@ where part of the reads carry a different base. That number, <em>1-kb
 windows with mixed positions</em>, is the measure to look at. It is in
 the sample&#39;s short report (Contamination) and has its own section in the
 detailed sample report, right after the remapping: the measure first
-(marked ★, with its QC status or a note that no threshold is set), then
-what it is built from (the mixed positions, how many are isolated, their
-median minor allele fraction, which is roughly the share of a second
-strain, the depth, why candidate positions were set aside, the settings,
-and a link to every candidate position), and last the values of the
-earlier method, for comparison only. With a threshold set (below) it
-takes part in the sample&#39;s QC status like any other measure.</p>
-<p>How to read it (<em>C. jejuni</em>, about 100× depth):</p>
+(marked ★, with its QC status or a note that no threshold is set for the
+species), then what it is built from (the mixed positions, how many are
+isolated, their median minor allele fraction, which is roughly the share
+of a second strain, the depth, why candidate positions were set aside,
+the settings, and a link to every candidate position), and last the
+values of the earlier method, for comparison only. With a threshold set
+(below) it takes part in the sample&#39;s QC status like any other
+measure.</p>
+<p>How to read it (<em>C. jejuni</em> and <em>C. coli</em>, about 100×
+depth):</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Windows</th>
 <th>What it usually means</th>
+<th>QC status</th>
 </tr>
 </thead>
 <tbody>
-<tr>
-<td>0–10</td>
-<td>Normal for a clean isolate</td>
+<tr class="odd">
+<td>0–70</td>
+<td>Seen in clean isolates (most have fewer than 10)</td>
+<td>PASS</td>
 </tr>
-<tr>
-<td>10–30</td>
-<td>Seen in a few clean isolates; no action on this alone</td>
+<tr class="even">
+<td>100–350</td>
+<td>Possible mixture: a clearly different second strain at about 2 % of
+the reads. The cgMLST profile is normally not affected</td>
+<td>WARNING</td>
 </tr>
-<tr>
-<td>above 30</td>
-<td>Possible mixture: look at the sample (assembly size, number of
-contigs, cgMLST call rate) and consider re-isolating</td>
-</tr>
-<tr>
-<td>hundreds</td>
-<td>A second, clearly different strain at a few per cent or more</td>
+<tr class="odd">
+<td>above 350</td>
+<td>A second strain at about 3 % or more, in at least a fifth of the
+genome. The cgMLST profile may be changed (5 alleles at 15 % and 20
+alleles at 20 % in the validation series): look at the assembly size,
+the number of contigs, the paralogous loci and the call rate, and
+consider re-isolating</td>
+<td>CRITICAL</td>
 </tr>
 </tbody>
 </table>
-<p>What it cannot do: a second strain below about 5 % of the reads, or
-one that is nearly identical to the main strain (same outbreak, a few
-cgMLST alleles apart), does not show. A low number is therefore not
-proof of a pure culture. Samples with single reads get no value.</p>
-<p>No limit is built in yet. To get a QC warning, add
-<code>warning_contamination_mixed_windows=&gt;30</code> to the species
-section of your config file (<a href="#9-settings">section 9</a>). The
-value is provisional and was set on <em>Campylobacter</em>; a species
-with a larger genome needs its own.</p>
+<p>The measure levels off at about 80 % of the windows (reached at
+roughly 10 % of a second strain), so the number does not tell 10 % from
+20 %; the median minor allele fraction in the detailed sample report
+does.</p>
+<p>What it cannot do: a second strain below about 2 % of the reads, or
+one that is close to the main strain, does not show. In the validation
+series a strain 49 cgMLST alleles from the main strain gave at most 68
+windows, also at 20 %, where 5 alleles of the profile were changed. A
+low number is therefore not proof of a pure culture. Samples with single
+reads get no value.</p>
+<p>The limits are built in for <em>Campylobacter</em> (WARNING above
+100, CRITICAL above 350) and <em>Salmonella</em> (WARNING above 500,
+CRITICAL above 1 000; the genome is almost three times as large). Other
+species have none: add, for example,
+<code>warning_contamination_mixed_windows=&gt;100</code> to the species
+section of your config file (<a href="#9-settings">section 9</a>), with
+a value that fits the genome size.</p>
 <p>If the species could not be determined, the species-specific tools do
 not run for that sample and the species thresholds fall back to the
 general ones. The run summary lists such samples
@@ -967,38 +980,38 @@ folder to exist; use <code>overwrite=no</code> for a first run.)</p>
 <p>Exit codes for a calling script:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Code</th>
 <th>Meaning</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>0</td>
 <td>Finished, every step ran (QC warnings may still be there: read the
 RESULT line)</td>
 </tr>
-<tr>
+<tr class="even">
 <td>1</td>
 <td>Stopped by an error</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>2</td>
 <td>No input files found</td>
 </tr>
-<tr>
+<tr class="even">
 <td>3</td>
 <td>Finished, but at least one sample was abandoned</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>4</td>
 <td>Interrupted (Ctrl+C, kill)</td>
 </tr>
-<tr>
+<tr class="even">
 <td>5</td>
 <td>Finished, but a step failed or hit its time limit</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>6</td>
 <td>Stopped with <code>terminate</code></td>
 </tr>
@@ -1215,22 +1228,22 @@ read</li>
 </ul>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Light</th>
 <th>Meaning</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Green</td>
 <td>All values within thresholds</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Yellow</td>
 <td>A warning threshold is crossed, or the species could not be
 determined</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Red</td>
 <td>A critical or fail threshold is crossed, or the sample could not be
 processed</td>
@@ -1334,38 +1347,38 @@ genus sensible values.</li>
 <code>fail_</code>):</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Measure</th>
 <th>What</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><code>qscore_raw_q30_rate</code>,
 <code>qscore_trimmed_q30_rate</code></td>
 <td>Share of bases ≥ Q30, raw / trimmed reads, as a fraction
 (<code>&lt;0.80</code> = below 80 %)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>remap_reads_mapped_pct</code></td>
 <td>Reads (after trimming and downsampling) that map back to the
 sample&#39;s own assembly (%). Low when part of the reads did not assemble
 into the genome, e.g. an organism Kraken does not know</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>remap_properly_paired_pct</code></td>
 <td>Properly paired reads (%). Falls with long inserts (Bowtie2&#39;s
 default maximum insert is 500 bp), so it is not comparable between
 libraries; <code>remap_pairs_diff_contig_pct</code> is the better
 pairing check</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>remap_pairs_diff_contig_pct</code></td>
 <td>Mapped pairs whose mates are on different contigs (%): a few percent
 at contig ends; most of the pairs when R1 and R2 come from different
 samples</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>remap_breadth_10x_pct</code></td>
 <td>Assembly covered at ≥10× (%). Against the sample&#39;s own assembly, so
 higher than against a reference: regions with no reads are not in the
@@ -1373,28 +1386,28 @@ assembly at all. <em>Campylobacter</em> has default warnings on the
 remapping measures (see the configuration reference); for other species
 they have no thresholds yet</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>remap_depth_iqr_over_median</code></td>
 <td>Depth unevenness along the assembly (interquartile range / median);
 rises with library GC bias</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>remap_error_rate_pct</code></td>
 <td>Mismatches against the assembly (% of mapped bases)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>remap_low_depth_contig_pct</code></td>
 <td>Share of the assembly (bases) in contigs ≥1 kb whose median depth is
 below 20 % of the genome&#39;s: a contaminant at low abundance assembles
 into its own contigs at a much lower depth (independent of Kraken)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>qscore_raw_gc_delta</code></td>
 <td>GC of the reads minus GC of the assembly (percentage points); a
 library with GC bias gives reads with higher GC than the genome. No
 default threshold</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>qscore_raw_pair_name_mismatch_pct</code></td>
 <td>% of the read pairs checked by the pre-scan (the first 5 000) whose
 read names differ between R1 and R2. The R1 and R2 files of a sample
@@ -1406,104 +1419,104 @@ were sequenced in the same run. Defaults: WARNING <code>&gt;0.5</code>
 name examples. Files where R1 holds read 2 and R2 read 1 (swapped) get a
 warning.</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>qscore_raw_gc</code>, <code>qscore_trimmed_gc</code></td>
 <td>GC content of the reads</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>qscore_raw_n_rate</code></td>
 <td>N bases in the raw reads (%), over the whole files (fastp)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>qscore_trimmed_n_rate</code></td>
 <td>N bases in the trimmed reads (%)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>qscore_raw_average_read_length</code>,
 <code>qscore_trimmed_average_read_length</code></td>
 <td>Mean read length (bp)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>qscore_trimmed_average_q_score</code></td>
 <td>Mean quality score after trimming</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>qscore_trimmed_adapters</code></td>
 <td>Adapter content after trimming (%)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>qscore_raw_adapter_trimmed_pct</code></td>
 <td>Reads in which an adapter was found (%)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>qscore_trimmed_too_short_pct</code></td>
 <td>Reads removed as too short after trimming (%)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>coverage_raw_coverage</code>,
 <code>coverage_trimmed_coverage</code></td>
 <td>Depth (×), raw / trimmed reads</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>coverage_raw_q30_coverage</code>,
 <code>coverage_trimmed_q30_coverage</code></td>
 <td>Depth counting only Q30 bases (×)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>taxonomy_species_score</code></td>
 <td>Score of the species determination (%)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>contamination_species_level</code>,
 <code>contamination_genus_level</code></td>
 <td>Largest other species / genus in the reads (%)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>contamination_mixed_windows</code></td>
 <td>Two strains of the same species: 1-kb windows of the assembly with
 mixed positions (<a href="#two-strains-of-the-same-species-in-one-sample">section
 6</a>)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>assembly_size</code></td>
 <td>Assembly size (bp)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>assembly_n50</code></td>
 <td>Assembly N50 (bp)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>assembly_contigs</code></td>
 <td>Number of contigs (all, also the short fragments an assembler
 writes)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>assembly_contigs_500</code></td>
 <td>Number of contigs of 500 bp or longer — the one to set limits
 on</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>assembly_gc</code></td>
 <td>GC content of the assembly</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>typing_mlst_incomplete_alleles</code></td>
 <td>MLST loci (of the seven) without an exact allele: missing
 (<code>-</code>), partial (<code>?</code>) or several copies; a new
 allele (<code>~12</code>) or a new ST is not counted</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>typing_mlst_st_disagree</code></td>
 <td>1 when mlst and fastMLST both give an ST and they differ</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>typing_serotype_missing</code></td>
 <td>1 when the serotyping ran but gave no serotype: <em>Salmonella</em>
 serovar from neither SISTR nor SeqSero2, <em>E. coli</em> O or H type
 missing (ECTyper), <em>Listeria</em> serogroup missing or nontypable
 (LisSero)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>typing_serotype_disagree</code></td>
 <td><em>Salmonella</em>: 1 when SISTR and SeqSero2 name different
 serovars. Alternatives (SISTR <code>A|B</code>, SeqSero2
@@ -1514,7 +1527,7 @@ tool gives only an antigenic formula, the antigens are compared instead
 called). <code>-:-:-</code> from both tools counts as a missing serovar
 (<code>typing_serotype_missing</code>), not a disagreement</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>typing_serotype_tool_flag</code></td>
 <td>1 when the QC of the tool whose serotype is reported is not PASS:
 <em>Salmonella</em> -- SISTR <code>qc_status</code> when SISTR&#39;s serovar
@@ -1524,20 +1537,20 @@ when it is not used are kept as information
 (<code>typing.qc.sistr_qc_info</code>); ECTyper <code>qc</code> with
 WARNING or FAIL, or ECTyper naming another species</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>typing_cgmlst_call_rate</code></td>
 <td>cgMLST loci called (%). Every schema the sample was typed with is
 judged against its own thresholds; the one with the worst status is
 reported. Thresholds can be set per schema in
 <code>[chewbbaca_schema_&lt;name&gt;]</code></td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>typing_cgmlst_inferred_pct</code></td>
 <td>cgMLST alleles new to the schema (% of the called): a lineage the
 schema covers poorly, or assembly and sequencing errors. No default
 threshold</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>typing_cgmlst_paralogous</code></td>
 <td>cgMLST paralogous loci (NIPH + NIPHEM), in the schema the call rate
 comes from</td>
@@ -1551,19 +1564,19 @@ correct one.</p>
 changed</h3>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Setting</th>
 <th>Default</th>
 <th>What</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><code>threads</code></td>
 <td>4</td>
 <td>Threads per tool</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>parallel_mode</code></td>
 <td>off</td>
 <td>Several samples at once. On the command line:
@@ -1571,34 +1584,34 @@ changed</h3>
 <code>--no-parallel</code> (= <code>parallel_mode=off</code>, for one
 run when the file says on)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>species_scope</code></td>
 <td>the four main species</td>
 <td>Which species&#39; tools are installed and run</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>validated_species</code></td>
 <td>empty</td>
 <td>The species the configuration is validated for; samples of other
 species are marked and not reportable (<a href="#can-the-results-be-reported">section 6</a>)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>main_assembly</code></td>
 <td><code>fewest_contigs500</code></td>
 <td>How the main assembly is chosen; or the name of an assembler</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>enable=shovill_spades</code> (or
 <code>shovill_skesa</code>)</td>
 <td>off</td>
 <td>Also assemble with Shovill. Not reproducible, see <a href="#13-known-limitations">section 13</a></td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>maxdepth</code> (species)</td>
 <td>100</td>
 <td>Downsampling target; <code>0</code> = use all reads</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>targetbases_floor</code>
 (<code>[species__default]</code>)</td>
 <td>200000000</td>
@@ -1606,12 +1619,12 @@ species are marked and not reportable (<a href="#can-the-results-be-reported">se
 to no fewer bases than this (200 Mb), so that a too-low estimate cannot
 cut the data too hard</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>fatal_mindepth</code> (species)</td>
 <td>30</td>
 <td>Below this depth the sample is abandoned</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>timeout</code></td>
 <td>30m</td>
 <td>Time limit per step</td>
@@ -1622,39 +1635,39 @@ cut the data too hard</td>
 <h2 id="10-species-and-typing-tools">10. Species and typing tools</h2>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Species</th>
 <th>Specific tools</th>
 <th>In scope by default</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><em>Campylobacter</em></td>
 <td>(cgMLST schema, species thresholds)</td>
 <td>yes</td>
 </tr>
-<tr>
+<tr class="even">
 <td><em>Salmonella</em></td>
 <td>SISTR, SeqSero2</td>
 <td>yes</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><em>E. coli</em>, <em>Shigella</em></td>
 <td>ECTyper, VirulenceFinder</td>
 <td>yes</td>
 </tr>
-<tr>
+<tr class="even">
 <td><em>Listeria monocytogenes</em></td>
 <td>LisSero</td>
 <td>yes</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>any</td>
 <td>PlasmidFinder, Bakta</td>
 <td>off; <code>enable=</code></td>
 </tr>
-<tr>
+<tr class="even">
 <td>any</td>
 <td>CheckM</td>
 <td>off; <code>enable=checkm</code>. Experimental: its results are not
@@ -1685,29 +1698,29 @@ eurlc-wgs --install-schema=chewie_ns_ecoli      # a schema from the catalog</cod
 <p>Write these with <code>=</code>, not with a space.</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Species</th>
 <th>Schema</th>
 <th>Loci used</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><em>C. jejuni</em> / <em>C. coli</em></td>
 <td><code>CAMPISO-PubMLST-8</code></td>
 <td>all (the schema is cgMLST)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><em>E. coli</em></td>
 <td><code>chewie_ns_ecoli</code></td>
 <td>2 360 (EFSA filter)</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><em>Salmonella</em></td>
 <td><code>chewie_ns_salmonella</code></td>
 <td>3 255 (EFSA filter)</td>
 </tr>
-<tr>
+<tr class="even">
 <td><em>Listeria</em></td>
 <td><code>chewie_ns_listeria</code></td>
 <td>all</td>
@@ -1775,22 +1788,22 @@ name:</p>
 genome size lists. Every report then shows one of:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Status</th>
 <th>Means</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td><code>SEAL VERIFIED</code></td>
 <td>Everything is as sealed</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>SEAL VERIFIED WITH OVERRIDES</code></td>
 <td>As sealed, but the run was started with command-line settings that
 can change results; the report lists them</td>
 </tr>
-<tr>
+<tr class="odd">
 <td><code>SEAL BROKEN</code></td>
 <td>A file, a frozen database, a conda environment (a tool&#39;s, or the
 pipeline&#39;s own) or the pipeline itself has changed since; the report
@@ -1798,7 +1811,7 @@ says what. This includes an installation that is no longer what the
 files describe: an environment that was updated, or a frozen database
 that could not be used</td>
 </tr>
-<tr>
+<tr class="even">
 <td><code>UNSEALED</code></td>
 <td>No seal</td>
 </tr>
@@ -1852,31 +1865,31 @@ the person responsible for the method (below). For each set the command
 checks, in this order:</p>
 <table>
 <thead>
-<tr>
+<tr class="header">
 <th>Check</th>
 <th>Passes when</th>
 </tr>
 </thead>
 <tbody>
-<tr>
+<tr class="odd">
 <td>Files of the check set</td>
 <td>every file has the MD5 sum in the set&#39;s <code>.md5</code> list
 (nothing is run otherwise)</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Run</td>
 <td>the pipeline run finished</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Config seal</td>
 <td>the status is <code>SEAL VERIFIED</code> (without a configured seal:
 noted as UNSEALED, not a failure)</td>
 </tr>
-<tr>
+<tr class="even">
 <td>Expected results</td>
 <td>every required check against the set&#39;s expected results agrees</td>
 </tr>
-<tr>
+<tr class="odd">
 <td>Reference run</td>
 <td>no unexpected differences from the set&#39;s reference fingerprint
 (skipped when the set has none)</td>
@@ -1962,7 +1975,9 @@ it shows in the cgMLST paralogous loci, the assembly size and the call
 rate.</li>
 <li>The check for two strains of the same species is validated for
 <em>C. jejuni</em> (about 100×) and <em>Salmonella</em>; it does not see
-a mixture below about 5 % or between nearly identical strains.</li>
+a mixture below about 2 % or between closely related strains (49 cgMLST
+alleles apart in the validation series), also when the mixture changes
+the cgMLST profile.</li>
 <li>The cgMLST call rate depends on the schema: the same isolate can get
 a somewhat different call rate with another schema for the species. The
 call-rate thresholds are set per schema.</li>

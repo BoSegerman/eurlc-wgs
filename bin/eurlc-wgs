@@ -85,7 +85,7 @@ BEGIN {
             *{"main::$name"} = sub { die "eurlc-wgs: $name() needs the Perl module $module, which is not installed\n" };
         }
     }
-    my $info_only = @ARGV && !grep { !/^-{0,2}(?:version|help|h)$/i } @ARGV;
+    my $info_only = @ARGV && !grep { !/^-{0,2}(?:version|help|help-admin|manual|h)$/i } @ARGV;
     if ( @missing && !$info_only ) {
         print STDERR "eurlc-wgs: Perl module(s) not found: " . join( ", ", @missing ) . ".\n"
                    . "They are part of the eurlc-wgs conda environment. Activate it first "
@@ -890,7 +890,7 @@ if ( is_conda() ) {
 
 setdir("conda", get_conda_base() );
 
-if(peekdir("conda") eq "" && !grep { /^-{0,2}(?:help|h)$/i } @ARGV){   # --help works without conda
+if(peekdir("conda") eq "" && !grep { /^-{0,2}(?:help|help-admin|manual|h)$/i } @ARGV){   # --help, --help-admin and --manual work without conda
    log_message("ERROR: Fatal error - Conda is not found, aborting analysis", "red" );
    close_logfile();
    exit 1;
@@ -2287,6 +2287,13 @@ my $R_cfg_species     = $rundata{config}{effective}{species};
 # alternate syntax exists. Existing "param=value" usage is untouched: the
 # regex only matches a bare token with no "=" already attached.
 {
+    # --write-configfile[=<file>] is the readable form of configfile=write:
+    # rewritten here, so that the configfile handler (which runs after
+    # database=) does the work for both.
+    for my $arg (@ARGV) {
+        if    ( $arg =~ /^(?:--?)?write-configfile$/i )      { $arg = "configfile=write"; }
+        elsif ( $arg =~ /^(?:--?)?write-configfile=(.+)$/i ) { $arg = "configfile=write:$1"; }
+    }
     my %path_taking_arg = map { lc($_) => 1 } qw(datadir outdir database configfile);
     my @rewritten;
     my $i = 0;
@@ -2409,54 +2416,21 @@ my %args_handled;
 #------------------------------------
 # Define pre-mount-check handlers
 my %premountcheckhandlers = (
-help => sub {
-
-    my $help_file = find_share_file("help.txt");
-    my $help_text;
-
-    if (-f $help_file) {
-        if (open my $fh, '<', $help_file) {
-            local $/;
-            $help_text = <$fh>;
-            close $fh;
-
-            if (!defined $help_text || $help_text !~ /\S/) {
-                log_message(
-                    "WARNING: Help file [$help_file] is empty; using built-in help",
-                    "yellow"
-                );
-                $help_text = undef;
-            }
-        }
-        else {
-            log_message(
-                "WARNING: Could not open help file [$help_file]: $! -- using built-in help",
-                "yellow"
-            );
-        }
+help         => sub { show_help_file("help.txt") },
+"help-admin" => sub { show_help_file("help-admin.txt") },
+# --manual: where the user manual is on this computer (installed with the
+# pipeline as one HTML file and a PDF, built by scripts/build-manual).
+manual       => sub {
+    my $html = find_share_file("eurlc-wgs-user-manual.html");
+    my $pdf  = find_share_file("eurlc-wgs-user-manual.pdf");
+    print "\nEURLC-WGS user manual (version $PIPELINE_VERSION)\n\n";
+    print "    to read in a web browser:  $html\n" if $html ne "";
+    print "    to print:                  $pdf\n"  if $pdf ne "";
+    print "    The manual is not installed on this computer.\n" if $html eq "" && $pdf eq "";
+    print "    online:                    https://github.com/BoSegerman/eurlc-wgs  (docs/eurlc-wgs-user-manual.md)\n\n";
+    if ( $html ne "" && ( $ENV{WSL_DISTRO_NAME} // "" ) ne "" ) {
+        print "    In WSL, open it in the Windows browser with:  explorer.exe \"\$(wslpath -w '$html')\"\n\n";
     }
-    else {
-        log_message(
-            "WARNING: Help file not found [$help_file] -- using built-in help",
-            "yellow"
-        );
-    }
-
-    # No help.txt: a short pointer instead of a second copy of the help text
-    # that would have to be kept in step with docs/help.txt (C, review §4).
-    $help_text //= <<"HELP";
-
-EURLC-WGS $PIPELINE_VERSION
-
-    eurlc-wgs [datadir=<folder>] [options]
-
-The full help text (share/eurlc-wgs/help.txt) is not installed. Reinstall
-the pipeline (install.sh or conda), or see docs/help.txt and
-docs/eurlc-wgs-user-manual.md in the source repository.
-
-HELP
-
-    print $help_text;
     close_logfile();
     exit 0;
 },
@@ -2478,8 +2452,9 @@ HELP
            return;
         }
         #------------------------ write ----------------- - write a configfile with default values and exit
-        if (lc($configfile_value) eq "write") {
-        
+        if ( $configfile_value =~ /^write(?::(.+))?$/i ) {
+           my $write_to = $1;
+
            # db dir must exist - target dir
            unless (-d $S_dbdir) { 
            
@@ -2496,7 +2471,19 @@ HELP
            } #end unless db (db dir must exist - target dir)
         
            #now we know that the db directory exists!
-           
+
+           # --write-configfile=<file>: a name without a folder is written in
+           # the database folder (where configfile=<name> looks for it), a
+           # path is used as given.
+           if ( defined $write_to && $write_to ne "" ) {
+               graceful_die("In docker mode a config file is written in the database directory: give a file name, not a path")
+                   if is_docker() && $write_to =~ m{/};
+               my $path = $write_to =~ m{/} ? File::Spec->rel2abs($write_to) : File::Spec->catfile( $S_dbdir, $write_to );
+               graceful_die( "Cannot write [$path]: the folder " . dirname($path) . " does not exist" ) unless -d dirname($path);
+               $rundata{config}{path}     = $path;
+               $rundata{config}{filename} = basename($path);
+           }
+
            my $written = writedefaultconfigfile();
            unless ($written) {
               graceful_die("Failed to create configfile");
@@ -2644,7 +2631,7 @@ HELP
 # Fixed order (A5): configfile= looks for a bare file name in the database
 # folder, so database= must be applied first; the folders before anything
 # that uses them. Everything else alphabetically, help/version last.
-my %_premount_rank = ( database => 1, datadir => 2, outdir => 3, archivedir => 4, configfile => 5, help => 98, version => 99 );
+my %_premount_rank = ( database => 1, datadir => 2, outdir => 3, archivedir => 4, configfile => 5, help => 98, "help-admin" => 98, manual => 98, version => 99 );
 foreach my $key ( sort { ( $_premount_rank{$a} // 50 ) <=> ( $_premount_rank{$b} // 50 ) || $a cmp $b } keys %args ) {
     if (exists $premountcheckhandlers{$key}) {
         my $value = $args{$key};
@@ -2668,7 +2655,7 @@ our @LATER_ARG_NAMES = qw(
     assume-yes no-color non-interactive overwrite recursive resume verbose
     infotool installtool reinstalltool removetool
     color colour no-colour docker optional qc-screen qcscreen
-    setup species freeze-databases verify-databases installation-check make-installation-check from samples allow-unsealed generate-seal import-schema install-efsa-schemas install-schema install-scheme list-schemas update-catalog
+    list-tools list-steps setup species freeze-databases verify-databases installation-check make-installation-check from samples allow-unsealed generate-seal import-schema install-efsa-schemas install-schema install-scheme list-schemas update-catalog
     enable disable fastq fasta summarize summarise
 );
 {
@@ -3342,6 +3329,11 @@ foreach my $key ( sort keys %args ) {
     }
 
     # Case 3: general section (default)
+    # --fastq / --fasta without a value are the "only this kind of input"
+    # flags, handled in their own block below. Here they were taken for
+    # fastq= / fasta= with an empty value and stopped the run with "not a
+    # recognized yes/no value".
+    next if ( $key eq "fastq" || $key eq "fasta" ) && $value eq "";
     if (exists $R_cfg->{general}{$key}) {
         my $apply_value = $value;
 
@@ -3582,6 +3574,8 @@ my %early_handled_args = (
     "install-scheme"   => 1,   # also matches --install-scheme=Species (prefix match below) [LEGACY alias]
     "install-schema"   => 1,   # also matches --install-schema=Name (prefix match below)
     "list-schemas"     => 1,   # list installed and available schemas
+    "list-tools"       => 1,   # the tool and step names that arguments take
+    "list-steps"       => 1,
     "import-schema"    => 1,   # also matches --import-schema=Dir (prefix match below)
     "update-catalog"   => 1,   # also matches --update-catalog[=url]
     "install-efsa-schemas" => 1,  # install EFSA One Health cgMLST schemas (also matches =species,...)
@@ -3801,6 +3795,11 @@ if ( $R_cfg->{general}{archive_results} ) {
     }
     if ($found_verify_dbs) {
         $utility_exit->( _cmd_verify_databases() );
+    }
+    if ( exists $args{"list-tools"} || exists $args{"list-steps"} ) {
+        _cmd_list_tools();
+        close_logfile();
+        exit 0;
     }
     if ( exists $args{"installation-check"} ) {
         my $failed = _cmd_installation_check( $args{"installation-check"} );
@@ -5831,6 +5830,35 @@ sub apply_setup_species {
     }
     $R_cfg->{general}{species_scope} = $new;
     $args_handled{species} = 1;
+}
+
+## --help / --help-admin: the text is in share/eurlc-wgs/help.txt and
+## help-admin.txt (docs/ in a source checkout), not in the script.
+sub show_help_file {
+    my ($name) = @_;
+    my $help_file = find_share_file($name);
+    my $help_text;
+    if ( $help_file ne "" && -f $help_file && open( my $fh, '<', $help_file ) ) {
+        local $/;
+        $help_text = <$fh>;
+        close $fh;
+        $help_text = undef unless defined $help_text && $help_text =~ /\S/;
+    }
+    log_message( "WARNING: Help file [$name] not found or empty -- showing a short pointer instead", "yellow" ) unless defined $help_text;
+    $help_text //= <<"HELP";
+
+EURLC-WGS $PIPELINE_VERSION
+
+    eurlc-wgs [datadir=<data-folder>] [options]
+
+The help text (share/eurlc-wgs/$name) is not installed. Reinstall
+the pipeline (install.sh or conda), or see docs/$name and
+docs/eurlc-wgs-user-manual.md in the source repository.
+
+HELP
+    print $help_text;
+    close_logfile();
+    exit 0;
 }
 
 # enabled = auto -> 1 if the tool's species overlap general.species_scope,
@@ -19227,7 +19255,12 @@ resolve_parallel_resource_limits();
 ##   step AFTER the steps it depends on so both modes agree.
 ## @BATCH_RUNSTEPS_PRE  -- cross-sample steps run after the per-sample phase.
 ## @BATCH_RUNSTEPS_POST -- cross-sample steps run last (aggregation/reporting).
-our @PER_SAMPLE_RUNSTEPS = qw(
+# Filled in a BEGIN block, so that the lists are also there for the
+# commands that run and exit before execution reaches this line
+# (--list-tools).
+our ( @PER_SAMPLE_RUNSTEPS, @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST );
+BEGIN {
+@PER_SAMPLE_RUNSTEPS = qw(
     md5_rawdata sample_prescan fastqc_rawdata
     fastp_rawdata check_for_no_trimming find_species_kraken2 downsampling_bbmap
     check_for_no_downsampling fastq_stats_trimmed fastp_trimmed_data
@@ -19239,8 +19272,9 @@ our @PER_SAMPLE_RUNSTEPS = qw(
     virulencefinder plasmidfinder
     bakta checkm_per_sample chewbbaca_per_sample
 );
-our @BATCH_RUNSTEPS_PRE  = qw( sort_assemblies checkm chewbbaca chewbbaca_regenerate_per_batch );
-our @BATCH_RUNSTEPS_POST = qw( multiqc cleanup );
+@BATCH_RUNSTEPS_PRE  = qw( sort_assemblies checkm chewbbaca chewbbaca_regenerate_per_batch );
+@BATCH_RUNSTEPS_POST = qw( multiqc cleanup );
+}
 
 # QC screen: only the quick raw-read steps; genome size (config, list, or
 # jellyfish when needed) and the QC evaluation happen at the end.
@@ -30495,7 +30529,7 @@ sub find_share_file {
     for my $r ( eurlc_share_roots() ) {
         my ( $root, $checkout ) = @$r;
         my $sub = $rel;
-        $sub =~ s{^help\.txt$}{docs/help.txt} if $checkout;
+        $sub =~ s{^(help(?:-admin)?\.txt|eurlc-wgs-user-manual\.(?:html|pdf))$}{docs/$1} if $checkout;
         my $path = eval { abs_path($root) } // $root;
         $path .= "/$sub";
         push @tried, $path;
@@ -35782,6 +35816,46 @@ sub _cmd_make_installation_check {
     return 0;
 }
 
+## --list-tools (= --list-steps): the names that enable=, disable=,
+## <tool>.<setting>=, installtool= ... and rerun= take, as they are with the
+## current configuration.
+sub _cmd_list_tools {
+    my @tools = sort grep { ref $R_cfg->{$_} eq 'HASH' && exists $R_cfg->{$_}{enabled}
+                            && $_ !~ /^(?:general|species|chewbbaca_schemas)$/ } keys %$R_cfg;
+    print "\nTOOLS -- names for enable=, disable=, <tool>.<setting>=<value>, installtool=,\n";
+    print "         reinstalltool=, removetool= and infotool=\n\n";
+    printf "    %-22s %-5s %s\n", "tool", "now", "only for species";
+    printf "    %-22s %-5s %s\n", "-" x 22, "-" x 5, "-" x 30;
+    for my $t (@tools) {
+        my $on = ( $R_cfg->{$t}{enabled} && $R_cfg->{$t}{enabled} ne "0" ) ? "on" : "off";
+        printf "    %-22s %-5s %s\n", $t, $on, $R_cfg->{$t}{species} // "";
+    }
+    print "\n    \"now\" is with the current settings (configuration file, species of the\n";
+    print "    installation). A species name switches all its tools: enable=Salmonella.\n";
+    print "    Settings of a tool: eurlc-wgs infotool=<tool>\n";
+
+    my $wrap = sub {
+        my @w = @_;
+        my $line = "   ";
+        for my $w (@w) {
+            if ( length($line) + length($w) + 1 > 78 ) { print "$line\n"; $line = "   "; }
+            $line .= " $w";
+        }
+        print "$line\n" if $line =~ /\S/;
+    };
+    print "\nSTEPS -- names for rerun=<step>[,<step>...], in the order they run\n\n";
+    print "    for each sample:\n";
+    $wrap->(@PER_SAMPLE_RUNSTEPS);
+    print "    once for the whole run:\n";
+    $wrap->( @BATCH_RUNSTEPS_PRE, @BATCH_RUNSTEPS_POST );
+    print "\n    A tool is a program with its settings; a step is one stage of the analysis.\n";
+    print "    Most steps are named after the tool they run. Some tools have several steps\n";
+    print "    (fastp_rawdata, fastp_trimmed_data), and some steps run no tool but choose\n";
+    print "    between results (select_main_assembly). rerun= also runs every step that\n";
+    print "    depends on the ones named; the log says which.\n\n";
+    return 0;
+}
+
 sub _cmd_list_schemas {
     $S_SUPPRESS_STARTUP_LOG = 0;
 
@@ -35896,9 +35970,14 @@ sub _cmd_list_schemas {
     # ── Footer ────────────────────────────────────────────────────────────────
     $p->("");
     $p->( $C_DIM . "  $LINE" . $C_RESET );
-    $p->( "  Install a schema:    " . $C_CYAN . "eurlc-wgs --install-schema=<name>" . $C_RESET );
-    $p->( "  Install all:         " . $C_CYAN . "eurlc-wgs --install-schema=all" . $C_RESET );
-    $p->( "  Import a local dir:  " . $C_CYAN . "eurlc-wgs --import-schema=<dir>" . $C_RESET );
+    $p->( "  The standard schema of a species (the usual way; also installs its tools):" );
+    $p->( "      " . $C_CYAN . "eurlc-wgs --setup species=<campylobacter|salmonella|ecoli|listeria>" . $C_RESET );
+    $p->( "  The EFSA schemas and filters only:" );
+    $p->( "      " . $C_CYAN . "eurlc-wgs --install-efsa-schemas[=<species>,...]" . $C_RESET );
+    $p->( "  Another schema from the catalog above (all of them: =all):" );
+    $p->( "      " . $C_CYAN . "eurlc-wgs --install-schema=<name>" . $C_RESET );
+    $p->( "  A schema you already have in a folder:" );
+    $p->( "      " . $C_CYAN . "eurlc-wgs --import-schema=<folder>" . $C_RESET );
     $p->("");
 }
 
@@ -40435,6 +40514,20 @@ sub hasFASTAExtension {
 
 ###################################################################################################### 
 
+# A folder that --recursive must not look into: an output folder of this
+# pipeline (this run's, or an earlier run's inside the data folder). It is
+# full of FASTQ and FASTA files -- trimmed reads, assemblies -- that would
+# otherwise be taken for samples.
+sub is_pipeline_output_dir {
+    my ($path) = @_;
+    return 1 if -f "$path/log/run_status.json" || -f "$path/data/rundata.json" || -d "$path/log/versioning_explicit";
+    my $out = eval { peekdir("out") } // "";
+    return 0 if $out eq "";
+    my $a = eval { abs_path($path) } // $path;
+    my $b = eval { abs_path($out) }  // $out;
+    return $a eq $b ? 1 : 0;
+}
+
 sub push_files_in_dir {
     my ($dir, $filetype, $files_ref, $recursive) = @_;
 
@@ -40456,8 +40549,9 @@ sub push_files_in_dir {
         if ($filetype eq "fasta" && hasFASTAExtension($file)) {
             push @$files_ref, $path;
         }
-        # Recurse into subdirectories
-        if ($recursive eq "recursive" && -d $path) {
+        # Recurse into subdirectories. (The callers pass 1; this compared
+        # with the word "recursive", so --recursive never looked in one.)
+        if ($recursive && $recursive ne "0" && -d $path && !is_pipeline_output_dir($path)) {
             push_files_in_dir($path, $filetype, $files_ref, $recursive);
         }
     }
@@ -40491,7 +40585,7 @@ sub any_input_files_exist {
         }
 
         my $path = File::Spec->catfile($dir, $file);
-        if ($recursive && -d $path) {
+        if ($recursive && -d $path && !is_pipeline_output_dir($path)) {
             if ( any_input_files_exist($path, $recursive, $want_fastq, $want_fasta) ) {
                 $found = 1;
                 last;

@@ -460,6 +460,48 @@ check "--version prints 1.0.0-rc3" bash -c "perl '$SCRIPT' --version 2>&1 | grep
 check "downsampling reads gzip with Java's own reader (unbgzip=f unpigz=f), paired and single" \
       bash -c "[[ \$(grep -c '^       unbgzip=f unpigz=f \$' '$SCRIPT') == 2 ]]"
 
+# --- input flags, lists and help -----------------------------------------
+echo "Input flags, lists, help"
+DR="$T/data_rec"; mkdir -p "$DR/sub" "$DR/earlier_run/data" "$DR/earlier_run/results"
+cp "$D/A_S1_L001_R1_001.fastq.gz" "$D/A_S1_L001_R2_001.fastq.gz" "$DR/"
+cp "$D/Y_S4_L001_R1_001.fastq.gz" "$D/Y_S4_L001_R2_001.fastq.gz" "$DR/sub/"
+printf '>c\nACGTACGTACGT\n' > "$DR/C.fasta"
+echo '{}' > "$DR/earlier_run/data/rundata.json"; printf '>z\nACGT\n' > "$DR/earlier_run/results/Z.fasta"
+run "$T/in0.out" datadir="$DR" outdir="$T/o_in0"
+check "input: without --recursive only the folder itself (1 PE + 1 FASTA)" grep -q 'Found 2 samples (1 PE, 0 SE, 1 FASTA)' "$T/in0.out"
+run "$T/in1.out" datadir="$DR" outdir="$T/o_in1" --recursive
+check "  ... --recursive also finds the reads in a subfolder" grep -q 'Found 3 samples (2 PE, 0 SE, 1 FASTA)' "$T/in1.out"
+check "  ... but does not take the files of an earlier output folder for samples" bash -c "! grep -q 'Z \[FASTA\]' '$T/in1.out'"
+run "$T/in2.out" datadir="$DR" outdir="$T/o_in2" --fastq
+check "  ... --fastq: only the reads" grep -q 'Found 1 samples (1 PE, 0 SE, 0 FASTA)' "$T/in2.out"
+run "$T/in3.out" datadir="$DR" outdir="$T/o_in3" --fasta
+check "  ... --fasta: only the assemblies" grep -q 'Found 1 samples (0 PE, 0 SE, 1 FASTA)' "$T/in3.out"
+run "$T/lt.out" --list-tools
+check "--list-tools: the tool names with on/off, and the step names for rerun=" \
+      bash -c "[[ $RC == 0 ]] && grep -q '^    spades  *on' '$T/lt.out' && grep -q 'select_main_assembly' '$T/lt.out' && grep -q 'chewbbaca_regenerate_per_batch' '$T/lt.out'"
+run "$T/ls.out" --list-steps
+check "  ... --list-steps shows the same" bash -c "diff <(sed -n '/^TOOLS/,\$p' '$T/lt.out') <(sed -n '/^TOOLS/,\$p' '$T/ls.out') > /dev/null"
+run "$T/ha.out" --help-admin
+check "--help-admin: the maintenance commands; --help points to it and no longer lists them" \
+      bash -c "[[ $RC == 0 ]] && grep -q -- '--generate-seal' '$T/ha.out' && grep -q -- '--make-installation-check' '$T/ha.out' && grep -q -- '--help-admin' '$T/help.out' && ! grep -q -- '--generate-seal\|--remap-check' '$T/help.out'"
+( cd "$T/work" && "${NOCONDA[@]}" perl "$SCRIPT" --manual < /dev/null > "$T/manual.out" 2>&1 ); rc=$?
+check "--manual: says where the HTML and the PDF of the manual are (also outside conda)" \
+      bash -c "[[ $rc == 0 ]] && grep -q 'eurlc-wgs-user-manual.html' '$T/manual.out' && grep -q 'eurlc-wgs-user-manual.pdf' '$T/manual.out'"
+check "the built manual (HTML, PDF) is made from the manual as it is now (else: scripts/build-manual)" \
+      bash "$(cd "$(dirname "$0")/.." && pwd)/scripts/build-manual" --check
+check "  ... one file with nothing fetched from elsewhere, and no broken link between its sections" \
+      python3 -c "
+import re,sys
+s=open('$(cd "$(dirname "$0")/.." && pwd)/docs/eurlc-wgs-user-manual.html',encoding='utf-8').read()
+ids=set(re.findall(r'id=\"([^\"]+)\"',s)); refs=set(re.findall(r'href=\"#([^\"]+)\"',s))
+ext=re.findall(r'<(?:link|script|img)[^>]+(?:src|href)=\"https?://',s)
+sys.exit(1 if (refs-ids) or ext else 0)"
+run "$T/wc.out" --write-configfile=named.config
+check "--write-configfile=<name>: written in the database folder, every setting in use" \
+      bash -c "[[ $RC == 0 ]] && grep -q '^threads=' '$HOME/eurlc-wgs_db/named.config'"
+run "$T/wc2.out" --write-configfile="$T/elsewhere.config"
+check "  ... a path is used as given" bash -c "[[ $RC == 0 && -s '$T/elsewhere.config' ]]"
+
 # --- setup: species, configuration file, what is in the database folder ---
 echo "Setup"
 # stand-ins, so that nothing is downloaded: wget and git clone fail at once

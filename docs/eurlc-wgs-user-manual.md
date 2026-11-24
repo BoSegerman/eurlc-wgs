@@ -1,12 +1,14 @@
 # EURLC-WGS User Manual
 
-Version 1.0.0-rc2 · November 2026
+Version 1.0.0-rc3 · November 2026
 
 This manual is for the person who runs the pipeline: what it does, how to
 start it, where the results are and how to read them, and what to do when
-something goes wrong. `eurlc-wgs --help` lists every command-line option,
-and `eurlc-wgs configfile=write` writes every setting, with its current
-value, to a file you can read and edit ([section 9](#9-settings)).
+something goes wrong. It is installed with the pipeline as one HTML file
+and as a PDF: `eurlc-wgs --manual` says where. `eurlc-wgs --help` lists the
+options for running an analysis, `eurlc-wgs --help-admin` those for looking after an installation,
+and every setting is listed, with its built-in value, in
+`~/eurlc-wgs_db/eurlc-wgs.config` ([section 9](#9-settings)).
 
 This is a release candidate. What does not work yet, or not as fully as it
 should, is collected in [section 13](#13-known-limitations).
@@ -275,7 +277,8 @@ Upper and lower case do not matter. Reads and assemblies can be mixed in
 one folder. Use `--fastq` or `--fasta` to analyse only one kind.
 
 Files directly in the folder are used. Add `--recursive` to include
-subfolders.
+subfolders; output folders of the pipeline itself (this run's, or an
+earlier run's inside the data folder) are not searched.
 
 ### Sample names
 
@@ -690,7 +693,11 @@ eurlc-wgs rerun=lissero lissero.arguments="--min_id 98"
 
 The step's results are removed and it is run again, together with every
 step that builds on it; everything else is reused. The log lists exactly
-which steps that is. Step names are the ones on the status board and in
+which steps that is. `eurlc-wgs --list-steps` lists the step names (and
+`--list-tools` the same list together with the tool names for `enable=`,
+`disable=` and `<tool>.<setting>=`: a tool is a program with its settings,
+a step one stage of the analysis, usually named after its tool). They are
+also the names on the status board and in
 the log; a misspelt name stops the run and prints the valid ones.
 
 ### Switch a tool on or off
@@ -1036,10 +1043,15 @@ Lines left with `#` keep the built-in value, also when a later version of
 the pipeline changes it.
 
 ```bash
-eurlc-wgs configfile=write
+eurlc-wgs --write-configfile
+eurlc-wgs --write-configfile=campy-test.config     # in the database folder
+eurlc-wgs --write-configfile=/some/folder/my.config
 ```
 
-writes a file where every setting is in use with its current value. That
+writes a file where every setting is in use with its current value
+(`configfile=write` is the older form of the same command). A file with
+another name is used with `configfile=<name>`: a name without a folder is
+looked for in the database folder. That
 fixes all of them, also against later changes of the defaults -- for when
 the file itself should show every value that applied. It does not overwrite
 an existing file without asking.
@@ -1483,8 +1495,9 @@ A misspelt argument, or a folder given without `datadir`. Nothing has been
 run.
 
 **"[fastp.argumetns] does not match an existing config parameter"**
-The tool exists but not that setting. `eurlc-wgs configfile=write` shows
-all settings.
+The tool exists but not that setting. `eurlc-wgs infotool=fastp` shows
+the settings of a tool, and `~/eurlc-wgs_db/eurlc-wgs.config` lists them
+all.
 
 **"Output directory [...] already exists and overwrite mode is 'prompt'"**
 You used `--assume-yes`; add `--resume`, `overwrite=yes` or `overwrite=no`.
@@ -1578,6 +1591,7 @@ contain sample names or paths that should not be public.
 eurlc-wgs                                   # analyse the current folder
 eurlc-wgs datadir /data/run                 # analyse another folder
 eurlc-wgs datadir /data/run outdir /out/run # results elsewhere
+eurlc-wgs --list-tools                      # tool names (on/off) and step names
 eurlc-wgs --recursive                       # include subfolders
 eurlc-wgs --fastq | --fasta                 # only reads | only assemblies
 eurlc-wgs --qc-screen                       # raw-read QC only

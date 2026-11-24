@@ -1,0 +1,110 @@
+EURLC-WGS -- installation, maintenance and validation
+(for whoever looks after an installation or is responsible for a validated
+method; running an analysis: eurlc-wgs --help)
+
+Each part below has a section in the user manual (eurlc-wgs --manual says
+where it is) that explains when and why; this is the list of commands.
+
+THE INSTALLATION
+    --setup [--optional]         Install or complete the installation: tool
+                                 environments, databases and the cgMLST
+                                 schema of each species of the installation
+                                 (--optional: also the tools that are off).
+                                 What is in <database-folder> decides: a
+                                 sealed installation is used as it is, an
+                                 existing one is checked and completed, a
+                                 new one is installed. Log:
+                                 <database-folder>/setup_logs/
+    --setup species=<list>       ... for these species: campylobacter,
+                                 salmonella, ecoli, listeria, or all. In an
+                                 existing installation they are added
+    --write-configfile[=<configfile>]
+                                 Write every current setting to a settings
+                                 file (all in use, none commented out)
+
+SINGLE TOOLS (tool names: eurlc-wgs --list-tools)
+    installtool=<tool>           Install one tool's environment
+    reinstalltool=<tool>         Remove and install again
+    removetool=<tool>            Remove one tool's environment
+    infotool=<tool>              Show a tool's settings and installation
+
+cgMLST SCHEMAS (manual, section 11)
+    --list-schemas               Installed and available schemas
+    --setup species=<list>       The standard schema of a species, with its
+                                 tools (the usual way)
+    --install-efsa-schemas[=<species>,...]
+                                 The EFSA schemas and filters only
+                                 (campylobacter, ecoli, salmonella, listeria)
+    --install-schema=<name>      Another schema from the catalog
+    --import-schema=<folder>     A schema you already have
+
+A CONFIGURATION UNDER CONTROL (manual, section 12)
+    The order is: freeze the databases, write and edit the settings file,
+    seal, make a check set. A run then says SEAL VERIFIED, or what differs.
+
+    --freeze-databases[=<db>,..] Copy the databases to frozen, versioned
+                                 folders, and record their versions in
+                                 <database-folder>/db_freeze.config
+    --verify-databases           Check every database in full (MD5 of all
+                                 marker files) and name its version
+    --generate-seal[=<name>]     Seal the configuration: settings, frozen
+                                 databases, tool environments and pipeline
+                                 version. Also writes the exact package list
+                                 of every environment to
+                                 <database-folder>/conda_envs/; with those
+                                 lists in the database folder, install.sh
+                                 and --setup make the same environments on
+                                 another computer
+    validated_species=<species>[, ...]
+                                 A setting, not a command: the species the
+                                 configuration is validated for, e.g.
+                                 "Campylobacter jejuni, Campylobacter coli".
+                                 Set it in the settings file before sealing,
+                                 so that the seal covers it. Samples of other
+                                 species (or without a species) are analysed,
+                                 but marked and not reportable
+
+CHECKING AN INSTALLATION (manual, section 12; docs/installation-check.md)
+    --make-installation-check=<set> from=<dataset-folder> samples=<id,...>
+                                 Make a check set named <set> from a
+                                 validation dataset: copies the samples'
+                                 reads and expected results, runs them once
+                                 here and keeps the result as the set's
+                                 reference. Needs a verified seal
+                                 (--allow-unsealed to try it out). The set
+                                 is copied with <database-folder>
+    --installation-check[=<set>[,<set>]]
+                                 Run the check set(s) in
+                                 <database-folder>/installation_check/ and
+                                 compare with their expected results and
+                                 reference run. Without a name: every set.
+                                 Exit code 0 when every set passes, else 1
+
+COMPARING RESULTS (manual, section 12)
+    Two different questions, answered in two folders of the report:
+
+    Are the results right? -- compared with a validation dataset: samples
+    with known species, ST, cgMLST clusters and QC outcome
+    (<ID>_validation_profile.yml with <ID>_expected_results.tsv).
+    validate=auto|off|<dataset-folder>
+                                 auto (default): used when the data folder,
+                                 or the folder above it, holds a
+                                 *_validation_profile.yml. Result:
+                                 <out-folder>/report/validation/
+
+    Are the results the same as before? -- compared with the results
+    fingerprint of an earlier run of the same samples
+    (report/tables/eurlc_results_fingerprint.json.gz), e.g. after an update
+    or on another computer.
+    verify_reference=auto|off|<file or folder>
+                                 auto (default): the newest fingerprint in a
+                                 folder reference/ next to the data. Result:
+                                 <out-folder>/report/verification/
+    verify_expect=<area>[,...]   Differences that are expected this time and
+                                 not to be counted, e.g.
+                                 verify_expect=amr,qc.coverage
+
+    Both run at the end of an analysis and again with summarize. Between any
+    two finished runs: eurlc-wgs-inspect compare <out-folder-1> <out-folder-2>
+
+Running an analysis: eurlc-wgs --help

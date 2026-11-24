@@ -1,0 +1,2145 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>EURLC-WGS User Manual</title>
+  <style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+
+ul.task-list[class]{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+font-size: inherit;
+width: 0.8em;
+margin: 0 0.8em 0.2em -1.6em;
+vertical-align: middle;
+}
+.display.math{display: block; text-align: center; margin: 0.5rem auto;}
+</style>
+  <style type="text/css">
+:root { --ink: #1f2933; --muted: #5b6770; --line: #d9dee3; --accent: #1f5f8b; --code-bg: #f4f6f8; }
+html { font-size: 16px; }
+body { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--ink); line-height: 1.55;
+max-width: 52rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+h1 { font-size: 2rem; margin: 0 0 0.3rem; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 0.8rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 0.5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: "DejaVu Sans Mono", Consolas, Menlo, monospace; font-size: 0.86em; background: var(--code-bg);
+padding: 0.1em 0.3em; border-radius: 3px; overflow-wrap: anywhere; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.7rem 0.9rem;
+overflow-x: auto; line-height: 1.4; }
+pre code { background: none; padding: 0; font-size: 0.82em; overflow-wrap: normal; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92em; }
+th, td { border: 1px solid var(--line); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+blockquote { margin: 1rem 0; padding: 0.2rem 1rem; border-left: 3px solid var(--line); color: var(--muted); }
+nav#TOC { border: 1px solid var(--line); border-radius: 4px; padding: 0.8rem 1.2rem; margin: 1.5rem 0 2rem; }
+nav#TOC > ul { margin: 0; padding-left: 1.1rem; }
+nav#TOC ul ul { padding-left: 1.2rem; font-size: 0.93em; }
+nav#TOC li { margin: 0.15rem 0; }
+@media print {
+html { font-size: 10pt; }
+body { max-width: none; padding: 0; }
+a { color: inherit; }
+h2 { page-break-before: always; border-top: 0; padding-top: 0; margin-top: 0; }
+h2, h3, h4 { page-break-after: avoid; }
+pre, table, blockquote { page-break-inside: avoid; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+@page { size: A4; margin: 18mm 16mm 18mm 16mm;
+@bottom-center { content: counter(page); font-size: 8pt; color: #5b6770; } }
+</style>
+</head>
+<body>
+<h1 id="eurlc-wgs-user-manual">EURLC-WGS User Manual</h1>
+<p>Version 1.0.0-rc3 · November 2026</p>
+<p>This manual is for the person who runs the pipeline: what it does,
+how to start it, where the results are and how to read them, and what to
+do when something goes wrong. It is installed with the pipeline as one
+HTML file and as a PDF: <code>eurlc-wgs --manual</code> says where.
+<code>eurlc-wgs --help</code> lists the options for running an analysis,
+<code>eurlc-wgs --help-admin</code> those for looking after an
+installation, and every setting is listed, with its built-in value, in
+<code>~/eurlc-wgs_db/eurlc-wgs.config</code> (<a href="#9-settings">section 9</a>).</p>
+<p>This is a release candidate. What does not work yet, or not as fully
+as it should, is collected in <a href="#13-known-limitations">section
+13</a>.</p>
+<hr />
+<h2 id="contents">Contents</h2>
+<ol type="1">
+<li><a href="#1-what-the-pipeline-does">What the pipeline does</a></li>
+<li><a href="#2-installation">Installation</a></li>
+<li><a href="#3-your-first-run">Your first run</a></li>
+<li><a href="#4-input-files">Input files</a></li>
+<li><a href="#5-the-results-folder">The results folder</a></li>
+<li><a href="#6-reading-the-results">Reading the results</a></li>
+<li><a href="#7-everyday-tasks">Everyday tasks</a></li>
+<li><a href="#8-qc-screen-for-the-sequencing-lab">QC screen for the
+sequencing lab</a></li>
+<li><a href="#9-settings">Settings</a></li>
+<li><a href="#10-species-and-typing-tools">Species and typing
+tools</a></li>
+<li><a href="#11-cgmlst-schemas">cgMLST schemas</a></li>
+<li><a href="#12-keeping-an-installation-under-control">Keeping an
+installation under control</a></li>
+<li><a href="#13-known-limitations">Known limitations</a></li>
+<li><a href="#14-troubleshooting">Troubleshooting</a></li>
+<li><a href="#15-quick-reference">Quick reference</a></li>
+</ol>
+<hr />
+<h2 id="1-what-the-pipeline-does">1. What the pipeline does</h2>
+<p>EURLC-WGS analyses whole-genome sequencing data from bacterial
+isolates. You give it a folder of Illumina reads (or finished
+assemblies) and get an HTML report with quality control, species,
+assembly, sequence type, serotype, resistance genes and cgMLST
+clustering.</p>
+<p>It is built first for <em>Campylobacter</em>, with specific typing
+tools for <em>Salmonella</em>, <em>E. coli</em> and <em>Listeria</em> as
+well. A sample of any other species is analysed with everything that is
+not species-specific.</p>
+<p>For each sample, in this order:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Stage</th>
+<th>What</th>
+<th>Tools</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Raw reads</td>
+<td>Checksums, read-length and adapter scan</td>
+<td>built in</td>
+</tr>
+<tr class="even">
+<td>Trimming</td>
+<td>Adapter and quality trimming</td>
+<td>fastp</td>
+</tr>
+<tr class="odd">
+<td>Species</td>
+<td>Species and genus from the reads</td>
+<td>Kraken2 + Bracken</td>
+</tr>
+<tr class="even">
+<td>Downsampling</td>
+<td>Reduce very deep samples to a target depth</td>
+<td>BBMap</td>
+</tr>
+<tr class="odd">
+<td>Contamination</td>
+<td>Other species/genera in the reads</td>
+<td>Kraken2, Mash screen</td>
+</tr>
+<tr class="even">
+<td>Assembly</td>
+<td>One or more assemblies; the best becomes the main assembly</td>
+<td>SPAdes, SKESA (optional: Shovill)</td>
+</tr>
+<tr class="odd">
+<td>Assembly QC</td>
+<td>Size, contigs, N50; reads mapped back</td>
+<td>QUAST, Bowtie2</td>
+</tr>
+<tr class="even">
+<td>MLST</td>
+<td>Sequence type and clonal complex</td>
+<td>FastMLST, mlst</td>
+</tr>
+<tr class="odd">
+<td>AMR</td>
+<td>Resistance genes and point mutations</td>
+<td>AMRFinderPlus, ResFinder</td>
+</tr>
+<tr class="even">
+<td>Typing</td>
+<td>Serotype, virulence genes (by species)</td>
+<td>SISTR, SeqSero2, ECTyper, LisSero, VirulenceFinder</td>
+</tr>
+<tr class="odd">
+<td>cgMLST</td>
+<td>Allele profile</td>
+<td>chewBBACA</td>
+</tr>
+</tbody>
+</table>
+<p>Then, for all samples together: assemblies sorted by species, cgMLST
+profiles combined into distance matrices and a clustering report per
+species, a MultiQC summary, QC evaluation against thresholds, and the
+reports.</p>
+<p>A sample that turns out to have too little data is
+<strong>abandoned</strong> early (default: below 30× depth), so no time
+is spent assembling it. The other samples continue.</p>
+<hr />
+<h2 id="2-installation">2. Installation</h2>
+<h3 id="what-you-need">What you need</h3>
+<ul>
+<li>Linux, or Windows with WSL. Native Windows is not supported.</li>
+<li>Conda (Miniconda or Miniforge). <code>mamba</code> is used if it is
+installed.</li>
+<li>Disk space for the databases (allow a few tens of GB; the default
+Kraken2 database alone is the 8 GB standard database) and memory to
+match: 16 GB is a reasonable minimum, more for parallel runs.</li>
+<li>Internet access during installation.</li>
+</ul>
+<h3 id="install">Install</h3>
+<pre class="bash"><code>git clone https://github.com/BoSegerman/eurlc-wgs.git
+cd eurlc-wgs
+bash install.sh</code></pre>
+<p><code>install.sh</code> first asks which species the installation is
+for:</p>
+<pre><code>Which species should this installation be set up for?
+  1) Campylobacter
+  2) Salmonella
+  3) Escherichia coli
+  4) Listeria
+Numbers or names separated by commas, e.g. 1,2 [Enter = all]:</code></pre>
+<p>It then runs without further questions: it creates the conda
+environment <code>eurlc-wgs</code>, installs the program into it, and
+runs <code>eurlc-wgs --setup</code>, which creates one conda environment
+per tool, downloads the databases to <code>~/eurlc-wgs_db</code>, and
+installs the species tools and the cgMLST schema of each chosen species.
+This takes a while. When it ends with</p>
+<pre><code>Setup complete. This installation is ready for:
+    Campylobacter      cgMLST schema CAMPISO-PubMLST-8
+    Salmonella         cgMLST schema chewie_ns_salmonella</code></pre>
+<p>the installation is ready to use for those species (<a href="#3-your-first-run">section 3</a>). If something could not be
+downloaded, it says what is not ready; <code>eurlc-wgs --setup</code>
+then installs only what is missing. Every setup writes a log to
+<code>~/eurlc-wgs_db/setup_logs/&lt;date-time&gt;/log/log.txt</code>.</p>
+<p>To give the species without being asked (in a script, or over a
+connection without a terminal):</p>
+<pre class="bash"><code>bash install.sh --species=campylobacter,salmonella</code></pre>
+<p>Without <code>--species</code> and without a terminal to ask in, all
+four species are installed.</p>
+<table>
+<thead>
+<tr class="header">
+<th><code>install.sh</code> option</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>--species=LIST</code></td>
+<td>The species: <code>campylobacter</code>, <code>salmonella</code>,
+<code>ecoli</code>, <code>listeria</code> (comma-separated), or
+<code>all</code></td>
+</tr>
+<tr class="even">
+<td><code>--database=DIR</code></td>
+<td>The database folder, if not <code>~/eurlc-wgs_db</code></td>
+</tr>
+<tr class="odd">
+<td><code>--no-setup</code></td>
+<td>Install the program only; run
+<code>eurlc-wgs --setup species=...</code> yourself later</td>
+</tr>
+<tr class="even">
+<td><code>--assume-yes</code></td>
+<td>No questions (all species, unless <code>--species</code> is
+given)</td>
+</tr>
+<tr class="odd">
+<td><code>--resources-only</code></td>
+<td>Reinstall the program, templates and assets only (after
+<code>git pull</code>)</td>
+</tr>
+<tr class="even">
+<td><code>--optional</code></td>
+<td>Also install the tools that are off by default (Bakta, CheckM, ...).
+CheckM is experimental, see <a href="#13-known-limitations">section
+13</a></td>
+</tr>
+<tr class="odd">
+<td><code>--uninstall</code></td>
+<td>Remove all <code>eurlc-wgs*</code> environments and shared files
+(not the database folder)</td>
+</tr>
+</tbody>
+</table>
+<p>Tool versions come from the environment files in <code>envs/</code>;
+every installation of one pipeline version gets the same tool
+versions.</p>
+<h3 id="what-is-already-in-the-database-folder">What is already in the
+database folder</h3>
+<p><code>install.sh</code> and <code>eurlc-wgs --setup</code> look at
+the database folder first, and say what they found:</p>
+<table>
+<thead>
+<tr class="header">
+<th>In the folder</th>
+<th>Taken as</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Nothing, or no <code>eurlc-wgs.config</code></td>
+<td>A new installation</td>
+<td>Installed for the chosen species; <code>eurlc-wgs.config</code> is
+written</td>
+</tr>
+<tr class="even">
+<td><code>eurlc-wgs.config</code></td>
+<td>An existing installation</td>
+<td>Keeps its species. Every tool, database and schema is checked, and
+what is missing is installed. This also finishes an installation that
+was interrupted</td>
+</tr>
+<tr class="odd">
+<td><code>config_seal.ini</code></td>
+<td>A sealed installation (<a href="#12-keeping-an-installation-under-control">section 12</a>)</td>
+<td>Used as it is: no question, nothing downloaded, the environments
+made from the seal&#39;s package lists. Anything missing is reported as an
+error</td>
+</tr>
+</tbody>
+</table>
+<p>A database or schema counts as present when its files are, not when
+its folder is: the folder of an interrupted download is not taken for a
+database, and a half-installed schema folder is moved to
+<code>chewbbaca/incomplete/</code> and the schema installed again.</p>
+<h3 id="add-a-species-later">Add a species later</h3>
+<pre class="bash"><code>eurlc-wgs --setup species=listeria</code></pre>
+<p>installs the tools and the schema for it and adds it to
+<code>species_scope</code> in <code>eurlc-wgs.config</code>. Species are
+only added this way, never removed; to stop running the tools of a
+species, edit <code>species_scope</code> in the file. A sealed
+installation cannot be changed.</p>
+<h3 id="check-the-installation">Check the installation</h3>
+<pre class="bash"><code>conda activate eurlc-wgs
+eurlc-wgs --setup</code></pre>
+<p><code>--setup</code> can be run as often as you like. It lists every
+tool, database and cgMLST schema with <code>✓</code> or <code>✗</code>
+and offers to install what is missing. If something could not be
+installed it ends with
+<code>ERROR: Setup finished with problems: ...</code>, the species that
+are not ready, and exit code 1; otherwise with &quot;Setup complete&quot; and the
+species the installation is ready for.</p>
+<p><code>--setup</code> shows that everything is in place. To see that
+the installation also gives the results it should, run a small set of
+samples with known results: <code>eurlc-wgs --installation-check</code>
+(<a href="#12-keeping-an-installation-under-control">section
+12</a>).</p>
+<p><code>eurlc-wgs --version</code> and <code>eurlc-wgs --help</code>
+work without the conda environment. Anything else started outside it
+stops with
+<code>Perl module(s) not found ... Activate it first (conda activate eurlc-wgs)</code>.</p>
+<h3 id="the-configuration-file">The configuration file</h3>
+<p>A new installation gets <code>~/eurlc-wgs_db/eurlc-wgs.config</code>.
+It lists every setting with its built-in value, commented out with
+<code>#</code>; only <code>species_scope</code> is set. To change a
+setting, remove the <code>#</code> and edit the value (<a href="#9-settings">section 9</a>). Settings left commented follow the
+pipeline&#39;s defaults, also after an update.</p>
+<h3 id="other-cgmlst-schemas">Other cgMLST schemas</h3>
+<p>Each species gets its standard schema at installation. Other schemas,
+and schemas of your own, are in <a href="#11-cgmlst-schemas">section
+11</a>.</p>
+<hr />
+<h2 id="3-your-first-run">3. Your first run</h2>
+<pre class="bash"><code>conda activate eurlc-wgs
+cd /data/MiSeq_192          # the folder with your FASTQ files
+eurlc-wgs</code></pre>
+<p>That is all. The pipeline analyses the folder you are standing in and
+writes everything to a new subfolder, <code>eurlc-wgs/</code>. From
+anywhere else: <code>eurlc-wgs datadir=/data/MiSeq_192</code>.</p>
+<p>What happens on screen:</p>
+<ol type="1">
+<li><strong>Where it will work.</strong>
+<code>Input directory: /data/MiSeq_192</code> and
+<code>Press Ctrl+C now to cancel if this is not what you intended.</code></li>
+<li><strong>The samples it found</strong>, one line each with type:
+<code>PE</code> (paired reads), <code>SE</code> (single reads) or
+<code>FASTA</code>. Check that the number and names are what you
+expect.</li>
+<li><strong>Tool check</strong> (&quot;testing requirements&quot;). A missing tool
+or database is offered for installation here, before the analysis
+starts.</li>
+<li><strong>The analysis</strong>, sample by sample, one line per step
+with a timer.</li>
+<li><strong>The run summary</strong>: samples, QC result, species,
+errors and warnings, and where the report is.</li>
+</ol>
+<p>Open the report in a browser:</p>
+<pre><code>/data/MiSeq_192/eurlc-wgs/report/main_report.html</code></pre>
+<p>In WSL, type <code>explorer.exe .</code> in the report folder to open
+it in Windows.</p>
+<h3 id="if-the-folder-has-been-analysed-before">If the folder has been
+analysed before</h3>
+<pre><code>Overwrite it (all earlier results are deleted), resume in it (reuse earlier results), or stop? [o=overwrite, r=resume, S=stop]:</code></pre>
+<p>Enter alone means stop. See <a href="#continue-an-interrupted-run">Continue an interrupted run</a>. A
+folder that holds only the logs of a run that stopped before the
+analysis (for example at a missing tool) is not asked about; it is
+simply started again.</p>
+<h3 id="if-nothing-was-found">If nothing was found</h3>
+<pre><code>No FASTQ/FASTA files found in [/data/MiSeq_192].
+If your files are in a subfolder, try recursive=yes.</code></pre>
+<p>Nothing is created and nothing is run.</p>
+<hr />
+<h2 id="4-input-files">4. Input files</h2>
+<h3 id="what-is-recognised">What is recognised</h3>
+<table>
+<thead>
+<tr class="header">
+<th>Type</th>
+<th>File names</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Paired reads</td>
+<td><code>&lt;name&gt;_R1.fastq.gz</code> +
+<code>&lt;name&gt;_R2.fastq.gz</code>. Also
+<code>_1</code>/<code>_2</code>,
+<code>_R1_001</code>/<code>_R2_001</code>, with <code>-</code> instead
+of <code>_</code>, <code>.fq</code>, and uncompressed</td>
+</tr>
+<tr class="even">
+<td>Single reads</td>
+<td>Any other <code>.fastq</code>, <code>.fq</code>,
+<code>.fastq.gz</code>, <code>.fq.gz</code></td>
+</tr>
+<tr class="odd">
+<td>Assemblies</td>
+<td><code>.fasta</code>, <code>.fa</code>, <code>.fna</code>, also
+<code>.gz</code></td>
+</tr>
+</tbody>
+</table>
+<p>Upper and lower case do not matter. Reads and assemblies can be mixed
+in one folder. Use <code>--fastq</code> or <code>--fasta</code> to
+analyse only one kind.</p>
+<p>Files directly in the folder are used. Add <code>--recursive</code>
+to include subfolders; output folders of the pipeline itself (this
+run&#39;s, or an earlier run&#39;s inside the data folder) are not searched.</p>
+<h3 id="sample-names">Sample names</h3>
+<p>The sample name is the file name without the read suffix and
+extension. <code>PT43-3_R1.fastq.gz</code> becomes <code>PT43-3</code>.
+Characters other than letters, digits, <code>_</code> and <code>-</code>
+are replaced by <code>_</code> (the log says so). Two files that end up
+with the same name get <code>_1</code>, <code>_2</code> added, with a
+warning.</p>
+<p>Things to know:</p>
+<ul>
+<li><strong>Illumina&#39;s sample number and lane are removed.</strong>
+<code>PT43_S12_L001_R1_001.fastq.gz</code> becomes sample
+<code>PT43</code>.</li>
+<li><strong>The same isolate on several lanes is merged.</strong>
+<code>PT43_S12_L001_…</code> and <code>PT43_S12_L002_…</code> are joined
+into one file per read before the analysis and analysed as one sample,
+<code>PT43</code>. The original files are not changed; the sample report
+lists the lane files with their checksums.</li>
+<li><strong>Two different samples with the same name</strong>
+(<code>PT43_S12_…</code> and <code>PT43_S13_…</code>: different sample
+numbers) are not merged. They keep their full names,
+<code>PT43_S12_L001</code> and <code>PT43_S13_L001</code>, with a
+warning.</li>
+<li><strong>An R1 without its R2</strong> is analysed as single reads,
+with a warning naming the file that was expected.</li>
+<li><strong>A read set and an assembly with the same name</strong> in
+one folder become two samples (<code>PT43</code> and
+<code>PT43_1</code>), with a warning.</li>
+<li><strong>A resumed run keeps the names</strong> of its first run,
+also if that was made with an earlier version.</li>
+</ul>
+<h3 id="folder-names">Folder names</h3>
+<p>Spaces and quote characters are not allowed anywhere in the path of
+the data folder, the output folder and the database folder: the analysis
+tools cannot handle them. The run stops at the start and names the
+folder. In WSL this typically means working under your Linux home or a
+<code>/mnt/d/data/...</code> folder rather than
+<code>/mnt/c/Users/First Last/...</code>.</p>
+<h3 id="assemblies-as-input">Assemblies as input</h3>
+<p>A FASTA file skips trimming and assembly and goes straight to
+assembly QC, MLST, AMR, typing and cgMLST. Read-based results (depth,
+Q30) are empty for such a sample.</p>
+<hr />
+<h2 id="5-the-results-folder">5. The results folder</h2>
+<pre><code>eurlc-wgs/
+├── EURLC-WGS-report.html      start page
+├── report/
+│   ├── main_report.html       all samples: QC, species, ST, serotype, AMR
+│   ├── samples_html/          one detailed report per sample
+│   ├── samples_pdf/           the same as PDF
+│   ├── clustering/            cgMLST distance matrices and clusters
+│   └── tables/                tables for download
+├── results/
+│   ├── assemblies/            &lt;sample&gt;.fasta = main assembly
+│   │   ├── alternative_assemblies/   the other assemblers&#39; results
+│   │   └── by_species/        assemblies sorted by species
+│   ├── qc/                    raw output of the QC tools, by stage
+│   ├── typing/                MLST, serotyping, virulence
+│   ├── amr/                   AMRFinderPlus, ResFinder
+│   └── clustering/chewbbaca/  allele profiles
+├── large_files/fastq/         trimmed, downsampled and lane-merged reads
+├── data/rundata.json          everything in machine-readable form
+├── log/                       log.txt, run_summary.txt, run_status.json,
+│                              events.jsonl, tool output, versions
+└── control/                   for pausing and stopping a run</code></pre>
+<p>What to keep: <code>report/</code>, <code>results/</code> and
+<code>log/</code> are the analysis. <code>large_files/</code> holds the
+trimmed, downsampled and lane-merged reads, by far the largest part.
+They are removed at the end of every run (settings
+<code>cleanup.trimmed_fastq</code>,
+<code>cleanup.downsampled_fastq</code>,
+<code>cleanup.merged_fastq</code>; <code>0</code> keeps them). A later
+<code>--resume</code> or <code>rerun=</code> that needs them makes them
+again, only for the samples that need them.</p>
+<p>The assemblers&#39; working files (for SPAdes some 50 MB per sample:
+k-mer folders, intermediate graphs, copies of the contigs) are removed
+as soon as each assembly is done. The logs and the final assembly graph
+are kept, the graph gzipped, for viewing in Bandage
+(<code>cleanup.assembly_graphs=keep</code> keeps it uncompressed,
+<code>remove</code> drops it). SPAdes <code>scaffolds.fasta</code> is
+not kept (<code>cleanup.spades_scaffolds=gzip</code> or
+<code>keep</code> keeps it when it differs from
+<code>contigs.fasta</code>). <code>cleanup.assembler_workfiles=0</code>
+keeps everything. The BLAST files ResFinder, VirulenceFinder and
+PlasmidFinder leave behind are removed at the end of the run
+(<code>cleanup.blast_tmp=0</code> keeps them).</p>
+<p>A config file written with <code>configfile=write</code> before
+November 2026 says <code>bam = 0</code> (the default then): BAM files
+are then kept. Remove the line, or set it to <code>1</code>, to get the
+current default.</p>
+<p>The re-mapping keeps about 1 MB per sample: statistics, a depth
+summary and allele counts, from which the mixture measure can be
+calculated again. The BAM file is removed (<code>cleanup.bam=0</code>
+keeps it; <code>rerun=remap cleanup.bam=0</code> makes it again). An
+output folder made before November 2026 also has the large
+<code>&lt;sample&gt;.depth.tsv</code> and
+<code>&lt;sample&gt;.pileup.gz</code> (100-250 MB per sample);
+<code>eurlc-wgs --remap-check --convert &lt;output folder&gt;</code>
+replaces them with the small files after checking that the results are
+identical.</p>
+<p>An analysis can be moved or copied: move the whole data folder, with
+<code>eurlc-wgs/</code> in it, and run <code>eurlc-wgs --resume</code>
+there (or
+<code>eurlc-wgs outdir=&lt;new place&gt;/eurlc-wgs --resume</code>). The
+raw files are found at the new place and checked against the MD5 sums
+recorded when they were analysed; a file that differs stops the run. The
+original paths stay in the logs as the record of what was analysed, and
+the move is noted in the log and the report. If the raw data is not
+there at all, the run continues with the results it has; only a step
+that needs the reads again fails.</p>
+<hr />
+<h2 id="6-reading-the-results">6. Reading the results</h2>
+<h3 id="the-run-summary">The run summary</h3>
+<p>Printed last, and saved in <code>log/run_summary.txt</code>:</p>
+<pre><code>  Samples:     3  (FASTA 1, PE 2)
+  QC:          1 PASS, 1 WARNING, 1 FAIL
+               not PASS: S2 (WARNING), S3 (FAIL)
+  Species:     Salmonella enterica (2), Listeria monocytogenes (1)
+  Abandoned:   1 sample(s) could not be finished:
+    S3 [spades]: SPAdes timed out after 30m
+  Errors:      1
+  Warnings:    4 (2 different)
+  Report:      /data/run1/eurlc-wgs/report/main_report.html
+  RESULT:  FINISHED WITH PROBLEMS -- check the errors / abandoned / FAIL samples above</code></pre>
+<table>
+<thead>
+<tr class="header">
+<th>RESULT</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>FINISHED OK</code></td>
+<td>No warnings, all samples PASS</td>
+</tr>
+<tr class="even">
+<td><code>FINISHED WITH WARNINGS</code></td>
+<td>Warnings, a sample with QC WARNING or CRITICAL, or tools that did
+not run</td>
+</tr>
+<tr class="odd">
+<td><code>FINISHED WITH PROBLEMS</code></td>
+<td>Errors, abandoned samples, or a sample with QC FAIL</td>
+</tr>
+</tbody>
+</table>
+<p>Each error and warning has the time since start
+(<code>[+00:31:00]</code>), which is how you find it in
+<code>log/log.txt</code>. In parallel mode a line <code>Parallel:</code>
+shows how much of the computer the run used.</p>
+<p>The same information, for a script or a GUI, is in
+<code>log/run_status.json</code>.</p>
+<h3 id="qc-status-of-a-sample">QC status of a sample</h3>
+<p>Every QC measure is compared with thresholds for the sample&#39;s
+species. The sample&#39;s status is the worst one reached:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>PASS</td>
+<td>All measures within limits</td>
+</tr>
+<tr class="even">
+<td>WARNING</td>
+<td>Something to look at; results are normally usable</td>
+</tr>
+<tr class="odd">
+<td>CRITICAL</td>
+<td>Look carefully before using the results</td>
+</tr>
+<tr class="even">
+<td>FAIL</td>
+<td>Results are probably not reliable</td>
+</tr>
+</tbody>
+</table>
+<p>What is checked by default:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Measure</th>
+<th>Default limits</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Share of bases ≥ Q30 (raw reads)</td>
+<td>warning &lt; 80 %, critical &lt; 70 %, fail &lt; 50 %</td>
+</tr>
+<tr class="even">
+<td>Depth counting Q30 bases, after trimming</td>
+<td>fail &lt; 30×</td>
+</tr>
+<tr class="odd">
+<td>Largest other species / other genus in the reads</td>
+<td>fail &gt; 5 %</td>
+</tr>
+<tr class="even">
+<td>The two species methods (Kraken2 and Mash screen)</td>
+<td>warning when the species Kraken2 reports is not among those Mash
+screen finds (the reported species is Kraken2&#39;s). Mash screen finding a
+second species as well is contamination, judged by the measures above.
+To make it critical:
+<code>critical_taxonomy_species_disagree = &gt;0</code> in the species&#39;
+section</td>
+</tr>
+<tr class="odd">
+<td>The analysis itself</td>
+<td>critical when the sample was not analysed to the end: a step failed
+or hit its time limit, or the sample was abandoned (<a href="#a-step-failed-or-hit-its-time-limit">below</a>). Not a threshold;
+cannot be switched off</td>
+</tr>
+<tr class="even">
+<td>Mean read length after trimming</td>
+<td>warning &lt; 50 bp</td>
+</tr>
+<tr class="odd">
+<td>Assembly size (<em>C. jejuni</em>)</td>
+<td>warning outside 1.56–1.98 Mb, critical outside 1.40–2.30 Mb, fail
+outside 1.37–2.60 Mb</td>
+</tr>
+<tr class="even">
+<td>Assembly size (<em>C. coli</em>)</td>
+<td>warning outside 1.56–2.06 Mb, critical outside 1.40–2.30 Mb, fail
+outside 1.37–2.60 Mb</td>
+</tr>
+<tr class="odd">
+<td>cgMLST loci called (<em>C. jejuni</em>, <em>C. coli</em>)</td>
+<td>warning &lt; 95 %, critical &lt; 90 %, fail &lt; 85 %</td>
+</tr>
+<tr class="even">
+<td>Assembly size (<em>S. enterica</em>)</td>
+<td>warning outside 4.47–5.37 Mb, critical outside 4.4–5.8 Mb, fail
+outside 4.1–6.0 Mb</td>
+</tr>
+<tr class="odd">
+<td>Assembly size (<em>E. coli</em>)</td>
+<td>warning outside 4.42–5.81 Mb, fail outside 4.0–6.3 Mb</td>
+</tr>
+<tr class="even">
+<td>Assembly size (<em>L. monocytogenes</em>)</td>
+<td>warning outside 2.82–3.2 Mb, critical outside 2.8–3.39 Mb, fail
+outside 2.5–3.6 Mb</td>
+</tr>
+<tr class="odd">
+<td>Assembly N50 (<em>S. enterica</em>)</td>
+<td>warning &lt; 50 kb, critical &lt; 30 kb, fail &lt; 15 kb</td>
+</tr>
+<tr class="even">
+<td>Contigs ≥ 500 bp (<em>S. enterica</em>)</td>
+<td>warning &gt; 150, critical &gt; 300, fail &gt; 500</td>
+</tr>
+<tr class="odd">
+<td>Assembly GC (<em>S. enterica</em>)</td>
+<td>warning outside 51.5–53 %, fail outside 50–54.5 %</td>
+</tr>
+<tr class="even">
+<td>cgMLST loci called (<em>S. enterica</em>)</td>
+<td>warning &lt; 98 %, critical &lt; 95 %, fail &lt; 90 %</td>
+</tr>
+</tbody>
+</table>
+<p>The assembly size limits come from an SVA survey of the GenBank
+assemblies of each species: WARNING is the narrower and CRITICAL the
+wider of the range that holds more than 99 % of the GenBank assemblies
+and the EURL recommendation; FAIL is NCBI&#39;s limit. For <em>S.
+enterica</em> the other CRITICAL limits are the EURL-Salmonella
+recommendations (N50 &gt; 30 000, at most 300 contigs, call rate ≥ 95
+%). All are starting points that may change in a later version.</p>
+<p>For <em>E. coli</em> and <em>Listeria</em> there are no built-in
+limits for N50, contigs or cgMLST call rate yet. Add your own (<a href="#9-settings">section 9</a>) or judge those values yourself.</p>
+<p>Problems that happen during the run (a tool that failed, a time
+limit, a missing input) are listed for the sample as well, separately
+from the threshold checks. Such a sample is never shown as PASS: the
+results that are there may look fine, but some are missing, so its
+status is CRITICAL (or FAIL, when the data failed as well) and it is not
+reportable.</p>
+<h3 id="can-the-results-be-reported">Can the results be reported?</h3>
+<p>The sample table of the main report has a column
+<strong>Reportable</strong>, and each sample&#39;s own report a line with
+the reason:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Reportable</th>
+<th>When</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Yes</td>
+<td>QC status PASS or WARNING</td>
+</tr>
+<tr class="even">
+<td>Assess</td>
+<td>QC status CRITICAL: not reportable as it is, but a bioinformatician
+may approve it after looking at the details</td>
+</tr>
+<tr class="odd">
+<td>No</td>
+<td>QC status FAIL; or the analysis did not finish (an abandoned sample,
+or a step that failed). In the second case the QC status is CRITICAL,
+but there is nothing to assess: run the sample again (<a href="#a-step-failed-or-hit-its-time-limit">below</a>)</td>
+</tr>
+<tr class="even">
+<td>Not validated</td>
+<td>The species is not one of the configuration&#39;s validated species
+(below). Shown in grey: the sample is not bad, the method is not
+validated for it</td>
+</tr>
+</tbody>
+</table>
+<p>Hold the pointer over the value for the reason; it is also written
+out in the sample&#39;s own report. The same verdict is in
+<code>report/tables/eurlc_observed_results.tsv</code> (columns
+<code>reportable</code>, <code>reportable_reason</code>,
+<code>validated_scope</code>) and in the results fingerprint.</p>
+<p><strong>Validated species.</strong> A lab that has validated the
+pipeline for certain species declares them in the config file:</p>
+<pre class="ini"><code>[general]
+validated_species = Campylobacter jejuni, Campylobacter coli</code></pre>
+<p>A genus alone (<code>Campylobacter</code>) covers all its species.
+Samples of other species are analysed as usual and all their results are
+in the report, but they are marked and not reportable; the same goes for
+a sample without a species call. A banner at the top of the main report
+names the validated species and the samples outside them, and the run
+summary has a line <code>Scope:</code>. With nothing declared (the
+default), nothing is marked. Because the setting is in the config file,
+a config seal covers it (<a href="#12-keeping-an-installation-under-control">section 12</a>).</p>
+<h3 id="a-step-failed-or-hit-its-time-limit">A step failed or hit its
+time limit</h3>
+<p>The run summary lists the samples and gives the command:</p>
+<pre><code>  Not finished: 1 sample(s) where a step failed or hit its time limit (QC CRITICAL, not reportable):
+    D1_023: skesa (timeout)
+    to run the failed steps again, keeping all other results:
+      eurlc-wgs outdir=/data/run192/eurlc-wgs --resume skesa.timeout=&lt;longer, e.g. 6h&gt;</code></pre>
+<p>In the report the sample is CRITICAL and Reportable is No, with the
+failed step as the reason. <code>--resume</code> runs only what is
+missing, for all samples of the run, and rebuilds the reports; the
+finished results are kept.</p>
+<ul>
+<li><strong>Time limit</strong> (<code>timeout</code>): give the tool
+more time in the same command (<code>skesa.timeout=6h</code>; assemblers
+have 2 hours by default).</li>
+<li><strong>Exit code</strong>: look in <code>log/stderr.txt</code> for
+the tool&#39;s own message first. If the cause was temporary (a full disk,
+the computer was busy), the same <code>--resume</code> is enough.</li>
+<li>If the step fails again and the tool is not needed, it can be left
+out: <code>--resume disable=skesa</code>. Note that this changes what
+the result is based on (here: the main assembly is chosen among the
+remaining assemblers), so in a validated configuration it is a decision
+for whoever is responsible for the method.</li>
+</ul>
+<p>The run ends with exit code 5 when a step failed.</p>
+<h3 id="abandoned-samples">Abandoned samples</h3>
+<p>A sample below the minimum depth (<code>fatal_mindepth</code> and
+<code>fatal_q30_mindepth</code>, default 30×) is stopped as soon as that
+is known. It appears in the report with the reason, and the run ends
+with exit code 3. The fix is normally more sequencing, not a
+setting.</p>
+<p>A sample is also abandoned when a step that everything else depends
+on fails (trimming, downsampling). It is then CRITICAL and not
+reportable, with the step and the tool&#39;s message as the reason. When the
+cause is solved, <code>--resume</code> analyses it again.</p>
+<h3 id="species-and-contamination">Species and contamination</h3>
+<p>The species comes from Kraken2/Bracken on the trimmed reads. The
+contamination check reports the largest <em>other</em> species and
+genus. Close relatives that the method cannot separate are not counted
+(<em>C. jejuni</em> / <em>C. coli</em>; <em>Shigella</em> for <em>E.
+coli</em>).</p>
+<h3 id="two-strains-of-the-same-species-in-one-sample">Two strains of
+the same species in one sample</h3>
+<p>Kraken2 cannot see a second strain of the <em>same</em> species. For
+that, the reads are mapped back to the sample&#39;s own assembly, and the
+pipeline counts how many 1-kb stretches of the genome have positions
+where part of the reads carry a different base. That number, <em>1-kb
+windows with mixed positions</em>, is the measure to look at. It is in
+the sample&#39;s short report (Contamination) and has its own section in the
+detailed sample report, right after the remapping: the measure first
+(marked ★, with its QC status or a note that no threshold is set), then
+what it is built from (the mixed positions, how many are isolated, their
+median minor allele fraction, which is roughly the share of a second
+strain, the depth, why candidate positions were set aside, the settings,
+and a link to every candidate position), and last the values of the
+earlier method, for comparison only. With a threshold set (below) it
+takes part in the sample&#39;s QC status like any other measure.</p>
+<p>How to read it (<em>C. jejuni</em>, about 100× depth):</p>
+<table>
+<thead>
+<tr class="header">
+<th>Windows</th>
+<th>What it usually means</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>0–10</td>
+<td>Normal for a clean isolate</td>
+</tr>
+<tr class="even">
+<td>10–30</td>
+<td>Seen in a few clean isolates; no action on this alone</td>
+</tr>
+<tr class="odd">
+<td>above 30</td>
+<td>Possible mixture: look at the sample (assembly size, number of
+contigs, cgMLST call rate) and consider re-isolating</td>
+</tr>
+<tr class="even">
+<td>hundreds</td>
+<td>A second, clearly different strain at a few per cent or more</td>
+</tr>
+</tbody>
+</table>
+<p>What it cannot do: a second strain below about 5 % of the reads, or
+one that is nearly identical to the main strain (same outbreak, a few
+cgMLST alleles apart), does not show. A low number is therefore not
+proof of a pure culture. Samples with single reads get no value.</p>
+<p>No limit is built in yet. To get a QC warning, add
+<code>warning_contamination_mixed_windows=&gt;30</code> to the species
+section of your config file (<a href="#9-settings">section 9</a>). The
+value is provisional and was set on <em>Campylobacter</em>; a species
+with a larger genome needs its own.</p>
+<p>If the species could not be determined, the species-specific tools do
+not run for that sample and the species thresholds fall back to the
+general ones. The run summary lists such samples
+(<code>species unknown: S3 -- species-specific tools and thresholds not used</code>).</p>
+<h3 id="main-assembly">Main assembly</h3>
+<p>When several assemblers ran, one result is chosen as the main
+assembly (default: fewest contigs over 500 bp, after setting aside
+assemblies of implausible size). The detailed sample report shows the
+candidates and why one was chosen. The others are kept under
+<code>alternative_assemblies/</code>.</p>
+<h3 id="typing">Typing</h3>
+<ul>
+<li><strong>ST</strong>: from FastMLST, with mlst as second opinion. A
+disagreement is a warning.</li>
+<li><strong>Serotype</strong>: <em>Salmonella</em> from SISTR (SeqSero2
+if SISTR&#39;s own QC fails), <em>E. coli</em> from ECTyper,
+<em>Listeria</em> from LisSero. <em>Shigella</em> is run through ECTyper
+but gets no main serotype.</li>
+<li><strong>AMR</strong>: AMRFinderPlus and ResFinder results are shown
+side by side; they are not merged into one verdict.</li>
+</ul>
+<h3 id="cgmlst-clustering">cgMLST clustering</h3>
+<p>Per species and schema, under <code>report/clustering/</code>: allele
+distance matrix and clusters for the samples of this run.</p>
+<h3 id="tools-that-did-not-run">Tools that did not run</h3>
+<p>If a sample is of a species whose tools are switched off, the summary
+says so and gives the command to add them:</p>
+<pre><code>  Not run:     species-specific tools that are disabled in the configuration:
+    [sistr] 2 Salmonella sample(s): S1, S2
+    to run them now, keeping all other results:
+      eurlc-wgs --resume enable=Salmonella</code></pre>
+<hr />
+<h2 id="7-everyday-tasks">7. Everyday tasks</h2>
+<h3 id="analyse-another-folder">Analyse another folder</h3>
+<pre class="bash"><code>eurlc-wgs datadir /data/MiSeq_193</code></pre>
+<p>Results go to <code>/data/MiSeq_193/eurlc-wgs/</code>.</p>
+<h3 id="put-the-results-somewhere-else">Put the results somewhere
+else</h3>
+<p>When the data folder is read-only, or results must be kept
+elsewhere:</p>
+<pre class="bash"><code>eurlc-wgs datadir /data/MiSeq_193 outdir /analysis/MiSeq_193_wgs</code></pre>
+<p>The folder you give <em>is</em> the results folder, so name it after
+the run. An existing folder with other content is refused.</p>
+<h3 id="use-more-of-the-computer">Use more of the computer</h3>
+<pre class="bash"><code>eurlc-wgs threads=8                       # threads per tool
+eurlc-wgs parallel_mode=on                # several samples at the same time
+eurlc-wgs parallel_mode=on max_threads=16 max_ram_gb=48</code></pre>
+<p>In parallel mode the screen shows a status board instead of a
+scrolling log: progress, samples finished, and what is running. Without
+limits it uses 85 % of the machine. On a shared or small computer, set
+<code>max_threads</code> and <code>max_ram_gb</code>.</p>
+<h3 id="continue-an-interrupted-run">Continue an interrupted run</h3>
+<pre class="bash"><code>cd /data/MiSeq_192
+eurlc-wgs --resume</code></pre>
+<p>Finished steps are reused; what is missing is run. The samples are
+the same as in the first run: new files in the folder are listed in a
+warning and not analysed (start a new output folder for them). The
+report says that the run was resumed and which results were reused.</p>
+<p>With results in another place, the output folder is enough:</p>
+<pre class="bash"><code>eurlc-wgs outdir /analysis/MiSeq_193_wgs --resume</code></pre>
+<p>A step that failed, hit its time limit or was interrupted is run
+again: its unfinished result was set aside
+(<code>&lt;file&gt;.failed</code>, <code>.timeout</code>,
+<code>.interrupted</code>) and is not reused.</p>
+<h3 id="run-one-step-again">Run one step again</h3>
+<pre class="bash"><code>eurlc-wgs rerun=spades
+eurlc-wgs rerun=lissero lissero.arguments=&quot;--min_id 98&quot;</code></pre>
+<p>The step&#39;s results are removed and it is run again, together with
+every step that builds on it; everything else is reused. The log lists
+exactly which steps that is. <code>eurlc-wgs --list-steps</code> lists
+the step names (and <code>--list-tools</code> the same list together
+with the tool names for <code>enable=</code>, <code>disable=</code> and
+<code>&lt;tool&gt;.&lt;setting&gt;=</code>: a tool is a program with its
+settings, a step one stage of the analysis, usually named after its
+tool). They are also the names on the status board and in the log; a
+misspelt name stops the run and prints the valid ones.</p>
+<h3 id="switch-a-tool-on-or-off">Switch a tool on or off</h3>
+<pre class="bash"><code>eurlc-wgs disable=skesa
+eurlc-wgs enable=plasmidfinder,bakta
+eurlc-wgs --resume enable=Salmonella       # add the Salmonella tools to a finished run</code></pre>
+<p>A species name means all tools specific to that species. A newly
+enabled tool is offered for installation at the start of the run.</p>
+<h3 id="change-a-tools-settings-for-one-run">Change a tool&#39;s settings
+for one run</h3>
+<pre class="bash"><code>eurlc-wgs fastp.arguments=&quot;--detect_adapter_for_pe --cut_right --trim_poly_g --length_required 50&quot;
+eurlc-wgs spades.timeout=3h</code></pre>
+<p><code>&lt;tool&gt;.&lt;setting&gt;=&lt;value&gt;</code>. A misspelt
+setting stops the run. Note that <code>arguments</code> replaces the
+whole default argument string.</p>
+<h3 id="give-a-slow-step-more-time">Give a slow step more time</h3>
+<p>Every tool run has a time limit: 30 minutes, 2 hours for assemblers
+and 10 minutes for FastQC (which sometimes hangs). A step that reaches
+it is stopped and reported; the run continues.</p>
+<pre class="bash"><code>eurlc-wgs spades.timeout=4h        # one tool
+eurlc-wgs timeout=1h               # the general limit
+eurlc-wgs kraken2.timeout=0        # no limit</code></pre>
+<p>After a time limit, <code>--resume &lt;tool&gt;.timeout=4h</code>
+runs the step again with the longer limit.</p>
+<h3 id="rebuild-the-report-with-new-thresholds">Rebuild the report with
+new thresholds</h3>
+<p>Change the thresholds in the config file (<a href="#9-settings">section 9</a>), then:</p>
+<pre class="bash"><code>cd /data/MiSeq_192
+eurlc-wgs summarize</code></pre>
+<p>Nothing is re-analysed; the stored results are evaluated again and
+the reports rewritten.</p>
+<h3 id="run-without-anyone-watching">Run without anyone watching</h3>
+<pre class="bash"><code>eurlc-wgs datadir=/data/MiSeq_193 --assume-yes --resume &gt; run.log 2&gt;&amp;1</code></pre>
+<p><code>--assume-yes</code> answers installation questions. What
+happens to an existing output folder is never guessed: say
+<code>--resume</code>, <code>overwrite=yes</code> or
+<code>overwrite=no</code>. (<code>--resume</code> needs the output
+folder to exist; use <code>overwrite=no</code> for a first run.)</p>
+<p>Exit codes for a calling script:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>0</td>
+<td>Finished, every step ran (QC warnings may still be there: read the
+RESULT line)</td>
+</tr>
+<tr class="even">
+<td>1</td>
+<td>Stopped by an error</td>
+</tr>
+<tr class="odd">
+<td>2</td>
+<td>No input files found</td>
+</tr>
+<tr class="even">
+<td>3</td>
+<td>Finished, but at least one sample was abandoned</td>
+</tr>
+<tr class="odd">
+<td>4</td>
+<td>Interrupted (Ctrl+C, kill)</td>
+</tr>
+<tr class="even">
+<td>5</td>
+<td>Finished, but a step failed or hit its time limit</td>
+</tr>
+<tr class="odd">
+<td>6</td>
+<td>Stopped with <code>terminate</code></td>
+</tr>
+</tbody>
+</table>
+<p>A script or GUI can also read <code>log/run_status.json</code>:
+state, result
+(<code>ok</code>/<code>warnings</code>/<code>problems</code>), samples,
+failed steps and errors.</p>
+<h3 id="pause-or-stop-a-running-pipeline">Pause or stop a running
+pipeline</h3>
+<p>From another terminal:</p>
+<pre class="bash"><code>echo pause     &gt; /data/MiSeq_192/eurlc-wgs/control/cmd
+echo resume    &gt; /data/MiSeq_192/eurlc-wgs/control/cmd
+echo terminate &gt; /data/MiSeq_192/eurlc-wgs/control/cmd</code></pre>
+<p>Running steps are allowed to finish; <code>pause</code> starts no new
+ones until <code>resume</code>, <code>terminate</code> then ends the
+run. Continue later with <code>--resume</code>.</p>
+<p>Ctrl+C stops at once, the running tools too; their unfinished results
+are set aside, and <code>--resume</code> runs those steps again.</p>
+<h3 id="validate-against-an-eurl-validation-dataset">Validate against an
+EURL validation dataset</h3>
+<p>EURL-Campylobacter provides validation datasets (D1, D2, D3) with
+expected results. Run the pipeline on a dataset&#39;s FASTQ files as
+usual:</p>
+<pre class="bash"><code>cd EURLCAMPY_WGSVAL_D1_v1/fastq
+eurlc-wgs</code></pre>
+<p>When the data folder, or the folder above it, holds a
+<code>&lt;ID&gt;_validation_profile.yml</code>, the results are compared
+with the dataset&#39;s expected results by themselves: species, MLST, QC
+status and QC problems, cgMLST call rate, reportability, the expected
+clusters (at the configured cluster threshold of the schema) and the MD5
+of every FASTQ file against the dataset&#39;s file manifest. The verdict is
+shown at the top of the main report and in the run summary; the full
+report, one line per sample and check, is in
+<code>report/validation/</code>.</p>
+<p><code>validate=&lt;dataset folder&gt;</code> uses a dataset
+elsewhere, <code>validate=off</code> switches it off, and
+<code>eurlc-wgs summarize</code> validates a finished run again.</p>
+<p>Every sample gets a <em>reportable</em> verdict (<a href="#can-the-results-be-reported">section 6</a>): PASS and WARNING are
+reportable (WARNING with a note), CRITICAL and FAIL are not, nor is an
+abandoned sample or a sample outside the configuration&#39;s validated
+species. In a validation, a sample of a species outside the dataset&#39;s
+target species is not reportable either, whether or not validated
+species are declared.</p>
+<p>The comparison is made by <code>eurlc-validate</code>, which works
+with any pipeline: a lab with another pipeline writes its results as a
+simple table and runs it. See <code>docs/eurlc-validate.md</code>.</p>
+<h3 id="check-that-an-update-did-not-change-the-results">Check that an
+update did not change the results</h3>
+<p>Every run writes a <em>results fingerprint</em>,
+<code>report/tables/eurlc_results_fingerprint.json.gz</code>: every
+result that matters for a report, per sample (QC status and
+reportability, species and contamination, each QC measure&#39;s value and
+status, the mixture measure, MLST from each tool, serotype, AMR and
+virulence genes, cgMLST call rate and the allele of every locus per
+schema, the selected and the candidate assemblies with their MD5), and
+what the run was made with (tool and database versions, every
+setting).</p>
+<p>After an update of the pipeline, a tool or a database, run a fixed
+set of samples again and compare with an earlier run:</p>
+<pre class="bash"><code>eurlc-wgs-inspect compare /data/verification_2026-06/eurlc-wgs /data/verification_2026-11/eurlc-wgs</code></pre>
+<p>The comparison lists, per area, what is different, and what the two
+runs were made with that differs (versions, settings). Exit code 0 when
+nothing differs that was not expected. When a difference is expected (an
+AMR database update, say), name it: <code>--expect amr</code> (an area),
+<code>--expect qc.coverage</code> (measures starting with that),
+<code>--expect &quot;assembly.*.md5&quot;</code> (a pattern). Expected differences
+are still listed, but do not count. <code>--rel-tolerance 0.001</code>
+lets numbers that differ by less than 0.1 % count as the same.
+<code>--out &lt;folder&gt;</code> writes <code>comparison.html</code>,
+<code>comparison.tsv</code> and <code>comparison.json</code>.</p>
+<p><strong>Automatically.</strong> Keep the verification samples in one
+data folder, and copy the fingerprint of a run you have checked into a
+<code>reference/</code> folder in it (or next to it):</p>
+<pre class="bash"><code>mkdir -p /data/verification/reference
+cp /data/verification/eurlc-wgs/report/tables/eurlc_results_fingerprint.json.gz \
+   /data/verification/reference/2026-11-16_0.1.0.json.gz</code></pre>
+<p>Every later run of that data folder is compared with the newest file
+in <code>reference/</code>. The verdict is shown at the top of the main
+report and in the run summary; the comparison is in
+<code>report/verification/</code>.
+<code>verify_reference=&lt;file or folder&gt;</code> uses another
+reference, <code>verify_reference=off</code> switches it off,
+<code>verify_expect=amr,qc.coverage</code> names the expected
+differences. A validation dataset folder can have a
+<code>reference/</code> folder too: then both run.</p>
+<p><strong>Repeatability.</strong> Give more than one run, and each is
+compared with the reference; at the end the number of samples with the
+same results in every run is shown per area:</p>
+<pre class="bash"><code>eurlc-wgs-inspect compare run1/eurlc-wgs run2/eurlc-wgs run3/eurlc-wgs --out repeatability/</code></pre>
+<p>The same data run twice on the same computer with the same settings
+should give the same results. Differences often start in the assembly
+(another MD5) and carry over into the steps after it; a different number
+of threads is a common cause, and the comparison points out when it
+differs.</p>
+<p>Older output folders have no fingerprint;
+<code>eurlc-wgs summarize</code> in the folder writes one without
+analysing anything again.</p>
+<h3 id="find-out-why-two-cgmlst-analyses-differ">Find out why two cgMLST
+analyses differ</h3>
+<p>When another pipeline gets a different call rate for the same
+isolate, <code>eurlc-cgmlst-compare</code> compares the two chewBBACA
+results locus by locus and looks up each differing allele in the other
+side&#39;s schema, so you can tell a schema difference from an assembly or
+settings difference:</p>
+<pre class="bash"><code>eurlc-cgmlst-compare explain &lt;ours&gt;/ &lt;theirs&gt;/ --schema-a &lt;our schema&gt; --schema-b &lt;their schema&gt;</code></pre>
+<p>See <code>docs/eurlc-cgmlst-compare.md</code>, which also describes a
+2 × 2 run (both assemblies against both schemas) that separates the
+causes.</p>
+<h3 id="see-what-takes-the-space-or-send-results-for-a-closer-look">See
+what takes the space, or send results for a closer look</h3>
+<p><code>scripts/eurlc-wgs-inspect</code> reads an output folder and
+never changes it. It needs only Python 3.</p>
+<pre class="bash"><code># what is there, what takes the space, what could go, duplicate files
+eurlc-wgs-inspect inventory /data/MiSeq_192/eurlc-wgs
+
+# the same, with a checksum for every file, saved as a table
+eurlc-wgs-inspect inventory /data/MiSeq_192/eurlc-wgs --md5 --manifest MiSeq_192.manifest.tsv
+
+# a small package (usually a few MB) with the tools&#39; own result files,
+# logs and report tables for some samples: no reads, no BAM
+eurlc-wgs-inspect extract /data/MiSeq_192/eurlc-wgs --samples S12,S17 -o MiSeq_192_review
+
+# every sample of several runs in one table, the spread of each QC measure per
+# species, and the issues that come back across runs
+eurlc-wgs-inspect summarize /data/MiSeq_*/eurlc-wgs --tsv all_samples.tsv
+eurlc-wgs-inspect summarize /data/MiSeq_*/eurlc-wgs --expected known.tsv --species Campylobacter
+
+# a table of the samples to fill in what is known about them (for --expected)
+eurlc-wgs-inspect known-template                           # the run you are in
+eurlc-wgs-inspect known-template /data/MiSeq_201 --update known.tsv
+eurlc-wgs-inspect known-template --all /data               # every run below /data
+
+# the mixture measure of every sample in several runs, and its spread per species
+eurlc-wgs-inspect mixture /data/MiSeq_*/eurlc-wgs --threshold 30 --tsv mixture.tsv</code></pre>
+<p><code>inventory</code> lists the space per folder, step, file type
+and sample, the largest files, and the kinds of files that are
+candidates for removal or compression, with what each one is. These are
+suggestions to look at, not a delete list. Files the report links to are
+never suggested.</p>
+<p><code>summarize</code> is for choosing thresholds and finding
+problems. For each species it shows every QC measure&#39;s spread (minimum,
+5th percentile, median, 95th percentile, maximum) next to the thresholds
+in force, and how many samples got WARNING, CRITICAL or FAIL on it. With
+<code>--expected</code>, a tab-separated file <code>run</code>,
+<code>sample</code>, <code>expected</code>, <code>note</code> (for
+example <code>MiSeq_192  PT43-10  contaminated  10 % C. coli</code>;
+<code>*</code> as run means any run), the spread is taken over the
+samples listed as <code>clean</code>, and each measure also shows, per
+label (for example <code>contaminated 3/4</code>), how many of the known
+problem samples it flags, and their values. Samples not in the table, or
+listed as <code>unknown</code>, are left out of both. Rows where
+<code>expected</code> is empty are ignored, and other columns are
+allowed.</p>
+<p><code>known-template</code> writes that table for you
+(<code>known.tsv</code>, or <code>-o</code>). It has one row per sample,
+with <code>expected</code> and <code>note</code> empty and, to go by,
+the species, QC status, ST and QC issues. Without a run it takes the run
+you are standing in: the folder with <code>eurlc-wgs/</code> in it, or
+anywhere inside <code>eurlc-wgs/</code>. Every run below a folder is
+taken only when asked, with <code>--all &lt;folder&gt;</code>. Open the
+table in Excel, fill in <code>expected</code> (<code>clean</code> for
+samples whose values are normal) and <code>note</code>, and save it as
+tab-separated text; files saved from Excel in Windows-1252 are read too.
+<code>--update known.tsv</code> adds the samples of further runs to the
+same table and keeps what you have filled in, and any columns of your
+own; the previous version is kept as <code>known.tsv.bak</code>. The run
+is named by the folder above <code>eurlc-wgs/</code>, so two runs with
+the same folder name get a warning.</p>
+<p>A run folder can hold more than one output folder: a QC screen
+(<code>eurlc-wgs_qcscreen</code>), or an earlier analysis kept under
+another name (<code>eurlc_wgs_1</code>). When there is an
+<code>eurlc-wgs</code> folder, it is the run, and
+<code>known-template --all</code> and <code>summarize</code> leave the
+others out (and say so). <code>--all-outdirs</code> takes them too; they
+are then named by the run folder and their own name, for example
+<code>MiSeq_192/eurlc_wgs_1</code>. An output folder without an
+<code>eurlc-wgs</code> next to it is always taken.</p>
+<p>At the end, the warnings and errors that occur in the runs are
+grouped (numbers replaced by <code>#</code>) and counted, so a problem
+that comes back in many samples stands out. <code>--tsv</code> writes
+one row per sample with every measure and its status.</p>
+<p><code>mixture</code> lists, per sample, the windows with mixed
+positions (<a href="#two-strains-of-the-same-species-in-one-sample">section 6</a>),
+what they are built from, and the species and QC status, then the spread
+per species (median, 90th and 95th percentile, maximum). Use it on runs
+of clean isolates to choose a threshold. Samples analysed with an
+earlier version are listed with the command that updates them.</p>
+<p><code>extract --anonymize</code> replaces the sample names with S01,
+S02, ... and the folder paths with <code>&lt;OUTDIR&gt;</code> and
+<code>&lt;DATADIR&gt;</code> in both file names and contents. The key is
+written next to the package (<code>.samplemap.tsv</code>); keep it, and
+do not send it with the package. Look through the package before you
+send it: free text, such as a lab name in a read header, is not
+replaced.</p>
+<hr />
+<h2 id="8-qc-screen-for-the-sequencing-lab">8. QC screen for the
+sequencing lab</h2>
+<p>A quick check of the raw reads straight after a sequencing run, to
+decide which samples are good enough to pass on and which need a
+bioinformatician&#39;s look:</p>
+<pre class="bash"><code>cd /data/MiSeq_192
+eurlc-wgs --qc-screen</code></pre>
+<p>It trims the reads, identifies the species and evaluates the
+read-level QC thresholds. No assembly or typing is done. Results go to
+<code>eurlc-wgs_qcscreen/</code> (separate from a normal analysis of the
+same folder):</p>
+<ul>
+<li><code>qcscreen_report.html</code> — one line per sample with a
+traffic light</li>
+<li><code>qcscreen_status.json</code> — the same for a program to
+read</li>
+</ul>
+<table>
+<thead>
+<tr class="header">
+<th>Light</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Green</td>
+<td>All values within thresholds</td>
+</tr>
+<tr class="even">
+<td>Yellow</td>
+<td>A warning threshold is crossed, or the species could not be
+determined</td>
+</tr>
+<tr class="odd">
+<td>Red</td>
+<td>A critical or fail threshold is crossed, or the sample could not be
+processed</td>
+</tr>
+</tbody>
+</table>
+<p>The thresholds are the same as in the full analysis, so a green
+sample is not later failed on its reads. A normal analysis can be
+started on the same folder at any time.</p>
+<p>Kraken2 needs its whole database in memory. On a small computer, run
+without <code>parallel_mode</code> (the default), or set
+<code>max_ram_gb</code>.</p>
+<hr />
+<h2 id="9-settings">9. Settings</h2>
+<h3 id="where-settings-come-from">Where settings come from</h3>
+<ol type="1">
+<li>Built-in defaults.</li>
+<li>A config file. If you give none, <code>eurlc-wgs.config</code> in
+the database folder is used when it exists. That is the place for a
+lab&#39;s standard settings.</li>
+<li>The command line, for this run only.</li>
+</ol>
+<p>Later sources win. The log and the report list every setting that was
+changed on the command line.</p>
+<h3 id="create-and-edit-a-config-file">Create and edit a config
+file</h3>
+<p>A new installation already has
+<code>~/eurlc-wgs_db/eurlc-wgs.config</code>, written by
+<code>--setup</code>: every setting is there with its built-in value, as
+a line starting with <code>#</code>. Remove the <code>#</code> and edit
+the value to change a setting. Lines left with <code>#</code> keep the
+built-in value, also when a later version of the pipeline changes
+it.</p>
+<pre class="bash"><code>eurlc-wgs --write-configfile
+eurlc-wgs --write-configfile=campy-test.config     # in the database folder
+eurlc-wgs --write-configfile=/some/folder/my.config</code></pre>
+<p>writes a file where every setting is in use with its current value
+(<code>configfile=write</code> is the older form of the same command). A
+file with another name is used with
+<code>configfile=&lt;name&gt;</code>: a name without a folder is looked
+for in the database folder. That fixes all of them, also against later
+changes of the defaults -- for when the file itself should show every
+value that applied. It does not overwrite an existing file without
+asking.</p>
+<p>With <code>database=&lt;folder&gt;</code> the file used is
+<code>eurlc-wgs.config</code> in that folder.</p>
+<p>The format:</p>
+<pre class="ini"><code>[general]
+threads=16
+parallel_mode=on
+species_scope=Campylobacter
+
+[fastp]
+arguments=--detect_adapter_for_pe --cut_right --trim_poly_g --length_required 50
+
+[spades]
+timeout=3h</code></pre>
+<ul>
+<li>One <code>name=value</code> per line, under a
+<code>[section]</code>.</li>
+<li>A line starting with <code>#</code> or <code>;</code> is a comment.
+A comment can also follow a value after a space:
+<code>timeout=3h   # long reads</code>.</li>
+<li>A mistyped section, setting name or threshold gives a warning with
+the nearest correct name (<code>did you mean [spades]?</code>); the
+mistyped line has no effect.</li>
+<li>A setting may be given only once on the command line;
+<code>threads=4 threads=8</code> stops the run.</li>
+</ul>
+<p>Other config files:</p>
+<pre class="bash"><code>eurlc-wgs configfile=/db/salmonella.config     # a specific file
+eurlc-wgs configfile=default                   # built-in defaults only</code></pre>
+<h3 id="species-settings-and-thresholds">Species settings and
+thresholds</h3>
+<pre class="ini"><code>[species__Salmonella enterica]
+genomesize=4900000
+maxdepth=100
+warning_assembly_size=&lt;4400000 &gt;5800000
+warning_assembly_contigs=&gt;300
+warning_typing_cgmlst_call_rate=&lt;95
+critical_typing_cgmlst_call_rate=&lt;90</code></pre>
+<ul>
+<li>The section name is <code>species__</code> (two underscores) plus
+the species name as reported by the pipeline.</li>
+<li>A threshold is a comparison, or several separated by a space; it
+applies when any of them is true. <code>&lt;4400000 &gt;5800000</code>
+means &quot;below 4.4 Mb or above 5.8 Mb&quot;. A value without <code>&lt;</code>
+or <code>&gt;</code> (such as <code>4400000-5800000</code>) is not a
+threshold and gives a warning.</li>
+<li>Each measure can have <code>warning_</code>, <code>critical_</code>
+and <code>fail_</code> levels.</li>
+<li>Settings not given for a species come from its genus section, if
+there is one (<code>[species__Campylobacter]</code> for every
+<em>Campylobacter</em> species), and then from
+<code>[species__default]</code>. A genus section is the easy way to give
+<em>C. lari</em>, <em>L. innocua</em> or a sample identified only to
+genus sensible values.</li>
+</ul>
+<p>The measures that can have thresholds (use the name after
+<code>warning_</code>, <code>critical_</code> or
+<code>fail_</code>):</p>
+<table>
+<thead>
+<tr class="header">
+<th>Measure</th>
+<th>What</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>qscore_raw_q30_rate</code>,
+<code>qscore_trimmed_q30_rate</code></td>
+<td>Share of bases ≥ Q30, raw / trimmed reads, as a fraction
+(<code>&lt;0.80</code> = below 80 %)</td>
+</tr>
+<tr class="even">
+<td><code>remap_reads_mapped_pct</code></td>
+<td>Reads (after trimming and downsampling) that map back to the
+sample&#39;s own assembly (%). Low when part of the reads did not assemble
+into the genome, e.g. an organism Kraken does not know</td>
+</tr>
+<tr class="odd">
+<td><code>remap_properly_paired_pct</code></td>
+<td>Properly paired reads (%). Falls with long inserts (Bowtie2&#39;s
+default maximum insert is 500 bp), so it is not comparable between
+libraries; <code>remap_pairs_diff_contig_pct</code> is the better
+pairing check</td>
+</tr>
+<tr class="even">
+<td><code>remap_pairs_diff_contig_pct</code></td>
+<td>Mapped pairs whose mates are on different contigs (%): a few percent
+at contig ends; most of the pairs when R1 and R2 come from different
+samples</td>
+</tr>
+<tr class="odd">
+<td><code>remap_breadth_10x_pct</code></td>
+<td>Assembly covered at ≥10× (%). Against the sample&#39;s own assembly, so
+higher than against a reference: regions with no reads are not in the
+assembly at all. <em>Campylobacter</em> has default warnings on the
+remapping measures (see the configuration reference); for other species
+they have no thresholds yet</td>
+</tr>
+<tr class="even">
+<td><code>remap_depth_iqr_over_median</code></td>
+<td>Depth unevenness along the assembly (interquartile range / median);
+rises with library GC bias</td>
+</tr>
+<tr class="odd">
+<td><code>remap_error_rate_pct</code></td>
+<td>Mismatches against the assembly (% of mapped bases)</td>
+</tr>
+<tr class="even">
+<td><code>remap_low_depth_contig_pct</code></td>
+<td>Share of the assembly (bases) in contigs ≥1 kb whose median depth is
+below 20 % of the genome&#39;s: a contaminant at low abundance assembles
+into its own contigs at a much lower depth (independent of Kraken)</td>
+</tr>
+<tr class="odd">
+<td><code>qscore_raw_gc_delta</code></td>
+<td>GC of the reads minus GC of the assembly (percentage points); a
+library with GC bias gives reads with higher GC than the genome. No
+default threshold</td>
+</tr>
+<tr class="even">
+<td><code>qscore_raw_pair_name_mismatch_pct</code></td>
+<td>% of the read pairs checked by the pre-scan (the first 5 000) whose
+read names differ between R1 and R2. The R1 and R2 files of a sample
+have the same reads in the same order; if they come from two different
+samples (renamed or mixed up), nearly every pair differs, even when both
+were sequenced in the same run. Defaults: WARNING <code>&gt;0.5</code>
+(a few differing names can occur in usable data), CRITICAL
+<code>&gt;5</code>, FAIL <code>&gt;50</code>. The log and the report
+name examples. Files where R1 holds read 2 and R2 read 1 (swapped) get a
+warning.</td>
+</tr>
+<tr class="odd">
+<td><code>qscore_raw_gc</code>, <code>qscore_trimmed_gc</code></td>
+<td>GC content of the reads</td>
+</tr>
+<tr class="even">
+<td><code>qscore_raw_n_rate</code></td>
+<td>N bases in the raw reads (%), over the whole files (fastp)</td>
+</tr>
+<tr class="odd">
+<td><code>qscore_trimmed_n_rate</code></td>
+<td>N bases in the trimmed reads (%)</td>
+</tr>
+<tr class="even">
+<td><code>qscore_raw_average_read_length</code>,
+<code>qscore_trimmed_average_read_length</code></td>
+<td>Mean read length (bp)</td>
+</tr>
+<tr class="odd">
+<td><code>qscore_trimmed_average_q_score</code></td>
+<td>Mean quality score after trimming</td>
+</tr>
+<tr class="even">
+<td><code>qscore_trimmed_adapters</code></td>
+<td>Adapter content after trimming (%)</td>
+</tr>
+<tr class="odd">
+<td><code>qscore_raw_adapter_trimmed_pct</code></td>
+<td>Reads in which an adapter was found (%)</td>
+</tr>
+<tr class="even">
+<td><code>qscore_trimmed_too_short_pct</code></td>
+<td>Reads removed as too short after trimming (%)</td>
+</tr>
+<tr class="odd">
+<td><code>coverage_raw_coverage</code>,
+<code>coverage_trimmed_coverage</code></td>
+<td>Depth (×), raw / trimmed reads</td>
+</tr>
+<tr class="even">
+<td><code>coverage_raw_q30_coverage</code>,
+<code>coverage_trimmed_q30_coverage</code></td>
+<td>Depth counting only Q30 bases (×)</td>
+</tr>
+<tr class="odd">
+<td><code>taxonomy_species_score</code></td>
+<td>Score of the species determination (%)</td>
+</tr>
+<tr class="even">
+<td><code>contamination_species_level</code>,
+<code>contamination_genus_level</code></td>
+<td>Largest other species / genus in the reads (%)</td>
+</tr>
+<tr class="odd">
+<td><code>contamination_mixed_windows</code></td>
+<td>Two strains of the same species: 1-kb windows of the assembly with
+mixed positions (<a href="#two-strains-of-the-same-species-in-one-sample">section
+6</a>)</td>
+</tr>
+<tr class="even">
+<td><code>assembly_size</code></td>
+<td>Assembly size (bp)</td>
+</tr>
+<tr class="odd">
+<td><code>assembly_n50</code></td>
+<td>Assembly N50 (bp)</td>
+</tr>
+<tr class="even">
+<td><code>assembly_contigs</code></td>
+<td>Number of contigs (all, also the short fragments an assembler
+writes)</td>
+</tr>
+<tr class="odd">
+<td><code>assembly_contigs_500</code></td>
+<td>Number of contigs of 500 bp or longer — the one to set limits
+on</td>
+</tr>
+<tr class="even">
+<td><code>assembly_gc</code></td>
+<td>GC content of the assembly</td>
+</tr>
+<tr class="odd">
+<td><code>typing_mlst_incomplete_alleles</code></td>
+<td>MLST loci (of the seven) without an exact allele: missing
+(<code>-</code>), partial (<code>?</code>) or several copies; a new
+allele (<code>~12</code>) or a new ST is not counted</td>
+</tr>
+<tr class="even">
+<td><code>typing_mlst_st_disagree</code></td>
+<td>1 when mlst and fastMLST both give an ST and they differ</td>
+</tr>
+<tr class="odd">
+<td><code>typing_serotype_missing</code></td>
+<td>1 when the serotyping ran but gave no serotype: <em>Salmonella</em>
+serovar from neither SISTR nor SeqSero2, <em>E. coli</em> O or H type
+missing (ECTyper), <em>Listeria</em> serogroup missing or nontypable
+(LisSero)</td>
+</tr>
+<tr class="even">
+<td><code>typing_serotype_disagree</code></td>
+<td><em>Salmonella</em>: 1 when SISTR and SeqSero2 name different
+serovars. Alternatives (SISTR <code>A|B</code>, SeqSero2
+<code>A or B</code>) agree when one name is shared; SISTR&#39;s Typhimurium
+without h2 agrees with SeqSero2&#39;s <code>I 4,[5],12:i:-</code>. When one
+tool gives only an antigenic formula, the antigens are compared instead
+(O factors of SeqSero2 among SISTR&#39;s, H1 and H2 equal where both are
+called). <code>-:-:-</code> from both tools counts as a missing serovar
+(<code>typing_serotype_missing</code>), not a disagreement</td>
+</tr>
+<tr class="odd">
+<td><code>typing_serotype_tool_flag</code></td>
+<td>1 when the QC of the tool whose serotype is reported is not PASS:
+<em>Salmonella</em> -- SISTR <code>qc_status</code> when SISTR&#39;s serovar
+is used, otherwise SeqSero2&#39;s note (notes in
+<code>seqsero2.accepted_notes</code> do not count); SISTR&#39;s messages
+when it is not used are kept as information
+(<code>typing.qc.sistr_qc_info</code>); ECTyper <code>qc</code> with
+WARNING or FAIL, or ECTyper naming another species</td>
+</tr>
+<tr class="even">
+<td><code>typing_cgmlst_call_rate</code></td>
+<td>cgMLST loci called (%). Every schema the sample was typed with is
+judged against its own thresholds; the one with the worst status is
+reported. Thresholds can be set per schema in
+<code>[chewbbaca_schema_&lt;name&gt;]</code></td>
+</tr>
+<tr class="odd">
+<td><code>typing_cgmlst_inferred_pct</code></td>
+<td>cgMLST alleles new to the schema (% of the called): a lineage the
+schema covers poorly, or assembly and sequencing errors. No default
+threshold</td>
+</tr>
+<tr class="even">
+<td><code>typing_cgmlst_paralogous</code></td>
+<td>cgMLST paralogous loci (NIPH + NIPHEM), in the schema the call rate
+comes from</td>
+</tr>
+</tbody>
+</table>
+<p>A threshold is compared with the value as it is shown in the detailed
+sample report. A misspelt measure name gives a warning with the nearest
+correct one.</p>
+<h3 id="the-settings-most-often-changed">The settings most often
+changed</h3>
+<table>
+<thead>
+<tr class="header">
+<th>Setting</th>
+<th>Default</th>
+<th>What</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>threads</code></td>
+<td>4</td>
+<td>Threads per tool</td>
+</tr>
+<tr class="even">
+<td><code>parallel_mode</code></td>
+<td>off</td>
+<td>Several samples at once</td>
+</tr>
+<tr class="odd">
+<td><code>species_scope</code></td>
+<td>the four main species</td>
+<td>Which species&#39; tools are installed and run</td>
+</tr>
+<tr class="even">
+<td><code>validated_species</code></td>
+<td>empty</td>
+<td>The species the configuration is validated for; samples of other
+species are marked and not reportable (<a href="#can-the-results-be-reported">section 6</a>)</td>
+</tr>
+<tr class="odd">
+<td><code>main_assembly</code></td>
+<td><code>fewest_contigs500</code></td>
+<td>How the main assembly is chosen; or the name of an assembler</td>
+</tr>
+<tr class="even">
+<td><code>enable=shovill_spades</code> (or
+<code>shovill_skesa</code>)</td>
+<td>off</td>
+<td>Also assemble with Shovill. Not reproducible, see <a href="#13-known-limitations">section 13</a></td>
+</tr>
+<tr class="odd">
+<td><code>maxdepth</code> (species)</td>
+<td>100</td>
+<td>Downsampling target; <code>0</code> = use all reads</td>
+</tr>
+<tr class="even">
+<td><code>targetbases_floor</code>
+(<code>[species__default]</code>)</td>
+<td>200000000</td>
+<td>When the genome size had to be estimated from the reads: downsample
+to no fewer bases than this (200 Mb), so that a too-low estimate cannot
+cut the data too hard</td>
+</tr>
+<tr class="odd">
+<td><code>fatal_mindepth</code> (species)</td>
+<td>30</td>
+<td>Below this depth the sample is abandoned</td>
+</tr>
+<tr class="even">
+<td><code>timeout</code></td>
+<td>30m</td>
+<td>Time limit per step</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-species-and-typing-tools">10. Species and typing tools</h2>
+<table>
+<thead>
+<tr class="header">
+<th>Species</th>
+<th>Specific tools</th>
+<th>In scope by default</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><em>Campylobacter</em></td>
+<td>(cgMLST schema, species thresholds)</td>
+<td>yes</td>
+</tr>
+<tr class="even">
+<td><em>Salmonella</em></td>
+<td>SISTR, SeqSero2</td>
+<td>yes</td>
+</tr>
+<tr class="odd">
+<td><em>E. coli</em>, <em>Shigella</em></td>
+<td>ECTyper, VirulenceFinder</td>
+<td>yes</td>
+</tr>
+<tr class="even">
+<td><em>Listeria monocytogenes</em></td>
+<td>LisSero</td>
+<td>yes</td>
+</tr>
+<tr class="odd">
+<td>any</td>
+<td>PlasmidFinder, Bakta</td>
+<td>off; <code>enable=</code></td>
+</tr>
+<tr class="even">
+<td>any</td>
+<td>CheckM</td>
+<td>off; <code>enable=checkm</code>. Experimental: its results are not
+shown in the reports (<a href="#13-known-limitations">section
+13</a>)</td>
+</tr>
+</tbody>
+</table>
+<p><code>species_scope</code> decides which of these are installed by
+<code>--setup</code> and run. To add a species permanently, add it to
+<code>species_scope</code> in the config file; for one run, use
+<code>enable=&lt;species&gt;</code>.</p>
+<p><strong>Another species.</strong> It is analysed with everything
+general: QC, assembly, MLST, AMR, and cgMLST if you have installed a
+schema for it. To give it proper QC limits, add a
+<code>[species__&lt;name&gt;]</code> section with at least
+<code>genomesize</code> and the thresholds you want
+(<code>genomesize=kmer</code> estimates it from the reads of every
+sample, also for a species in the list). Without one, the genome size is
+taken from a built-in list of about 120 species and genera, or estimated
+from the reads.</p>
+<hr />
+<h2 id="11-cgmlst-schemas">11. cgMLST schemas</h2>
+<pre class="bash"><code>eurlc-wgs --list-schemas                        # installed and available
+eurlc-wgs --install-efsa-schemas                # all four EFSA-compatible schemas
+eurlc-wgs --install-efsa-schemas=campylobacter  # one of: campylobacter, ecoli, salmonella, listeria
+eurlc-wgs --install-schema=chewie_ns_ecoli      # a schema from the catalog</code></pre>
+<p>Write these with <code>=</code>, not with a space.</p>
+<table>
+<thead>
+<tr class="header">
+<th>Species</th>
+<th>Schema</th>
+<th>Loci used</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><em>C. jejuni</em> / <em>C. coli</em></td>
+<td><code>CAMPISO-PubMLST-8</code></td>
+<td>all (the schema is cgMLST)</td>
+</tr>
+<tr class="even">
+<td><em>E. coli</em></td>
+<td><code>chewie_ns_ecoli</code></td>
+<td>2 360 (EFSA filter)</td>
+</tr>
+<tr class="odd">
+<td><em>Salmonella</em></td>
+<td><code>chewie_ns_salmonella</code></td>
+<td>3 255 (EFSA filter)</td>
+</tr>
+<tr class="even">
+<td><em>Listeria</em></td>
+<td><code>chewie_ns_listeria</code></td>
+<td>all</td>
+</tr>
+</tbody>
+</table>
+<p>For <em>Campylobacter</em> there is also
+<code>chewie_ns_campylobacter</code>
+(<code>--install-schema=chewie_ns_campylobacter</code>) with an EURL
+cgMLST selection, <code>cgmlst_eurl</code>: an alternative if the EFSA
+schema is not available. It is not EFSA-compatible.</p>
+<p>A schema is used for a sample when the schema&#39;s species list contains
+the sample&#39;s species. Schemas live in
+<code>~/eurlc-wgs_db/chewbbaca/schemas/&lt;name&gt;/</code>, each with a
+small <code>schema.ini</code> that holds its species list and locus
+filter. To use a schema for more species, or switch it off, add to your
+config file:</p>
+<pre class="ini"><code>[chewbbaca_schema_chewie_ns_listeria]
+species=Listeria monocytogenes,Listeria innocua</code></pre>
+<p>The pipeline never adds new alleles to a schema during a run, so
+results from different runs with the same schema are comparable.</p>
+<hr />
+<h2 id="12-keeping-an-installation-under-control">12. Keeping an
+installation under control</h2>
+<p>For labs that need to show that results were produced with a fixed,
+validated setup.</p>
+<p><strong>Repair or update a single tool</strong></p>
+<pre class="bash"><code>eurlc-wgs infotool=kraken2          # what is installed
+eurlc-wgs installtool=kraken2       # install or repair
+eurlc-wgs reinstalltool=kraken2     # remove and install again</code></pre>
+<p><strong>Update after a new pipeline version</strong></p>
+<pre class="bash"><code>cd eurlc-wgs &amp;&amp; git pull
+bash install.sh --resources-only
+conda activate eurlc-wgs &amp;&amp; eurlc-wgs --setup</code></pre>
+<p><code>--setup</code> notices changed tool definitions and offers to
+update those environments.</p>
+<p>The pipeline does not look for new versions itself, and contacts
+nothing outside the computer during a run. To be told about a new
+version, open <a href="https://github.com/BoSegerman/eurlc-wgs">https://github.com/BoSegerman/eurlc-wgs</a>,
+choose <em>Watch → Custom → Releases</em>, and GitHub sends an e-mail
+for each release. What changed is in <code>CHANGELOG.md</code>. A sealed
+installation stays at its version: whether and when it is updated is
+decided by whoever is responsible for the method.</p>
+<p><strong>Freeze the databases.</strong> Copies each database to a
+folder named after its checksum and records it, so that later runs use,
+and can be shown to have used, exactly that version:</p>
+<pre class="bash"><code>eurlc-wgs --freeze-databases
+eurlc-wgs --verify-databases     # full check of every database, e.g. before an audit</code></pre>
+<p>At every start the frozen copies are checked (large files by size and
+date, so it is quick; <code>--verify-databases</code> checks every
+byte). The log and the report name the version of each database where it
+is known, for example
+<code>Kraken2, Standard-8, Release: 10/15/25</code>.</p>
+<p><strong>Declare the validated species.</strong> Before sealing, set
+<code>validated_species</code> in the config file to the species the
+configuration is validated for (<a href="#can-the-results-be-reported">section 6</a>). The seal then covers
+it: changing it on the command line gives
+<code>SEAL VERIFIED WITH OVERRIDES</code>, changing it in the file
+breaks the seal.</p>
+<p><strong>Seal the configuration.</strong> Records fingerprints of the
+config file, the frozen databases and every conda environment under a
+name:</p>
+<pre class="bash"><code>eurlc-wgs --generate-seal=&quot;Campylobacter-v1.0&quot;</code></pre>
+<p>The seal also records the pipeline version and its script, and the
+genome size lists. Every report then shows one of:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Status</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>SEAL VERIFIED</code></td>
+<td>Everything is as sealed</td>
+</tr>
+<tr class="even">
+<td><code>SEAL VERIFIED WITH OVERRIDES</code></td>
+<td>As sealed, but the run was started with command-line settings that
+can change results; the report lists them</td>
+</tr>
+<tr class="odd">
+<td><code>SEAL BROKEN</code></td>
+<td>A file, a frozen database, a conda environment (a tool&#39;s, or the
+pipeline&#39;s own) or the pipeline itself has changed since; the report
+says what. This includes an installation that is no longer what the
+files describe: an environment that was updated, or a frozen database
+that could not be used</td>
+</tr>
+<tr class="even">
+<td><code>UNSEALED</code></td>
+<td>No seal</td>
+</tr>
+</tbody>
+</table>
+<p>Settings that only steer the run (threads, time limits,
+<code>--resume</code>, <code>outdir=</code>, cleanup, ...) do not count
+as overrides. A new pipeline version breaks the seal: validate it and
+seal again.</p>
+<p><strong>The same installation on another computer.</strong> A conda
+environment made from the pipeline&#39;s YML files gets the builds of the
+tool&#39;s dependencies that are current that day. Two computers installed
+on different days therefore have different environments, and a seal made
+on one is <code>SEAL BROKEN</code> on the other. To avoid that,
+<code>--generate-seal</code> also writes the exact package list of every
+environment in the seal to
+<code>~/eurlc-wgs_db/conda_envs/&lt;environment&gt;.explicit</code>. On
+the other computer:</p>
+<ol type="1">
+<li>Copy the database folder of the sealed installation (config file,
+<code>db_freeze.config</code>, <code>conda_manifest.ini</code>,
+<code>config_seal.ini</code>, <code>conda_envs/</code>,
+<code>frozen_dbs/</code>, <code>installation_check/</code>) to
+<code>~/eurlc-wgs_db</code>.</li>
+<li>Install the same pipeline version from its source folder:
+<code>./install.sh</code> (add <code>--database=DIR</code> if the
+database folder is elsewhere). <code>install.sh</code> makes the
+pipeline&#39;s own environment from its package list, and
+<code>eurlc-wgs --setup</code> makes each tool&#39;s environment from its
+list: the same builds, nothing is solved again. An environment that is
+already there and differs from its list is removed and made again
+(<code>--setup</code> asks first, unless started with
+<code>--assume-yes</code>); one that matches is left as it is.</li>
+<li><code>eurlc-wgs --installation-check</code> (below).</li>
+</ol>
+<p>The package lists are for Linux on x86-64 (also WSL), and the
+packages are downloaded from the conda channels when the environments
+are made. As long as the lists are in the database folder,
+<code>--setup</code> does not update those environments from the YML
+files. To change a sealed installation on purpose (a new tool version),
+remove the environment&#39;s list from <code>conda_envs/</code>, run
+<code>--setup</code>, verify, and seal again.</p>
+<p><strong>Check an installation.</strong> On a computer where an
+approved version has been installed, one command shows that the
+installation works and gives the results it should:</p>
+<pre class="bash"><code>eurlc-wgs --installation-check            # every check set
+eurlc-wgs --installation-check=&lt;set&gt;      # one set, or several: set1,set2</code></pre>
+<p>A <em>check set</em> is a small folder of samples with known results
+in <code>~/eurlc-wgs_db/installation_check/&lt;set&gt;/</code>, made by
+the person responsible for the method (below). For each set the command
+checks, in this order:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Check</th>
+<th>Passes when</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Files of the check set</td>
+<td>every file has the MD5 sum in the set&#39;s <code>.md5</code> list
+(nothing is run otherwise)</td>
+</tr>
+<tr class="even">
+<td>Run</td>
+<td>the pipeline run finished</td>
+</tr>
+<tr class="odd">
+<td>Config seal</td>
+<td>the status is <code>SEAL VERIFIED</code> (without a configured seal:
+noted as UNSEALED, not a failure)</td>
+</tr>
+<tr class="even">
+<td>Expected results</td>
+<td>every required check against the set&#39;s expected results agrees</td>
+</tr>
+<tr class="odd">
+<td>Reference run</td>
+<td>no unexpected differences from the set&#39;s reference fingerprint
+(skipped when the set has none)</td>
+</tr>
+</tbody>
+</table>
+<p>It ends with <code>Installation check: 1 set(s) PASSED</code> (exit
+code 0) or <code>... FAILED</code> (exit code 1). Each run is kept, with
+its report and a record of the check
+(<code>installation_check.txt</code>: result, check set, pipeline
+version, seal, computer, user, time), in
+<code>~/eurlc-wgs_db/installation_check_runs/&lt;set&gt;/&lt;time&gt;_&lt;computer&gt;/</code>,
+and one line per check is added to
+<code>installation_check_runs/installation_checks.tsv</code>. The test
+data are read where they are. Other arguments (<code>threads=</code>,
+<code>database=</code>, ...) are passed on to the runs.</p>
+<p>A larger set for verifying an update can be kept in the same place
+and run by name; <code>--installation-check</code> without a name runs
+every set in the folder.</p>
+<p><strong>Make a check set.</strong> On the installation where the
+configuration is sealed, from a validation dataset (a folder with
+<code>&lt;ID&gt;_validation_profile.yml</code>, its expected results and
+the reads):</p>
+<pre class="bash"><code>eurlc-wgs --make-installation-check=K1 from=/data/D1 samples=D1_011,D1_014</code></pre>
+<p>An unambiguous end of the sample id is enough (<code>D1_011</code>
+for <code>EURLCAMPY_WGSVAL_D1_v1_011</code>). The command copies those
+samples&#39; reads and the profile, writes the expected results with only
+their rows, runs the set once here, and, when the run finished with a
+verified seal and agrees with the expected results, keeps its results
+fingerprint as the set&#39;s reference and writes the <code>.md5</code>
+list. The set is then in
+<code>~/eurlc-wgs_db/installation_check/K1/</code>, with a description
+(<code>K1_about.txt</code>: who made it, when, pipeline version, seal,
+dataset, samples), and is copied to other computers with the database
+folder. The run it was made from is kept in
+<code>installation_check_runs/K1/</code>.</p>
+<ul>
+<li>If anything fails (a sample not found, the seal not verified, a
+result that does not agree), no set is made and the reason is
+given.</li>
+<li>An existing set is never overwritten: records refer to a set by name
+and MD5, so a changed set gets a new name.</li>
+<li>A set takes its samples from one dataset. For samples from two
+datasets, make two sets; <code>--installation-check</code> runs
+both.</li>
+<li><code>--allow-unsealed</code> makes a set on an installation without
+a seal, for trying it out. Arguments such as <code>threads=16</code> are
+passed on to the run; arguments that change the configuration make the
+seal <code>VERIFIED WITH OVERRIDES</code>, and the set is then not
+made.</li>
+</ul>
+<p><strong>What each run records</strong>, in
+<code>log/versioning_explicit/</code>: the checksum of each config file
+and the seal status, which database (path, version, fingerprint) was
+used for each database, and the full package list of every conda
+environment.</p>
+<p><strong>Names for your instruments.</strong> The report names the
+sequencing instrument model from the read headers. To show your own name
+for an instrument, put a line
+<code>id&lt;TAB&gt;&lt;instrument ID&gt;&lt;TAB&gt;&lt;name&gt;</code>
+in <code>~/eurlc-wgs_db/known_instruments.tsv</code>.</p>
+<hr />
+<h2 id="13-known-limitations">13. Known limitations</h2>
+<p>This version, 1.0.0-rc2.</p>
+<p><strong>Validation and thresholds</strong></p>
+<ul>
+<li>The built-in QC thresholds are set from validation data for
+<em>Campylobacter jejuni</em>, <em>C. coli</em> and <em>Salmonella
+enterica</em>. For <em>E. coli</em> and <em>Listeria</em> only the
+assembly size has built-in thresholds; set the others for your own data
+before using the status for decisions.</li>
+<li>Contamination below about 4–5 % of the reads is not reliably
+detected, neither by the taxonomic classification nor by the assembly
+measures.</li>
+<li>With closely related species (for example <em>Escherichia</em> in
+<em>Salmonella</em>), Kraken2/Bracken can assign part of a clean
+isolate&#39;s reads to the related genus, a few per cent, and the sample
+then fails the contamination threshold. Check the assembly size, GC and
+the re-mapping measures before rejecting such a sample.</li>
+<li>A real mixture of <em>C. jejuni</em> and <em>C. coli</em> is not
+seen in the contamination measures (Bracken shares reads between them);
+it shows in the cgMLST paralogous loci, the assembly size and the call
+rate.</li>
+<li>The check for two strains of the same species is validated for
+<em>C. jejuni</em> (about 100×) and <em>Salmonella</em>; it does not see
+a mixture below about 5 % or between nearly identical strains.</li>
+<li>The cgMLST call rate depends on the schema: the same isolate can get
+a somewhat different call rate with another schema for the species. The
+call-rate thresholds are set per schema.</li>
+</ul>
+<p><strong>Running</strong></p>
+<ul>
+<li>Species thresholds cannot be given on the command line; change them
+in the config file and run <code>summarize</code>.</li>
+<li>Some databases are downloaded in their latest version (ResFinder,
+PointFinder, VirulenceFinder, PlasmidFinder, AMRFinderPlus), so two
+installations made at different times can differ. Freeze the databases
+after installing; the frozen version is what a validation refers
+to.</li>
+<li>Folder paths with spaces or quotes are not supported (the run stops
+and says so).</li>
+<li>The genome size estimate from the reads (only for a species without
+a known size) runs before the status board starts and has no time
+limit.</li>
+</ul>
+<p><strong>Reproducibility</strong></p>
+<ul>
+<li>With the default assemblers (SPAdes and SKESA), two runs on the same
+reads with the same settings give the same results, down to the assembly
+file. In tests (November 2026) the assembly files of both were also
+identical when the number of threads was changed.</li>
+<li><strong>Shovill does not.</strong> With Shovill as the assembler,
+the assembly differs slightly from run to run, also with identical
+settings and number of threads (tested with Shovill and SPAdes on two
+<em>C. jejuni</em> samples: the assembly file differed in every run). In
+those tests the species, MLST, every cgMLST allele, the AMR genes and
+the QC status were the same, and the coverage measures differed in the
+last decimal only. A comparison with a reference run
+(<code>verify_reference</code>, <code>--installation-check</code>,
+<code>eurlc-wgs-inspect compare</code>) will report the assembly as an
+unexpected difference. The pipeline says so at start when Shovill is
+switched on. Do not use Shovill in a configuration that is to be
+validated on identical results.</li>
+</ul>
+<p><strong>Experimental</strong></p>
+<ul>
+<li>CheckM (<code>enable=checkm</code>) runs, but is experimental in
+this version: completeness and contamination are written to the log and
+to
+<code>results/qc/stage3_assemblies/CheckM*/.../checkm_results.tab</code>,
+but are not shown in the reports and are not part of the QC status. The
+pipeline&#39;s own measures of the same things are the assembly size, the
+cgMLST call rate and the contamination measures. It takes 3–4 minutes
+per sample and 14–16 GB of memory; the first use downloads its database
+(275 MB). Tested with two <em>Campylobacter</em> samples only.</li>
+<li><code>eurlc-efsa-export</code> (files for a programmatic submission
+to the EFSA WGS System) is a preview and is not yet aligned with EFSA;
+it is off by default (<code>export_efsa=off</code>). See
+<code>docs/eurlc-efsa-export.md</code>.</li>
+</ul>
+<hr />
+<h2 id="14-troubleshooting">14. Troubleshooting</h2>
+<p><strong>&quot;Unknown argument given: ...&quot;</strong> A misspelt argument,
+or a folder given without <code>datadir</code>. Nothing has been
+run.</p>
+<p><strong>&quot;[fastp.argumetns] does not match an existing config
+parameter&quot;</strong> The tool exists but not that setting.
+<code>eurlc-wgs infotool=fastp</code> shows the settings of a tool, and
+<code>~/eurlc-wgs_db/eurlc-wgs.config</code> lists them all.</p>
+<p><strong>&quot;Output directory [...] already exists and overwrite mode is
+&#39;prompt&#39;&quot;</strong> You used <code>--assume-yes</code>; add
+<code>--resume</code>, <code>overwrite=yes</code> or
+<code>overwrite=no</code>.</p>
+<p><strong>&quot;Cannot write the output folder&quot;</strong> The data folder is
+read-only. Use <code>outdir</code>.</p>
+<p><strong>&quot;Perl module(s) not found: JSON::MaybeXS ...&quot;</strong> The
+pipeline was started outside its conda environment:
+<code>conda activate eurlc-wgs</code>.</p>
+<p><strong>&quot;[chewbbaca_schema_X] in the config file does not match an
+installed chewBBACA schema&quot;</strong> The section&#39;s settings are not
+used. The schema name is misspelt, or the schema is not installed;
+<code>eurlc-wgs --list-schemas</code> shows the names (upper and lower
+case do not matter).</p>
+<p><strong>&quot;Installation check: no check set in [...]&quot;</strong> There is
+no check set in <code>installation_check/</code> in the database folder.
+See <a href="#12-keeping-an-installation-under-control">section
+12</a>.</p>
+<p><strong>A tool is &quot;missing or broken&quot; at every start</strong>
+<code>eurlc-wgs reinstalltool=&lt;name&gt;</code>, then
+<code>eurlc-wgs infotool=&lt;name&gt;</code>.</p>
+<p><strong>A sample is <code>SE</code> but should be paired</strong> Its
+mate is missing or named differently. Both files need the same name
+apart from <code>R1</code>/<code>R2</code>.</p>
+<p><strong>A sample was abandoned for low coverage, but there is plenty
+of data</strong> Check the species: if it was not determined, the genome
+size used may be wrong. The detailed report shows which genome size was
+used and where it came from. A species section with the right
+<code>genomesize</code> fixes it.</p>
+<p><strong>A step timed out</strong>
+<code>eurlc-wgs rerun=&lt;step&gt; &lt;tool&gt;.timeout=4h</code>.</p>
+<p><strong>SPAdes gives a much larger assembly than expected</strong>
+Usually contamination; check the contamination results. The
+main-assembly selection sets aside assemblies of implausible size when
+another assembler did better. Keep SKESA enabled as a second
+opinion.</p>
+<p><strong>A sample has many &quot;windows with mixed positions&quot;</strong> See
+<a href="#two-strains-of-the-same-species-in-one-sample">section 6</a>.
+Above about 30 for <em>Campylobacter</em>, check assembly size and
+contig count; if those are high too, the culture is probably mixed. The
+positions are listed in
+<code>results/qc/stage3_assemblies/remapping/&lt;sample&gt;/&lt;sample&gt;.mixed_positions.tsv</code>
+(rows with <code>PASS</code> in the last column): spread over many
+contigs points to a mixture, a few tight groups to a repeated
+region.</p>
+<p><strong>The first run says
+<code>db:&lt;name&gt; NOT_INSTALLED</code></strong> The database is not
+installed yet; the question to install it follows.</p>
+<p><strong>&quot;The report template ... was not found&quot;</strong> The
+pipeline&#39;s own files are incomplete. Reinstall with
+<code>bash install.sh</code> (or <code>--resources-only</code>).</p>
+<p><strong>The report says
+<code>SEAL VERIFIED WITH OVERRIDES</code></strong> The run was started
+with command-line settings that can change results; they are listed next
+to the seal status. For validated work, run without them.</p>
+<p><strong>A sample has a different name than its files</strong>
+Illumina&#39;s sample number and lane are removed
+(<code>PT43_S12_L001</code> → <code>PT43</code>), and lanes of one
+sample are merged; see <a href="#4-input-files">section 4</a>.</p>
+<p><strong>Finding something in the log</strong>
+<code>log/log.txt</code> has everything, with the time since start on
+each line. Each start of the pipeline in that folder begins with a block
+marked <code>EURLC-WGS RUN START</code>:</p>
+<pre class="bash"><code>grep -n &quot;EURLC-WGS RUN&quot; eurlc-wgs/log/log.txt</code></pre>
+<p>The exact commands that were run are in
+<code>log/bash_commands.log</code>, and what the tools printed in
+<code>log/stdout.txt</code> and <code>log/stderr.txt</code>.</p>
+<p><strong>Reporting a problem</strong> Bugs and suggestions: open an
+issue at <a href="https://github.com/BoSegerman/eurlc-wgs/issues">https://github.com/BoSegerman/eurlc-wgs/issues</a>,
+with the command you used and <code>log/run_summary.txt</code> and
+<code>log/log.txt</code> from the output folder. Questions and feedback,
+or if you do not have a GitHub account: email <a href="mailto:bo.segerman@sva.se">bo.segerman@sva.se</a>. Send logs by
+email rather than as an issue if they contain sample names or paths that
+should not be public.</p>
+<hr />
+<h2 id="15-quick-reference">15. Quick reference</h2>
+<pre class="bash"><code># run
+eurlc-wgs                                   # analyse the current folder
+eurlc-wgs datadir /data/run                 # analyse another folder
+eurlc-wgs datadir /data/run outdir /out/run # results elsewhere
+eurlc-wgs --list-tools                      # tool names (on/off) and step names
+eurlc-wgs --recursive                       # include subfolders
+eurlc-wgs --fastq | --fasta                 # only reads | only assemblies
+eurlc-wgs --qc-screen                       # raw-read QC only
+
+# resources
+eurlc-wgs threads=8
+eurlc-wgs parallel_mode=on max_threads=16 max_ram_gb=48
+
+# existing results
+eurlc-wgs --resume                          # continue
+eurlc-wgs --overwrite                       # delete and start over
+eurlc-wgs rerun=&lt;step&gt;[,&lt;step&gt;]             # run steps again
+eurlc-wgs summarize                         # thresholds again, reports and rundata.json
+eurlc-wgs-inspect compare &lt;reference&gt; &lt;run&gt;  # same results as an earlier run?
+eurlc-cgmlst-compare explain &lt;A&gt; &lt;B&gt; ...     # why two cgMLST results differ
+
+# tools and settings
+eurlc-wgs enable=&lt;tool|species&gt; disable=&lt;tool|species&gt;
+eurlc-wgs &lt;tool&gt;.&lt;setting&gt;=&lt;value&gt;
+eurlc-wgs &lt;tool&gt;.timeout=3h
+eurlc-wgs configfile=&lt;file|default|write&gt;
+eurlc-wgs database /other/db
+
+# unattended
+eurlc-wgs --assume-yes --resume
+
+# installation and maintenance
+eurlc-wgs --setup [--optional] [species=&lt;campylobacter,salmonella,ecoli,listeria|all&gt;]
+eurlc-wgs infotool=&lt;tool&gt; | installtool=&lt;tool&gt; | reinstalltool=&lt;tool&gt; | removetool=&lt;tool&gt;
+eurlc-wgs --list-schemas | --install-efsa-schemas[=&lt;species&gt;] | --install-schema=&lt;name&gt;
+eurlc-wgs --freeze-databases[=&lt;db,...&gt;] | --verify-databases
+eurlc-wgs --generate-seal[=&lt;name&gt;]
+eurlc-wgs --installation-check[=&lt;set&gt;]      # does this installation give the right results?
+eurlc-wgs --make-installation-check=&lt;set&gt; from=&lt;dataset folder&gt; samples=&lt;id,...&gt;   # make a check set
+eurlc-wgs --help | --version | --versions
+
+# control a running pipeline
+echo pause|resume|terminate &gt; &lt;output folder&gt;/control/cmd</code></pre>
+</body>
+</html>

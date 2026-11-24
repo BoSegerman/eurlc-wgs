@@ -1,0 +1,36 @@
+/* Style of the built user manual (HTML and PDF). Embedded by scripts/build-manual. */
+:root { --ink: #1f2933; --muted: #5b6770; --line: #d9dee3; --accent: #1f5f8b; --code-bg: #f4f6f8; }
+html { font-size: 16px; }
+body { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: var(--ink); line-height: 1.55;
+       max-width: 52rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+h1 { font-size: 2rem; margin: 0 0 0.3rem; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 0.8rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 0.5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 0.4rem; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: "DejaVu Sans Mono", Consolas, Menlo, monospace; font-size: 0.86em; background: var(--code-bg);
+       padding: 0.1em 0.3em; border-radius: 3px; overflow-wrap: anywhere; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.7rem 0.9rem;
+      overflow-x: auto; line-height: 1.4; }
+pre code { background: none; padding: 0; font-size: 0.82em; overflow-wrap: normal; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.92em; }
+th, td { border: 1px solid var(--line); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+blockquote { margin: 1rem 0; padding: 0.2rem 1rem; border-left: 3px solid var(--line); color: var(--muted); }
+nav#TOC { border: 1px solid var(--line); border-radius: 4px; padding: 0.8rem 1.2rem; margin: 1.5rem 0 2rem; }
+nav#TOC > ul { margin: 0; padding-left: 1.1rem; }
+nav#TOC ul ul { padding-left: 1.2rem; font-size: 0.93em; }
+nav#TOC li { margin: 0.15rem 0; }
+@media print {
+  html { font-size: 10pt; }
+  body { max-width: none; padding: 0; }
+  a { color: inherit; }
+  h2 { page-break-before: always; border-top: 0; padding-top: 0; margin-top: 0; }
+  h2, h3, h4 { page-break-after: avoid; }
+  pre, table, blockquote { page-break-inside: avoid; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+}
+@page { size: A4; margin: 18mm 16mm 18mm 16mm;
+        @bottom-center { content: counter(page); font-size: 8pt; color: #5b6770; } }

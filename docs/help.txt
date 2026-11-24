@@ -1,25 +1,46 @@
-
 EURLC-WGS -- whole genome sequencing analysis for Campylobacter, Salmonella,
 E. coli and Listeria (Illumina reads or assemblies)
 
 USAGE
-    eurlc-wgs [datadir=<folder>] [options]
+    cd <data-folder>
+    eurlc-wgs [options]
 
-    Without datadir= the current folder is analysed. Results go to
-    <data folder>/eurlc-wgs, or to exactly the folder given with outdir=.
-    Arguments are name=value or --flag; a path may also follow the name
-    (datadir /data/run192). An argument may be given only once.
+    or, from anywhere:
+    eurlc-wgs datadir=<data-folder> [options]
+
+    Results go to <data-folder>/eurlc-wgs, or to exactly the folder given
+    with outdir=. In this text that folder is <out-folder>.
+
+    Arguments are written name=value or --flag. For the four arguments
+    that take a folder or a file (datadir, outdir, database, configfile) a
+    space works as well as "=", so that the shell can complete the path
+    with the Tab key:
+        eurlc-wgs datadir /data/run192        same as datadir=/data/run192
+    An argument may be given only once.
+
+    --qc-screen                  Instead of the full analysis: a quick check
+                                 of the raw reads only (Q30 coverage, species,
+                                 other genus, read length), with a
+                                 traffic-light report in
+                                 <data-folder>/eurlc-wgs_qcscreen/
 
 INPUT AND OUTPUT
-    datadir=<folder>             Folder with FASTQ (paired or single) and/or
-                                 FASTA files
-    outdir=<folder>              Write results to exactly this folder
-    database=<folder>            Database folder (default ~/eurlc-wgs_db)
-    configfile=<file>            Settings file (default <database>/eurlc-wgs.config)
-        configfile=write         write the current settings to a file and exit
-        configfile=default       ignore any settings file
+    datadir=<data-folder>        Folder with FASTQ (paired or single) and/or
+                                 FASTA files (default: the current folder)
+    outdir=<out-folder>          Write results to exactly this folder
+    database=<database-folder>   Database folder (default ~/eurlc-wgs_db)
+    configfile=<configfile>      Settings file. A name without a folder is
+                                 looked for in <database-folder>; a path is
+                                 used as given
+                                 (default <database-folder>/eurlc-wgs.config)
+        configfile=default       use no settings file (built-in values)
+    --write-configfile[=<configfile>]
+                                 Write the current settings to a file and
+                                 exit: <database-folder>/eurlc-wgs.config, or
+                                 the name (in <database-folder>) or path given
     --recursive                  Also look for input files in subfolders
-    --fastq / --fasta            Analyse only FASTQ / only FASTA input
+    --fastq                      Analyse only the FASTQ files of the folder
+    --fasta                      Analyse only the FASTA files of the folder
 
     Illumina names lose their sample number and lane in the sample name
     (PT43_S12_L001_R1_001.fastq.gz -> PT43); one sample on several lanes is
@@ -33,25 +54,29 @@ AN EXISTING OUTPUT FOLDER
                                  (--overwrite = overwrite=yes)
     rerun=<step>[,<step>...]     In an existing folder (implies --resume): run
                                  these steps again, and every step that depends
-                                 on them
-    summarize                    Re-evaluate QC with the current thresholds,
-                                 validate and verify again, and rebuild the
-                                 report and data/rundata.json (no tools are
-                                 run)
+                                 on them. Step names: eurlc-wgs --list-steps
+    summarize                    Re-evaluate QC with the current thresholds
+                                 and rebuild the report and data/rundata.json
+                                 (no tools are run)
 
 WHAT IS ANALYSED
     enable=<tool|species>[,...]  Switch tools on, e.g. enable=sistr or
                                  enable=Salmonella (all its typing tools)
     disable=<tool|species>[,...] Switch tools off, e.g. disable=bakta
-    species_scope=<list>         Species the typing tools are prepared for
-    <section>.<param>=<value>    Any single setting, e.g.
+    <tool>.<setting>=<value>     One setting of a tool, e.g.
                                  fastp.arguments="--length_required 50"
                                  spades.timeout=4h
-    <param>=<value>              A [general] setting, e.g. threads=8
+    <setting>=<value>            A general setting, e.g. threads=8
 
-    --qc-screen                  Quick check of the raw reads only (Q30
-                                 coverage, species, other genus, read length);
-                                 traffic-light report in eurlc-wgs_qcscreen/
+    --list-tools                 The tool names (and whether each is on), and
+                                 the step names for rerun=. A tool is a
+                                 program with its settings; a step is one
+                                 stage of the analysis, usually named after
+                                 its tool (--list-steps shows the same)
+    infotool=<tool>              A tool's settings and installation
+
+    All settings, with their built-in values, are listed in
+    <database-folder>/eurlc-wgs.config.
 
 RUNNING
     threads=<n>                  Threads per tool
@@ -63,78 +88,42 @@ RUNNING
     --verbose                    More detail in the log
     --no-color / --color         Coloured screen output off / on
 
-    While running: write pause, resume or terminate to
-    <output>/control/cmd to pause, continue or stop the run.
+    To pause, continue or stop a run that is going, write the word pause,
+    resume or terminate to a file in <out-folder>/control/ from another
+    terminal (the file name does not matter):
+        echo pause     > <out-folder>/control/cmd
+        echo resume    > <out-folder>/control/cmd
+        echo terminate > <out-folder>/control/cmd
+    Running steps are finished first; terminate then ends the run, and
+    --resume continues it later.
 
-CHECKING THE RESULTS
-    validate=auto|off|<folder>   Compare with an EURL validation dataset
-                                 (auto: a *_validation_profile.yml in the data
-                                 folder or the folder above); report/validation/
-    verify_reference=auto|off|<file or folder>
-                                 Compare with the results fingerprint of an
-                                 earlier run (auto: the newest in reference/
-                                 next to the data); report/verification/
-    verify_expect=<area>[,...]   Differences that are expected, e.g.
-                                 verify_expect=amr,qc.coverage
-    validated_species=<species>[, ...]
-                                 The species this configuration is validated
-                                 for, e.g. "Campylobacter jejuni, Campylobacter
-                                 coli" (set it in the configuration file, so
-                                 that the seal covers it). Samples of other
-                                 species (or without a species call) are
-                                 analysed, but marked and not reportable
-
-INSTALLATION AND MAINTENANCE
-    --setup [--optional]         Install or complete the installation: tool
+INSTALLATION
+    --setup                      Install or complete the installation: tool
                                  environments, databases and the cgMLST
-                                 schema of each species of the installation
-                                 (--optional: also the tools that are off)
-    --setup species=<list>       ... for these species: campylobacter,
-                                 salmonella, ecoli, listeria, or all. In an
-                                 existing installation they are added
-    installtool=<tool>           Install one tool's environment
-    reinstalltool=<tool>         Remove and install again
-    removetool=<tool>            Remove one tool's environment
-    infotool=<tool>              Show a tool's settings and installation
-    --freeze-databases[=<db>,..] Copy databases to frozen, versioned folders
-    --verify-databases           Check every database in full and name its
-                                 version
-    --generate-seal[=<name>]     Seal the configuration (settings, frozen
-                                 databases, tool environments, pipeline
-                                 version). Also writes the exact package
-                                 list of every environment to
-                                 <database>/conda_envs/; with those lists
-                                 in the database folder, install.sh and
-                                 --setup make the same environments on
-                                 another computer
-    --installation-check[=<set>[,<set>]]
-                                 Check this installation: run the check set(s)
-                                 in <database>/installation_check/ and compare
-                                 with their expected results and reference run
-                                 (docs/installation-check.md). Exit code 0 when
-                                 every set passes, 1 otherwise
-    --make-installation-check=<set> from=<dataset folder> samples=<id,...>
-                                 Make a check set from a validation dataset:
-                                 copies the samples' reads and expected
-                                 results, runs them once here and keeps the
-                                 result as the set's reference. Needs a
-                                 verified seal (--allow-unsealed to try out)
-    --remap-check [--convert] <output folder>
-                                 Check remap results from an earlier version
-                                 against the current method (--convert: take
-                                 over the identical ones, so the step is not
-                                 run again)
+                                 schema of each species of the installation.
+                                 Installs only what is missing
+    --setup species=<list>       Add species to the installation:
+                                 campylobacter, salmonella, ecoli, listeria
+                                 (comma-separated), or all
+    --installation-check         Does this installation give the right
+                                 results? Runs the check sets that came with
+                                 the installation (a few samples with known
+                                 results) and compares. Nothing needs to be
+                                 named: without a name every set is run
+    --list-schemas               The cgMLST schemas that are installed, and
+                                 how to install others
 
-cgMLST SCHEMAS
-    --list-schemas               Installed and available schemas
-    --install-schema=<name>      Install a schema from the catalog
-    --install-efsa-schemas[=<species>,...]
-                                 Install the EFSA schemas and filters
-                                 (campylobacter, ecoli, salmonella, listeria)
-    --import-schema=<folder>     Install a schema you already have
+    For whoever looks after an installation or a validated method (single
+    tools, freezing databases, sealing a configuration, making a check set,
+    comparing with validation datasets and earlier runs):
+        eurlc-wgs --help-admin
 
 INFORMATION
     --help                       This text
+    --help-admin                 Installation, maintenance and validation
+    --manual                     Where the user manual is on this computer
+                                 (one HTML file for the web browser, and a
+                                 PDF)
     --version                    The pipeline version
     --versions                   The pipeline and every tool's version
 
@@ -163,13 +152,15 @@ COMPANION TOOLS (installed with the pipeline; --help on each)
                                  differ (profiles, schemas)
 
 EXAMPLES
+    cd /data/run192; eurlc-wgs
     eurlc-wgs datadir=/data/run192 threads=8
-    eurlc-wgs datadir=/data/run192 outdir=/analysis/run192 --resume
+    eurlc-wgs datadir /data/run192 outdir /analysis/run192
     eurlc-wgs datadir=/data/run192 --qc-screen
+    eurlc-wgs outdir=/analysis/run192 --resume
+    eurlc-wgs outdir=/analysis/run192 --resume skesa.timeout=6h
     eurlc-wgs outdir=/analysis/run192 rerun=sistr enable=sistr
     eurlc-wgs outdir=/analysis/run192 summarize
-    eurlc-wgs-inspect compare run1/eurlc-wgs run2/eurlc-wgs --out repeatability/
 
-Full documentation: docs/eurlc-wgs-user-manual.md in the source
-repository (https://github.com/BoSegerman/eurlc-wgs).
-
+Full documentation: the user manual. eurlc-wgs --manual says where it is on
+this computer (HTML and PDF); online it is docs/eurlc-wgs-user-manual.md at
+https://github.com/BoSegerman/eurlc-wgs

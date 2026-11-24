@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Build the user manual as one self-contained HTML file and as a PDF, from
+# docs/eurlc-wgs-user-manual.md. Run at every release (RELEASE.md), and
+# commit the two files: install.sh installs them with the pipeline, and
+# "eurlc-wgs --manual" says where they are.
+#
+#   scripts/build-manual            build both
+#   scripts/build-manual --check    exit 1 if the built files were not made
+#                                   from the manual and style sheet as they
+#                                   are now (tests/smoke.sh runs this)
+#
+# Needs pandoc. For the PDF: weasyprint (the pipeline's own environment
+# eurlc-wgs-weasyprint is used if weasyprint is not on PATH), else
+# wkhtmltopdf. Without either, only the HTML is built.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="$ROOT/docs/eurlc-wgs-user-manual.md"
+CSS="$ROOT/docs/manual-build/manual.css"
+HTML="$ROOT/docs/eurlc-wgs-user-manual.html"
+PDF="$ROOT/docs/eurlc-wgs-user-manual.pdf"
+# What the built files were made from: the MD5 of the manual and the style
+# sheet. (File dates say nothing after a git checkout.)
+STAMP="$ROOT/docs/manual-build/built-from.md5"
+source_md5() { cat "$SRC" "$CSS" | md5sum | cut -d' ' -f1; }
+
+if [[ "${1:-}" == "--check" ]]; then
+    if [[ ! -f "$HTML" || ! -f "$PDF" || ! -f "$STAMP" || "$(cat "$STAMP")" != "$(source_md5)" ]]; then
+        echo "The built manual (HTML/PDF) is missing or was not made from the current manual -- run scripts/build-manual"
+        exit 1
+    fi
+    echo "The built manual is up to date."
+    exit 0
+fi
+
+command -v pandoc > /dev/null || { echo "ERROR: pandoc not found (conda install -c conda-forge pandoc)"; exit 1; }
+
+# The version line of the manual ("Version 1.0.0 · November 2026") must be
+# the version of the script: a manual for another version is worse than none.
+SCRIPT_VERSION="$(sed -n -E "s/^our \\\$PIPELINE_VERSION *= *['\"]([^'\"]+)['\"].*/\1/p" "$ROOT/bin/eurlc-wgs" | head -1)"
+if [[ -n "$SCRIPT_VERSION" ]] && ! grep -q -m1 "^Version ${SCRIPT_VERSION} " "$SRC"; then
+    echo "ERROR: the manual does not say 'Version ${SCRIPT_VERSION}' (line 3 of $(basename "$SRC")) -- update it first"
+    exit 1
+fi
+
+# One file, nothing fetched from anywhere: the style sheet is put into it.
+# GitHub-flavoured Markdown in, so the section links of the manual work.
+pandoc "$SRC" --from=gfm --to=html5 --standalone --embed-resources --no-highlight \
+       --metadata pagetitle="EURLC-WGS User Manual" --metadata lang=en \
+       --css="$CSS" --output="$HTML"
+echo "Built: docs/$(basename "$HTML")"
+
+if command -v weasyprint > /dev/null; then
+    weasyprint --quiet "$HTML" "$PDF"
+elif command -v conda > /dev/null && conda env list 2> /dev/null | grep -q '^eurlc-wgs-weasyprint '; then
+    conda run -n eurlc-wgs-weasyprint weasyprint --quiet "$HTML" "$PDF"
+elif command -v wkhtmltopdf > /dev/null; then
+    wkhtmltopdf --quiet --enable-local-file-access --page-size A4 --disable-smart-shrinking --zoom 1.25 \
+                --margin-top 18mm --margin-bottom 18mm --margin-left 16mm --margin-right 16mm \
+                --footer-center '[page]' --footer-font-size 8 "$HTML" "$PDF"
+else
+    echo "WARNING: no weasyprint and no wkhtmltopdf -- the PDF was not built"
+    exit 2
+fi
+echo "Built: docs/$(basename "$PDF")"
+source_md5 > "$STAMP"

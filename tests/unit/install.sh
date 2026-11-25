@@ -512,6 +512,9 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     SETUP_RC=0
     eurlc-wgs ${SETUP_ARGS} || SETUP_RC=$?
     conda deactivate
+elif [[ "${RESOURCES_ONLY}" -eq 1 ]]; then
+    echo
+    echo ">>> Resource-only mode: eurlc-wgs --setup is not run."
 else
     echo
     echo ">>> Skipping eurlc-wgs --setup (--no-setup specified)."
@@ -543,7 +546,11 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     echo "    eurlc-wgs"
     echo "(or from anywhere: eurlc-wgs datadir=<folder with FASTQ files>)"
     echo
-    echo "Help:  eurlc-wgs --help   (user manual: docs/eurlc-wgs-user-manual.md)"
+    echo "Help:  eurlc-wgs --help   (user manual: eurlc-wgs --manual says where it is)"
+elif [[ "${RESOURCES_ONLY}" -eq 1 ]]; then
+    echo
+    echo "The pipeline's scripts, help and manual were updated; tool environments and databases are untouched."
+    echo "(A sealed installation: the script has changed, so its seal no longer verifies -- see the manual, section 12.)"
 else
     echo
     echo "Tool environments, databases and cgMLST schemas are not yet installed. Complete with:"

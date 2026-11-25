@@ -2,7 +2,7 @@
 
 Changes that a user of the pipeline can notice. The newest version first.
 
-## 1.0.0-rc3 (23 November 2026)
+## 1.0.0-rc3 (25 November 2026)
 
 ### Changed
 
@@ -59,6 +59,73 @@ Changes that a user of the pipeline can notice. The newest version first.
   `--resume` command that runs the failed steps again. Results made with an
   earlier version show these samples as PASS in `qc_status`; a comparison
   with such a reference reports the difference.
+- **A sealed installation copied to another computer** (found the first
+  time it was done, 25 November):
+  - `--setup` passed tool environments that were already on the computer
+    as "installed" without comparing them with the package lists of the
+    seal, so they kept their own builds and the seal broke at the first
+    run. An existing environment is now compared with its list and made
+    again from it when it differs (the pipeline's own environment already
+    was, by `install.sh`).
+  - `--setup` reported every cgMLST schema as missing, because it looked
+    for the live schema folders and a copied installation has the frozen
+    copies only. A frozen copy now counts.
+  - The AMRFinderPlus database, which is inside its environment and so
+    cannot be copied, is installed by `--setup` also in a sealed
+    installation when it is missing.
+- `install.sh --resources-only` no longer ends by saying that tools and
+  databases are not installed.
+- **SKESA: the assembly graph can no longer cost the assembly.** The
+  graph step (`gfa_connector`) ran between the assembly and the copy of
+  the result, with every core of the computer and no time limit of its
+  own. On a 68-core workstation it hung for one sample until SKESA's
+  2-hour limit, and the finished assembly was lost with it (the sample
+  became CRITICAL). The assembly is now copied first; the graph step
+  gets the same number of threads as SKESA and 10 minutes, and when it
+  fails or runs out of time the sample only lacks the SKESA graph.
+- Start of a run: a verified seal is shown (`Config seal [name]: SEAL
+  VERIFIED`); before, only a broken seal gave a line.
+- Setup and freeze: Bracken is no longer reported as "database
+  installed" (it has none of its own); the Listeria schema is labelled
+  cgMLST; the fastMLST database gets a source label when it is installed;
+  `--verify-databases` no longer suggests naming databases that have a
+  git commit as their label, and says "full check" instead of "once";
+  several log lines ran into the next one.
+- Main report: the links to the matrix viewer, the downloads and the AMR
+  profile viewer have no symbol before the text (the PDF showed an empty
+  box). The QC note "Assess mash-screen status do not pass" reads "Mash
+  screen status is not PASS". The start-up line about a tool's database
+  names the file it measures, and gives the AMRFinderPlus database
+  version (it said "Database size 13.00 B").
+- **The fastMLST database is part of the installation.** fastMLST kept
+  its PubMLST database in `~/.cache/fastmlst/pubmlst`: one copy per user,
+  downloaded at that user's first run, outside the conda environment, not
+  frozen, not sealed and not in the report. It is now installed by
+  `--setup` in `<db>/fastmlst/pubmlst`, frozen and sealed like the other
+  databases, and listed under Database versions. **Run `--setup`, then
+  `--freeze-databases`** (and `--generate-seal`). A run stops at start
+  when the database is missing or not complete; `~/.cache/fastmlst` is no
+  longer used and can be removed.
+- **A cgMLST schema gets the same version ID in every installation.** The
+  ID is the MD5 of the schema's marker file, and that file held the schema
+  name and the time of freezing, so two installations with the same schema
+  showed two versions. The marker now holds only the loci (name and size)
+  and the filter. **Run `--freeze-databases` again** (and `--generate-seal`
+  for a sealed installation): markers from earlier versions are made
+  again and every schema gets a new ID. Until then an installation keeps
+  working with its old ID. The schemas and the results are unchanged.
+- `eurlc-wgs-inspect compare`: when the reference and the run have the same
+  loci under two schema IDs, the results are compared locus by locus, and
+  the ID difference is one line per sample (`cgmlst.reported.schema`; name
+  it with `--expect` when it is known). Before, every cgMLST value was
+  listed as missing on one side.
+- **A mixture of two strains of the same species is CRITICAL for
+  *Campylobacter*** when more than 350 1-kb windows have mixed positions
+  (`critical_contamination_mixed_windows`; about a fifth of the genome, the
+  same share as the *Salmonella* limit). Before, there was only the WARNING
+  above 100, so a sample with 20 % of a second strain, where 20 cgMLST
+  alleles were changed, was reportable without review. The limit can be
+  changed in the species' section of the config file.
 - **Kraken2 and Mash screen naming different species is a WARNING**, not
   CRITICAL (`warning_taxonomy_species_disagree`), until it is better
   understood. The reported species is Kraken2's. It can be raised per
@@ -71,6 +138,14 @@ Changes that a user of the pipeline can notice. The newest version first.
   `--generate-seal` as next steps; it points to the manual.
 
 ### Fixed
+
+- **Parallel mode: the Kraken2 pre-check of two samples could use the same
+  temporary files.** The first 100 000 read pairs of every sample were
+  written to one file name in a shared folder. When two samples reached
+  the step at the same time, the files were overwritten or removed while
+  Kraken2 read them: the step could hang until its time limit, or finish
+  on a few thousand reads, possibly from the other sample. Each sample now
+  has its own files. Sequential runs were not affected.
 
 - **Parallel mode could start a step on reads that were still being
   written.** A step's input counted as ready as soon as the file existed

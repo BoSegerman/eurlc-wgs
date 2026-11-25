@@ -570,6 +570,14 @@ check "sealed installation: species= is refused" bash -c "[[ $RC != 0 ]] && grep
 run "$T/setup6.out" --setup --assume-yes database="$DBN"
 check "  ... used as it is: the missing schema is reported, not downloaded" \
       bash -c "[[ $RC == 1 ]] && grep -q 'Found a sealed installation' '$T/setup6.out' && ! grep -q 'Download & install' '$T/setup6.out'"
+# a copied sealed installation has frozen copies only: a schema counts when its frozen copy is there
+FZ="$DBN/frozen_dbs/chewbbaca_chewie_ns_listeria/0123456789abcdef0123456789abcdef"
+mkdir -p "$FZ"; echo "l1.fasta:3" > "$FZ/schema_version.md5"
+printf '[chewbbaca_chewie_ns_listeria]\npath = %s\nmarker_file = schema_version.md5\nmarker_md5 = 0123456789abcdef0123456789abcdef\n' "$DBN/chewbbaca/schemas/chewie_ns_listeria" > "$DBN/db_freeze.config"
+run "$T/setup6b.out" --setup --assume-yes database="$DBN"
+check "  ... a schema with only a frozen copy (copied sealed installation) counts as installed" \
+      bash -c "grep -q 'Listeria .*chewie_ns_listeria (frozen 01234567)' '$T/setup6b.out' && ! grep -q 'cgMLST schema(s) missing' '$T/setup6b.out'"
+rm -rf "$DBN/db_freeze.config" "$DBN/frozen_dbs"
 rm "$DBN/config_seal.ini"
 run "$T/setup7.out" species=listeria datadir="$D"
 check "species= without --setup is refused" bash -c "[[ $RC != 0 ]] && grep -q 'used together with --setup' '$T/setup7.out'"

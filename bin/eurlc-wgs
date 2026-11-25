@@ -34238,7 +34238,31 @@ sub _cmd_setup {
         my $yml_src  = $yml ? ($yml =~ m{$db_dir} ? "db-dir" : "built-in") : "none";
         my $yml_md5  = ($yml && -f $yml) ? md5_file($yml) : "";
 
-        if ($exists) {
+        if ( $exists && ( my $list = sealed_env_list($env) ) ne "" ) {
+            # A package list from a sealed installation decides, not the YML
+            # file: an environment that is already here (made another day,
+            # so with other builds) is compared with the list, and made
+            # again from it when it differs. Before 1.0.0-rc3 (25 Nov) an
+            # existing environment was only compared with its YML file and
+            # passed as "installed" -- the seal then broke at the first run.
+            my $want = explicit_list_fingerprint($list) // "";
+            my $have = conda_env_fingerprint($env) // "";
+            if ( $want ne "" && $have eq $want ) {
+                log_message(sprintf("NOTICE:   ✓  %-36s (as in the sealed package list)", $env), "green");
+                $n_ok++;
+            } else {
+                log_message(sprintf("NOTICE:   ⚠   %-34s (differs from the sealed package list -- to be made again from it)", $env), "yellow");
+                if ( ensure_conda_tool($tool, 0) && ( conda_env_fingerprint($env) // "" ) eq $want && $want ne "" ) {
+                    log_message("NOTICE:   ✓  $env made again, as in the sealed package list", "green");
+                    $n_updated++;
+                } else {
+                    log_message("WARNING:  ✗  $env is not as in the sealed package list [$list] -- a config seal will not verify", "red");
+                    $n_failed++;
+                }
+            }
+            if ( $yml_md5 ne "" && ( $yml_checksums{$env} // "" ) ne $yml_md5 ) { $yml_checksums{$env} = $yml_md5; $checksums_changed = 1; }
+        }
+        elsif ($exists) {
             my $stored_md5 = $yml_checksums{$env} // "";
 
             if ($yml_md5 ne "" && $stored_md5 ne "" && $yml_md5 ne $stored_md5) {
@@ -34360,6 +34384,24 @@ sub _cmd_setup {
                 }
             }
         }
+        # Databases that live inside a conda environment (AMRFinderPlus) are
+        # not in db_freeze.config and go when the environment is made again.
+        # They are installed here also in a sealed installation: they cannot
+        # be copied with it. The version is the latest that day (shown at
+        # the start of every run).
+        for my $tool ( sort keys %$R_cfg ) {
+            my $c = $R_cfg->{$tool};
+            next unless ref($c) eq 'HASH' && ( $c->{db_test} // "" ) =~ /__ENV__|__CONDABASE__/ && ( $c->{install_db} // "" ) ne "";
+            next if $c->{install_db} =~ /^echo /;
+            next unless ( $c->{enabled} // 1 ) || $S_SETUP_OPTIONAL;
+            my $db_test = fill_placeholder_string( $c->{db_test}, $c );
+            if ( -e $db_test ) {
+                log_message(sprintf("NOTICE:   ✓  %-28s (in its environment: %s)", $tool, $db_test), "green");
+            } else {
+                log_message(sprintf("NOTICE:   ✗  %-28s (in its environment: %s)", $tool, $db_test), "yellow");
+                $db_result->( _setup_offer_db_install( $tool, $tool, fill_placeholder_string( $c->{db_path} // "", $c ) ) );
+            }
+        }
     } else {
         # No db_freeze.config -- use built-in db_test paths to check
         my @db_tools = grep {
@@ -34397,10 +34439,23 @@ sub _cmd_setup {
     my $schemas_root = ( peekdir("db") // "" ) . "/chewbbaca/schemas";
     my %sp_def       = map { $_->[0] => $_ } @SETUP_SPECIES;
     my $n_schema_failed = 0;
-    my @schema_missing;
+    my ( @schema_missing, @schema_absent );
+    # A run uses the frozen copy of a schema when db_freeze.config has one,
+    # and a copied sealed installation has only that (no live folder).
+    my $frozen_schemas = ( $db_config ne "" && -f $db_config ) ? load_databases_config($db_config) : {};
+    my $schema_frozen = sub {
+        my ($schema) = @_;
+        my $e   = $frozen_schemas->{"chewbbaca_$schema"} or return "";
+        my $md5 = lc( $e->{marker_md5} // "" );
+        return "" if $md5 eq "";
+        my $dir = get_frozen_dbs_root( File::Basename::dirname( get_live_db_root($e) || "." ) ) . "/chewbbaca_$schema/$md5";
+        return ( -d $dir && -s "$dir/schema_version.md5" ) ? $md5 : "";
+    };
     for my $key (@scope_keys) {
         my ( undef, $name, $schema ) = @{ $sp_def{$key} };
-        if ( schema_is_installed("$schemas_root/$schema") ) {
+        if ( ( my $md5 = $schema_frozen->($schema) ) ne "" ) {
+            log_message(sprintf("NOTICE:   ✓  %-18s %s (frozen %s)", $name, $schema, substr( $md5, 0, 8 )), "green");
+        } elsif ( schema_is_installed("$schemas_root/$schema") ) {
             log_message(sprintf("NOTICE:   ✓  %-18s %s", $name, $schema), "green");
         } else {
             log_message(sprintf("NOTICE:   ✗  %-18s %s (not installed)", $name, $schema), $sealed ? "red" : "yellow");
@@ -34411,6 +34466,7 @@ sub _cmd_setup {
     if ( @schema_missing && $sealed ) {
         $n_schema_failed = @schema_missing;
         log_message("NOTICE:      missing from the sealed installation -- copy it from where the seal was made", "red");
+        @schema_absent  = @schema_missing;
         @schema_missing = ();
     }
     if ( @schema_missing && ( $ASSUME_YES || prompt_yes_no("  Download and install the missing schema(s)?", 1) ) ) {
@@ -34465,7 +34521,7 @@ sub _cmd_setup {
                          ( $n_schema_failed ? "$n_schema_failed cgMLST schema(s)" : () ))
             . ( $sealed ? " missing" : " could not be installed" ) . " -- see the lines marked ✗ above", "red");
     }
-    my %schema_gone = map { $_ => 1 } @schema_missing;
+    my %schema_gone = map { $_ => 1 } @schema_missing, @schema_absent;
     my @ready     = grep { !$schema_gone{$_} } @scope_keys;
     my @not_ready = grep {  $schema_gone{$_} } @scope_keys;
     my $basics_ok = ( $n_failed + $n_db_failed == 0 && !$n_missing && !$n_db_missing ) ? 1 : 0;

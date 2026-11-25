@@ -770,8 +770,8 @@ missing, for all samples of the run, and rebuilds the reports; the
 finished results are kept.</p>
 <ul>
 <li><strong>Time limit</strong> (<code>timeout</code>): give the tool
-more time in the same command (<code>skesa.timeout=6h</code>; assemblers
-have 2 hours by default).</li>
+more time in the same command (<code>skesa.timeout=6h</code>; by default
+SPAdes has 2 hours and SKESA 4).</li>
 <li><strong>Exit code</strong>: look in <code>log/stderr.txt</code> for
 the tool&#39;s own message first. If the cause was temporary (a full disk,
 the computer was busy), the same <code>--resume</code> is enough.</li>
@@ -955,9 +955,10 @@ eurlc-wgs spades.timeout=3h</code></pre>
 setting stops the run. Note that <code>arguments</code> replaces the
 whole default argument string.</p>
 <h3 id="give-a-slow-step-more-time">Give a slow step more time</h3>
-<p>Every tool run has a time limit: 30 minutes, 2 hours for assemblers
-and 10 minutes for FastQC (which sometimes hangs). A step that reaches
-it is stopped and reported; the run continues.</p>
+<p>Every tool run has a time limit: 30 minutes, 2 hours for SPAdes and
+Shovill, 4 hours for SKESA and 10 minutes for FastQC (which sometimes
+hangs). A step that reaches it is stopped and reported; the run
+continues.</p>
 <pre class="bash"><code>eurlc-wgs spades.timeout=4h        # one tool
 eurlc-wgs timeout=1h               # the general limit
 eurlc-wgs kraken2.timeout=0        # no limit</code></pre>
@@ -1987,10 +1988,19 @@ call-rate thresholds are set per schema.</li>
 <li>Species thresholds cannot be given on the command line; change them
 in the config file and run <code>summarize</code>.</li>
 <li>Some databases are downloaded in their latest version (ResFinder,
-PointFinder, VirulenceFinder, PlasmidFinder, AMRFinderPlus), so two
-installations made at different times can differ. Freeze the databases
-after installing; the frozen version is what a validation refers
-to.</li>
+PointFinder, VirulenceFinder, PlasmidFinder, the fastMLST database), so
+two installations made at different times can differ. Freeze the
+databases after installing; the frozen version is what a validation
+refers to.</li>
+<li>The AMRFinderPlus database and the schemes of <code>mlst</code> are
+inside their conda environments and are not frozen: AMRFinderPlus gets
+the latest database on the day the environment is made. Its version is
+in the run log (<code>Database version:</code> in
+<code>log/stderr.txt</code>).</li>
+<li>The fastMLST database is in the database folder
+(<code>fastmlst/pubmlst</code>), not in <code>~/.cache/fastmlst</code>
+where fastMLST keeps it by default: every user of an installation types
+against the same, frozen copy.</li>
 <li>Folder paths with spaces or quotes are not supported (the run stops
 and says so).</li>
 <li>The genome size estimate from the reads (only for a species without

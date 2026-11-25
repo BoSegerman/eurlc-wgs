@@ -1621,6 +1621,41 @@ def _compare_alleles(ra, rb, max_loci):
     return out
 
 
+def _align_schema_ids(x, y):
+    """The same schema frozen in two installations can have two IDs (before
+    1.0.0-rc3 the ID held the time of freezing). When, for a species, the
+    reference has one schema the run lacks and the run one the reference
+    lacks, and both profiles have exactly the same loci, the run's results
+    are compared under the reference's ID. Returns (sample, {run ID: reference ID})."""
+    ax, ay = x.get("cgmlst_alleles") or {}, y.get("cgmlst_alleles") or {}
+    only_ref, only_run = {}, {}
+    for k in ax:
+        if k not in ay and "/" in k:
+            only_ref.setdefault(k.split("/", 1)[0], []).append(k)
+    for k in ay:
+        if k not in ax and "/" in k:
+            only_run.setdefault(k.split("/", 1)[0], []).append(k)
+    pairs = {}
+    for sp, ks in only_ref.items():
+        other = only_run.get(sp, [])
+        if len(ks) == 1 and len(other) == 1 and isinstance(ax[ks[0]], dict) and isinstance(ay[other[0]], dict) \
+                and set(ax[ks[0]]) == set(ay[other[0]]):
+            pairs[other[0]] = ks[0]
+    if not pairs:
+        return y, {}
+    y = dict(y)
+    y["cgmlst_alleles"] = {pairs.get(k, k): v for k, v in ay.items()}
+    cg = {}
+    for k, v in (y.get("cgmlst") or {}).items():
+        for b, r in pairs.items():
+            if k.startswith(b + "."):
+                k = r + k[len(b):]
+                break
+        cg[k] = v
+    y["cgmlst"] = cg
+    return y, {b.split("/", 1)[1]: r.split("/", 1)[1] for b, r in pairs.items()}
+
+
 def _compare_pair(ref, run, a):
     """Every difference of one run from the reference: list of dicts."""
     rows = []
@@ -1633,6 +1668,7 @@ def _compare_pair(ref, run, a):
             rows.append(dict(sample=name, area="sample", key="", ref="missing", val="present", note="sample not in the reference"))
             continue
         x, y = rs[name], ss[name]
+        y, renamed = _align_schema_ids(x, y)
         for area in AREAS:
             if a.areas and area not in a.areas:
                 continue
@@ -1653,6 +1689,8 @@ def _compare_pair(ref, run, a):
                     continue
                 va, vb = ax.get(key), ay.get(key)
                 same, note = _same_value(va, vb, a.tolerance, a.rel_tolerance)
+                if not same and area == "cgmlst" and key == "reported.schema" and renamed.get(str(vb)) == str(va):
+                    note = "same loci under another schema ID (frozen separately); results compared locus by locus"
                 if not same:
                     rows.append(dict(sample=name, area=area, key=key, ref=_show(va), val=_show(vb), note=note))
     for r in rows:

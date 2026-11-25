@@ -112,7 +112,7 @@ my %rundata;
 $rundata{pipeline_info} = {
     name        => "eurlc-wgs",
     version     => $PIPELINE_VERSION,
-    versiondate => "2026-11-24",
+    versiondate => "2026-11-25",
     author      => "Bo Segerman",
     contact     => "bo.segerman\@sva.se",
 };
@@ -1853,6 +1853,19 @@ $rundata{config}{defaults} = {
             env     => "eurlc-wgs-fastmlst",
             yml     => "core/eurlc-wgs-fastmlst.yml",
             package_name  => "fastmlst",
+            # fastMLST keeps its PubMLST database in ~/.cache/fastmlst/pubmlst:
+            # one copy per user, downloaded at that user's first run, outside
+            # the conda environment and outside db_freeze (two of our own
+            # installations had two versions, Nov 2026). It is now a database
+            # like the others: installed under __DB__/fastmlst/pubmlst, frozen
+            # and sealed. fastMLST 0.0.19 has --db_path, but only the download
+            # follows it; the typing still reads ~/.cache (the path is bound
+            # when the module is loaded). So the database is installed and
+            # used through HOME, set for the fastmlst process only -- see
+            # fastmlst_home_wrap().
+            db_path   => "__DB__/fastmlst",
+            db_test   => "__DB__/fastmlst/pubmlst/mlst.fasta",
+            install_db => "rm -rf '__DB__/fastmlst/.install_home' && mkdir -p '__DB__/fastmlst/.install_home' && conda run -n __ENV__ --no-capture-output env HOME='__DB__/fastmlst/.install_home' fastmlst --update-mlst -t 4 && test -s '__DB__/fastmlst/.install_home/.cache/fastmlst/pubmlst/mlst.fasta' && rm -rf '__DB__/fastmlst/pubmlst' && mv '__DB__/fastmlst/.install_home/.cache/fastmlst/pubmlst' '__DB__/fastmlst/pubmlst' && rm -rf '__DB__/fastmlst/.install_home'",
             run_update_db => "weekly",
             update_db_threads => 4,
     },
@@ -9345,8 +9358,8 @@ sub postprocess_mash_screen {
     if (uc($status) ne "PASS") {
         $color = "yellow";
         push @{ $R_samples->[$samplenr]{main_results}{taxonomy}{species_warnings} },
-            "Assess mash-screen status do not pass";
-        set_sample_warning($samplenr,"warning","Assess mash-screen status do not pass");    
+            "Mash screen status is not PASS";
+        set_sample_warning($samplenr,"warning","Mash screen status is not PASS");    
     }
     log_message("NOTICE: Sample $sample_name assess mash screen status: $status", $color);
 
@@ -10108,7 +10121,9 @@ $runstep_name = "skesa";
 $runstep{$runstep_name} = {
       # Assemblies of larger genomes / long reads can take well over the
       # general timeout; this is only a safety net against a hung run.
-      timeout    => "120m",
+      # 4 hours (2 until 1.0.0-rc3): SKESA's time varies much more between
+      # samples than SPAdes' (D1 on a laptop: median 52 s, one sample 597 s).
+      timeout    => "240m",
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 4 },  # typical bacterial isolate at ~100X; raise with [<tool>] parallel_ram_gb for large genomes/high depth
 
@@ -13619,8 +13634,51 @@ $runstep{$runstep_name}{test} = \&test_fastmlst;
 
 sub test_fastmlst {
 
-   return check_conda_tool("fastmlst");
+   my $ok = check_conda_tool("fastmlst");
+   return $ok unless $ok;
+   my $db = fastmlst_db_dir();
+   my @missing = fastmlst_db_missing_files($db);
+   if (@missing) {
+       log_message("ERROR: The fastMLST database in [$db/pubmlst] is not complete (missing: " . join(", ", @missing) . ").", "red");
+       log_message("ERROR: Install it with: eurlc-wgs --setup   (a sealed installation: take the database folder from the package again)", "red");
+       return 0;
+   }
+   return $ok;
 
+}
+
+# The folder that holds fastMLST's pubmlst/ folder: the frozen copy when
+# db_freeze has one (resolve_and_verify_databases has then rewritten
+# fastmlst.db_path), else the live one.
+sub fastmlst_db_dir {
+    my $p = $R_cfg->{fastmlst}{db_path} // "";
+    return "" if $p eq "";
+    $p = fill_placeholders( normalize_path($p) );
+    $p =~ s{/+$}{};
+    return $p;
+}
+
+# What fastMLST needs to type without downloading anything. When one of its
+# index files is missing, fastMLST deletes its database folder and downloads
+# today's version without asking -- so this is checked before it is started.
+sub fastmlst_db_missing_files {
+    my ($db) = @_;
+    return ("fastmlst.db_path is not set") if !defined $db || $db eq "";
+    return grep { !-s "$db/pubmlst/$_" } qw(mlst.fasta scheme_number.pkl mlst.fasta.nhr mlst.fasta.nin mlst.fasta.nsq);
+}
+
+# fastMLST reads its database from $HOME/.cache/fastmlst/pubmlst. Run it with
+# a HOME of its own, a folder in the sample's output folder where
+# .cache/fastmlst is a link to the database folder in use. A link, not a
+# copy: fastMLST cannot delete a database through it (rmtree refuses a link),
+# so a damaged database gives an error instead of a silent download.
+sub fastmlst_home_wrap {
+    my ($command, $outdir) = @_;
+    my $db   = fastmlst_db_dir();
+    my $home = "$outdir/.fastmlst_home";
+    $command =~ s/--no-capture-output fastmlst\b/--no-capture-output env HOME='$home' fastmlst/g;
+    return "rm -rf '$home' && mkdir -p '$home/.cache' && ln -s '$db' '$home/.cache/fastmlst' && "
+         . "{ $command ; rc=\$? ; rm -rf '$home' ; ( exit \$rc ) ; }";
 }
 
 # PRE---------------------------------
@@ -13681,7 +13739,9 @@ sub preprocess_fastmlst {
 
     $command = fill_placeholders($command, $samplenr, $runstep_name);
 
-    ensure_dir(fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr));
+    my $outdir = fill_placeholders($runstep{$runstep_name}{output_dir}, $samplenr);
+    ensure_dir($outdir);
+    $command = fastmlst_home_wrap($command, $outdir);
 
     return $command;
 }
@@ -21678,6 +21738,7 @@ sub default_db_freeze_entries {
         # Bracken files in the same folder (B12).
         [ "kraken2",    "kraken2",          "hash.k2d, taxo.k2d, opts.k2d, database*mers.kmer_distrib", "kraken2.db_path", "Kraken2 + Bracken database" ],
         [ "mashscreen", "mash",             "refseq.genomes.k21s1000.msh",   "mashscreen.db_path", "Mash RefSeq sketch"                ],
+        [ "fastmlst",   "fastmlst",         "pubmlst/mlst.fasta",            "fastmlst.db_path",   "fastMLST PubMLST database"         ],
         [ "checkm",     "checkm",           "hmms/checkm.hmm",               "checkm.db_path",     "CheckM database (optional)"        ],
         [ "bakta",      "bakta/db-light",   "bakta.db",                      "bakta.db_path",      "Bakta light database (optional)"   ],
         [ "resfinder",  "resfinder",        "resfinder_db/all.fsa",          "resfinder.db_path",  "ResFinder database (optional)"     ],
@@ -25972,13 +26033,13 @@ sub main_report_section_clustering {
 
         $html .= "<td>";
         $html .= $interactive ne ""
-            ? qq{<a href="$interactive">🌐 Open matrix viewer</a>}
+            ? qq{<a href="$interactive">Open matrix viewer</a>}
             : "n/a";
         $html .= "</td>\n";
 
         $html .= "<td>";
         $html .= $download_page ne ""
-            ? qq{<a href="$download_page">📦 Select downloads</a>}
+            ? qq{<a href="$download_page">Select downloads</a>}
             : "n/a";
         $html .= "</td>\n";
 
@@ -27632,7 +27693,7 @@ sub main_report_section_amr {
 <table class="summary-table">
 <tr>
 <td class="rowheading">AMR profile viewer</td>
-<td><a href="$viewer">🌐 Open AMR profile viewer</a></td>
+<td><a href="$viewer">Open AMR profile viewer</a></td>
 </tr>
 </table>
 };
@@ -34701,6 +34762,15 @@ sub _chewbbaca_marker_body {
     return \@lines;
 }
 
+# True for a marker written before 1.0.0-rc3 (header with name and date).
+sub _chewbbaca_marker_has_local_header {
+    my ($marker_path) = @_;
+    open( my $fh, '<', $marker_path ) or return 0;
+    my $found = grep { /^#\s*(Generated|Schema):/ } <$fh>;
+    close $fh;
+    return $found ? 1 : 0;
+}
+
 sub _generate_chewbbaca_schema_marker {
     my ($schema_dir, $schema_name) = @_;
     my $marker_path = "$schema_dir/schema_version.md5";
@@ -34712,9 +34782,10 @@ sub _generate_chewbbaca_schema_marker {
     }
 
     my $content = "";
+    # Nothing that differs between installations (no name, date or path):
+    # the MD5 of this file is the schema's version, and the same schema
+    # must get the same version wherever it is frozen (1.0.0-rc3).
     $content .= "# chewBBACA schema version marker\n";
-    $content .= "# Schema:    $schema_name\n";
-    $content .= "# Generated: " . strftime("%Y-%m-%d %H:%M:%S", localtime) . "\n";
     $content .= "# Loci:      $fp->{loci}\n";
     $content .= "# Method:    sorted-loci-name-size fingerprint, then the active filter and its MD5\n";
     $content .= "#\n";
@@ -34978,6 +35049,14 @@ sub _cmd_freeze_databases {
             my $body = _chewbbaca_marker_body($marker_path);
             if ( $fp && $body && join("\n", @$body) ne join("\n", @{ $fp->{lines} }) ) {
                 log_message("NOTICE: [$name] schema or filter changed since the marker was made -- regenerating it (new frozen version)");
+                unlink $marker_path;
+            }
+            elsif ( _chewbbaca_marker_has_local_header($marker_path) ) {
+                # Markers made before 1.0.0-rc3 hold the schema name and the
+                # time of freezing, so the same schema got another version in
+                # every installation.
+                log_message("NOTICE: [$name] the marker holds the time it was made (before 1.0.0-rc3) -- regenerating it. "
+                          . "The schema gets a new version ID, the same in every installation; the schema itself is unchanged");
                 unlink $marker_path;
             }
         }
@@ -41838,10 +41917,19 @@ sub show_db_info {
     my $type = $R_cfg->{$program}->{db_test_type} // 'file';
         
    if( -f $test) {
+      # The size and date are those of the file the database is recognised
+      # by, which is not always the database itself (AMRFinderPlus:
+      # version.txt, 13 bytes) -- so the file is named. A version.txt holds
+      # the version.
       my $db_size = human_readable_filesize($test);
       my $db_date = file_date($test);
       my $db_version = checkversion_db($test,"$program");
-      log_message("NOTICE: $program: Database size $db_size, date $db_date, version $db_version", "green");
+      if ( $test =~ m{/version\.txt$} && open( my $vfh, '<', $test ) ) {
+          my $line = <$vfh> // ""; close $vfh;
+          $line =~ s/\s+$//;
+          $db_version = $line if $line =~ /^[\w.:-]{1,40}$/;
+      }
+      log_message("NOTICE: $program: database found (" . basename($test) . ", $db_size, dated $db_date), version $db_version", "green");
    
    }
 

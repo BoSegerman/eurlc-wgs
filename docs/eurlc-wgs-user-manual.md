@@ -520,7 +520,7 @@ step as the reason. `--resume` runs only what is missing, for all samples
 of the run, and rebuilds the reports; the finished results are kept.
 
 - **Time limit** (`timeout`): give the tool more time in the same command
-  (`skesa.timeout=6h`; assemblers have 2 hours by default).
+  (`skesa.timeout=6h`; by default SPAdes has 2 hours and SKESA 4).
 - **Exit code**: look in `log/stderr.txt` for the tool's own message first.
   If the cause was temporary (a full disk, the computer was busy), the same
   `--resume` is enough.
@@ -730,8 +730,8 @@ eurlc-wgs spades.timeout=3h
 
 ### Give a slow step more time
 
-Every tool run has a time limit: 30 minutes, 2 hours for assemblers and
-10 minutes for FastQC (which sometimes hangs).
+Every tool run has a time limit: 30 minutes, 2 hours for SPAdes and
+Shovill, 4 hours for SKESA and 10 minutes for FastQC (which sometimes hangs).
 A step that reaches it is stopped and reported; the run continues.
 
 ```bash
@@ -1456,9 +1456,17 @@ This version, 1.0.0-rc2.
 - Species thresholds cannot be given on the command line; change them in
   the config file and run `summarize`.
 - Some databases are downloaded in their latest version (ResFinder,
-  PointFinder, VirulenceFinder, PlasmidFinder, AMRFinderPlus), so two
-  installations made at different times can differ. Freeze the databases
-  after installing; the frozen version is what a validation refers to.
+  PointFinder, VirulenceFinder, PlasmidFinder, the fastMLST database), so
+  two installations made at different times can differ. Freeze the
+  databases after installing; the frozen version is what a validation
+  refers to.
+- The AMRFinderPlus database and the schemes of `mlst` are inside their
+  conda environments and are not frozen: AMRFinderPlus gets the latest
+  database on the day the environment is made. Its version is in the run
+  log (`Database version:` in `log/stderr.txt`).
+- The fastMLST database is in the database folder (`fastmlst/pubmlst`),
+  not in `~/.cache/fastmlst` where fastMLST keeps it by default: every
+  user of an installation types against the same, frozen copy.
 - Folder paths with spaces or quotes are not supported (the run stops and
   says so).
 - The genome size estimate from the reads (only for a species without a

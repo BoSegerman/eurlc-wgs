@@ -2,7 +2,7 @@
 
 Changes that a user of the pipeline can notice. The newest version first.
 
-## 1.0.0-rc3 (24 November 2026)
+## 1.0.0-rc3 (25 November 2026)
 
 ### Changed
 
@@ -59,6 +59,35 @@ Changes that a user of the pipeline can notice. The newest version first.
   `--resume` command that runs the failed steps again. Results made with an
   earlier version show these samples as PASS in `qc_status`; a comparison
   with such a reference reports the difference.
+- SKESA's time limit is 4 hours (was 2).
+- Main report: the links to the matrix viewer, the downloads and the AMR
+  profile viewer have no symbol before the text (the PDF showed an empty
+  box). The QC note "Assess mash-screen status do not pass" reads "Mash
+  screen status is not PASS". The start-up line about a tool's database
+  names the file it measures, and gives the AMRFinderPlus database
+  version (it said "Database size 13.00 B").
+- **The fastMLST database is part of the installation.** fastMLST kept
+  its PubMLST database in `~/.cache/fastmlst/pubmlst`: one copy per user,
+  downloaded at that user's first run, outside the conda environment, not
+  frozen, not sealed and not in the report. It is now installed by
+  `--setup` in `<db>/fastmlst/pubmlst`, frozen and sealed like the other
+  databases, and listed under Database versions. **Run `--setup`, then
+  `--freeze-databases`** (and `--generate-seal`). A run stops at start
+  when the database is missing or not complete; `~/.cache/fastmlst` is no
+  longer used and can be removed.
+- **A cgMLST schema gets the same version ID in every installation.** The
+  ID is the MD5 of the schema's marker file, and that file held the schema
+  name and the time of freezing, so two installations with the same schema
+  showed two versions. The marker now holds only the loci (name and size)
+  and the filter. **Run `--freeze-databases` again** (and `--generate-seal`
+  for a sealed installation): markers from earlier versions are made
+  again and every schema gets a new ID. Until then an installation keeps
+  working with its old ID. The schemas and the results are unchanged.
+- `eurlc-wgs-inspect compare`: when the reference and the run have the same
+  loci under two schema IDs, the results are compared locus by locus, and
+  the ID difference is one line per sample (`cgmlst.reported.schema`; name
+  it with `--expect` when it is known). Before, every cgMLST value was
+  listed as missing on one side.
 - **A mixture of two strains of the same species is CRITICAL for
   *Campylobacter*** when more than 350 1-kb windows have mixed positions
   (`critical_contamination_mixed_windows`; about a fifth of the genome, the

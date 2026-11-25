@@ -417,6 +417,8 @@ check "  ... not judged when one of them gave no species" \
 check "  ... and the default is a WARNING, not CRITICAL" bash -c "grep -q 'warning_taxonomy_species_disagree *=> *\">0\"' '$SCRIPT' && ! grep -q '^ *critical_taxonomy_species_disagree *=>' '$SCRIPT'"
 check "strain mixture: Campylobacter has WARNING >100 and CRITICAL >350" bash -c "grep -q 'warning_contamination_mixed_windows *=> *\">100\"' '$SCRIPT' && grep -q 'critical_contamination_mixed_windows *=> *\">350\"' '$SCRIPT'"
 check "parallel: no command template writes a temporary file with the same name for every sample" bash -c "! grep -nE '__OUTDIR__/tmp[A-Za-z0-9_.]*\\.(fastq\\.gz|txt)' '$SCRIPT'"
+check "fastMLST: its database is a managed database (installed under the database folder, in db_freeze) and is never read from ~/.cache" \
+      bash -c "grep -q 'db_test *=> *\"__DB__/fastmlst/pubmlst/mlst.fasta\"' '$SCRIPT' && grep -q '\[ \"fastmlst\", *\"fastmlst\", *\"pubmlst/mlst.fasta\"' '$SCRIPT' && grep -q 'command = fastmlst_home_wrap' '$SCRIPT'"
 
 # --- validated species of the configuration ---------------------------------
 echo "Validated species"
@@ -546,8 +548,8 @@ check "existing installation: recognised; a species is added, none removed" \
       bash -c "grep -q 'Found an existing installation' '$T/setup2.out' && grep -q '^species_scope = Campylobacter, Salmonella, Listeria$' '$DBN/eurlc-wgs.config'"
 
 # everything in place: databases and the three schemas
-mkdir -p "$DBN/kraken2" "$DBN/mash" "$DBN/resfinder/resfinder_db"
-for f in kraken2/hash.k2d kraken2/database150mers.kmer_distrib mash/refseq.genomes.k21s1000.msh resfinder/resfinder_db/all.fsa; do echo x > "$DBN/$f"; done
+mkdir -p "$DBN/kraken2" "$DBN/mash" "$DBN/resfinder/resfinder_db" "$DBN/fastmlst/pubmlst"
+for f in kraken2/hash.k2d kraken2/database150mers.kmer_distrib mash/refseq.genomes.k21s1000.msh resfinder/resfinder_db/all.fsa fastmlst/pubmlst/mlst.fasta; do echo x > "$DBN/$f"; done
 for n in CAMPISO-PubMLST-8 chewie_ns_salmonella chewie_ns_listeria; do
     mkdir -p "$DBN/chewbbaca/schemas/$n"; echo ">a" > "$DBN/chewbbaca/schemas/$n/l1.fasta"; printf '[schema]\nname=%s\n' "$n" > "$DBN/chewbbaca/schemas/$n/schema.ini"
 done
@@ -575,6 +577,8 @@ check "install.sh: --species is refused for a sealed database folder" \
       bash -c "touch '$DBN/config_seal.ini'; out=\$(bash '$IS' --species=listeria --database='$DBN' 2>&1); rc=\$?; rm '$DBN/config_seal.ini'; [[ \$rc == 1 ]] && grep -q 'sealed installation' <<<\"\$out\""
 
 SD=$(perl "$(dirname "$0")/unit/schema_display.pl" "$SCRIPT" 2>&1)
+check "schema version: the same schema gets the same ID in every installation (no name or date in the marker)" bash -c "grep -qP '^marker-same-everywhere\t1$' <<<\"\$0\" && grep -qP '^marker-no-date-or-name\t1$' <<<\"\$0\" && grep -qP '^marker-new-not-old-format\t0$' <<<\"\$0\"" "$SD"
+check "schema version: a marker made before rc3 is recognised and made again at freeze" bash -c "grep -qP '^marker-old-format-found\t1$' <<<\"\$0\"" "$SD"
 check "report: a clustering result shows the schema's name and loci, the frozen version as a detail (not as the name)" \
       bash -c "grep -q '^live	LIVE-1 (5 loci)$' <<<'$SD' && grep -q '^frozen	FROZEN-8 (3 loci, filter cg.txt; frozen version 0123456789abcdef0123456789abcdef)$' <<<'$SD' && grep -q '^html	<b>FROZEN-8</b>' <<<'$SD'"
 check "  ... also when only the reports are rebuilt (summarize): the frozen copy is found, and its own filter counted" \

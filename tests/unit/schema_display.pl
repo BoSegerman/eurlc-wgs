@@ -8,7 +8,7 @@ use File::Basename qw(basename dirname);
 use File::Path qw(make_path);
 my $src = do { local $/; open my $f, '<', $ARGV[0] or die "cannot read the script\n"; <$f> };
 my $code = "";
-for my $n (qw(clustering_schema_info clustering_schema_text clustering_schema_html _write_schema_ini report_database_rows)) {
+for my $n (qw(clustering_schema_info clustering_schema_text clustering_schema_html _write_schema_ini report_database_rows _chewbbaca_schema_fingerprint _generate_chewbbaca_schema_marker _chewbbaca_marker_has_local_header)) {
     my ($sub) = $src =~ /^(sub \Q$n\E \{.*?^\})/ms or die "sub $n not found\n";
     $code .= "$sub\n";
 }
@@ -71,3 +71,22 @@ _write_schema_ini( "$d/live", { name => "LIVE-1", label => "Caf\xc3\xa9 schema",
 my $ini = do { local $/; open my $f, '<:raw', "$d/live/schema.ini" or die; <$f> };
 print "ini-header-ascii\t", ( ( split /\n/, $ini )[0] =~ /^[\x20-\x7e]+$/ ? 1 : 0 ), "\n";
 print "ini-not-double-encoded\t", ( $ini =~ /Caf\xc3\xa9 schema/ && $ini !~ /\xc3\x83/ ? 1 : 0 ), "\n";
+
+# Schema version marker: the same schema gives the same bytes under another
+# name, in another folder and at another time; a marker made before
+# 1.0.0-rc3 (name and date in the header) is recognised
+use Digest::MD5 qw(md5_hex);
+for my $n ( "one", "two" ) {
+    mkdir "$d/m_$n";
+    for my $l ( "L1.fasta", "L2.fasta" ) { open my $f, '>', "$d/m_$n/$l" or die; print $f ">a\nACGT\n"; close $f; }
+}
+_generate_chewbbaca_schema_marker( "$d/m_one", "NAME-A" );
+sleep 1;
+_generate_chewbbaca_schema_marker( "$d/m_two", "another name" );
+my @mk = map { my $p = "$d/m_$_/schema_version.md5"; local $/; open my $f, '<:raw', $p or die; scalar <$f> } qw(one two);
+print "marker-same-everywhere\t", ( md5_hex( $mk[0] ) eq md5_hex( $mk[1] ) ? 1 : 0 ), "\n";
+print "marker-no-date-or-name\t", ( $mk[0] !~ /Generated|NAME-A|\d{4}-\d\d-\d\d/ ? 1 : 0 ), "\n";
+print "marker-new-not-old-format\t", _chewbbaca_marker_has_local_header("$d/m_one/schema_version.md5"), "\n";
+open my $of, '>', "$d/m_two/schema_version.md5" or die;
+print $of "# chewBBACA schema version marker\n# Schema:    x\n# Generated: 2026-11-20 10:00:00\n# Loci:      2\n#\nL1.fasta:8\nL2.fasta:8\n"; close $of;
+print "marker-old-format-found\t", _chewbbaca_marker_has_local_header("$d/m_two/schema_version.md5"), "\n";

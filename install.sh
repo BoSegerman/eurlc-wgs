@@ -543,7 +543,7 @@ if [[ "${RUN_SETUP}" -eq 1 ]]; then
     echo "    eurlc-wgs"
     echo "(or from anywhere: eurlc-wgs datadir=<folder with FASTQ files>)"
     echo
-    echo "Help:  eurlc-wgs --help   (user manual: docs/eurlc-wgs-user-manual.md)"
+    echo "Help:  eurlc-wgs --help   (user manual: eurlc-wgs --manual says where it is)"
 else
     echo
     echo "Tool environments, databases and cgMLST schemas are not yet installed. Complete with:"

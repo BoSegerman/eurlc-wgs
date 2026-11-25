@@ -770,8 +770,8 @@ missing, for all samples of the run, and rebuilds the reports; the
 finished results are kept.</p>
 <ul>
 <li><strong>Time limit</strong> (<code>timeout</code>): give the tool
-more time in the same command (<code>skesa.timeout=6h</code>; by default
-SPAdes has 2 hours and SKESA 4).</li>
+more time in the same command (<code>skesa.timeout=6h</code>; assemblers
+have 2 hours by default).</li>
 <li><strong>Exit code</strong>: look in <code>log/stderr.txt</code> for
 the tool&#39;s own message first. If the cause was temporary (a full disk,
 the computer was busy), the same <code>--resume</code> is enough.</li>
@@ -955,10 +955,9 @@ eurlc-wgs spades.timeout=3h</code></pre>
 setting stops the run. Note that <code>arguments</code> replaces the
 whole default argument string.</p>
 <h3 id="give-a-slow-step-more-time">Give a slow step more time</h3>
-<p>Every tool run has a time limit: 30 minutes, 2 hours for SPAdes and
-Shovill, 4 hours for SKESA and 10 minutes for FastQC (which sometimes
-hangs). A step that reaches it is stopped and reported; the run
-continues.</p>
+<p>Every tool run has a time limit: 30 minutes, 2 hours for assemblers
+and 10 minutes for FastQC (which sometimes hangs). A step that reaches
+it is stopped and reported; the run continues.</p>
 <pre class="bash"><code>eurlc-wgs spades.timeout=4h        # one tool
 eurlc-wgs timeout=1h               # the general limit
 eurlc-wgs kraken2.timeout=0        # no limit</code></pre>
@@ -1835,8 +1834,9 @@ the other computer:</p>
 <li>Copy the database folder of the sealed installation (config file,
 <code>db_freeze.config</code>, <code>conda_manifest.ini</code>,
 <code>config_seal.ini</code>, <code>conda_envs/</code>,
-<code>frozen_dbs/</code>, <code>installation_check/</code>) to
-<code>~/eurlc-wgs_db</code>.</li>
+<code>frozen_dbs/</code>, <code>installation_check/</code>, and
+<code>known_databases.tsv</code> and <code>known_instruments.tsv</code>
+if you have them) to <code>~/eurlc-wgs_db</code>.</li>
 <li>Install the same pipeline version from its source folder:
 <code>./install.sh</code> (add <code>--database=DIR</code> if the
 database folder is elsewhere). <code>install.sh</code> makes the

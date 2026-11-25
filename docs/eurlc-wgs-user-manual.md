@@ -520,7 +520,7 @@ step as the reason. `--resume` runs only what is missing, for all samples
 of the run, and rebuilds the reports; the finished results are kept.
 
 - **Time limit** (`timeout`): give the tool more time in the same command
-  (`skesa.timeout=6h`; by default SPAdes has 2 hours and SKESA 4).
+  (`skesa.timeout=6h`; assemblers have 2 hours by default).
 - **Exit code**: look in `log/stderr.txt` for the tool's own message first.
   If the cause was temporary (a full disk, the computer was busy), the same
   `--resume` is enough.
@@ -730,8 +730,8 @@ eurlc-wgs spades.timeout=3h
 
 ### Give a slow step more time
 
-Every tool run has a time limit: 30 minutes, 2 hours for SPAdes and
-Shovill, 4 hours for SKESA and 10 minutes for FastQC (which sometimes hangs).
+Every tool run has a time limit: 30 minutes, 2 hours for assemblers and
+10 minutes for FastQC (which sometimes hangs).
 A step that reaches it is stopped and reported; the run continues.
 
 ```bash
@@ -1331,7 +1331,8 @@ exact package list of every environment in the seal to
 
 1. Copy the database folder of the sealed installation (config file,
    `db_freeze.config`, `conda_manifest.ini`, `config_seal.ini`,
-   `conda_envs/`, `frozen_dbs/`, `installation_check/`) to
+   `conda_envs/`, `frozen_dbs/`, `installation_check/`, and
+   `known_databases.tsv` and `known_instruments.tsv` if you have them) to
    `~/eurlc-wgs_db`.
 2. Install the same pipeline version from its source folder:
    `./install.sh` (add `--database=DIR` if the database folder is

@@ -59,7 +59,22 @@ Changes that a user of the pipeline can notice. The newest version first.
   `--resume` command that runs the failed steps again. Results made with an
   earlier version show these samples as PASS in `qc_status`; a comparison
   with such a reference reports the difference.
-- SKESA's time limit is 4 hours (was 2).
+- **SKESA: the assembly graph can no longer cost the assembly.** The
+  graph step (`gfa_connector`) ran between the assembly and the copy of
+  the result, with every core of the computer and no time limit of its
+  own. On a 68-core workstation it hung for one sample until SKESA's
+  2-hour limit, and the finished assembly was lost with it (the sample
+  became CRITICAL). The assembly is now copied first; the graph step
+  gets the same number of threads as SKESA and 10 minutes, and when it
+  fails or runs out of time the sample only lacks the SKESA graph.
+- Start of a run: a verified seal is shown (`Config seal [name]: SEAL
+  VERIFIED`); before, only a broken seal gave a line.
+- Setup and freeze: Bracken is no longer reported as "database
+  installed" (it has none of its own); the Listeria schema is labelled
+  cgMLST; the fastMLST database gets a source label when it is installed;
+  `--verify-databases` no longer suggests naming databases that have a
+  git commit as their label, and says "full check" instead of "once";
+  several log lines ran into the next one.
 - Main report: the links to the matrix viewer, the downloads and the AMR
   profile viewer have no symbol before the text (the PDF showed an empty
   box). The QC note "Assess mash-screen status do not pass" reads "Mash

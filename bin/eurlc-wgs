@@ -1715,7 +1715,7 @@ $rundata{config}{defaults} = {
             package_name  => "bracken",
             db_test   => "__DB__/kraken2/database150mers.kmer_distrib",
             db_path   => "__DB__/kraken2",
-            install_db => "echo 'bracken depend on a correct kraken2 database installation. You  may have to reinstall the kraken2 database'",
+            install_db => "echo 'Bracken has no database of its own: its files (database*mers.kmer_distrib) come with the Kraken2 database, which is installed below.'",
     },
     krakentools => {
             version_check => "loose",
@@ -9203,7 +9203,7 @@ sub test_mash_screen {
      my $db_size = human_readable_filesize($testfile_mashscreen);
      my $db_date = file_date($testfile_mashscreen);
      my $db_version = checkversion_db($testfile_mashscreen,"Mashscreen");
-     log_message("NOTICE: Mash screen: Database size $db_size, date $db_date, version $db_version", "green");
+     log_message("NOTICE: mashscreen: database found (" . basename($testfile_mashscreen) . ", $db_size, dated $db_date), version $db_version", "green");
      $R_cfg->{mashscreen}->{db_path} = $testfile_mashscreen;
   }
 
@@ -10121,9 +10121,7 @@ $runstep_name = "skesa";
 $runstep{$runstep_name} = {
       # Assemblies of larger genomes / long reads can take well over the
       # general timeout; this is only a safety net against a hung run.
-      # 4 hours (2 until 1.0.0-rc3): SKESA's time varies much more between
-      # samples than SPAdes' (D1 on a laptop: median 52 s, one sample 597 s).
-      timeout    => "240m",
+      timeout    => "120m",
       # Resources for parallel scheduler (§ parallel_mode=on)
       resources  => { threads => $R_cfg->{general}{threads}, ram_gb => 4 },  # typical bacterial isolate at ~100X; raise with [<tool>] parallel_ram_gb for large genomes/high depth
 
@@ -10147,6 +10145,15 @@ $runstep{$runstep_name} = {
 # TEMPLATES---------------------------------
 
 
+# The graph (gfa_connector) is made after the assembly has been copied to its
+# place, with a time limit of its own, and never fails the step. Before
+# 1.0.0-rc3 it ran between the assembly and the copy, with every core of the
+# computer and no limit: on a 68-core workstation it hung after "Cleaning"
+# for one sample (D1_040, Nov 2026) until SKESA's 2-hour limit, and the
+# finished assembly was lost with it. When it fails or runs out of time the
+# sample has no SKESA graph (postprocess_skesa says so), nothing else.
+our $SKESA_GRAPH_TIMEOUT = "10m";
+
 $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     mkdir -p __OUTDIR__/__BASE__
     __NEWCOMMAND__
@@ -10157,14 +10164,15 @@ $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
        > __OUTDIR__/__BASE__/__BASE__.fasta 
        __HIDE-STDERR__
     __NEWCOMMAND__   
-    { conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
+    cp __OUTDIR__/__BASE__/__BASE__.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta
+    __NEWCOMMAND__   
+    { timeout -k 30s $SKESA_GRAPH_TIMEOUT conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
        --reads __R1TD__,__R2TD__ 
        --contigs __OUTDIR__/__BASE__/__BASE__.fasta 
        --gfa __OUTDIR__/__BASE__/__BASE__.gfa 
        --csv __OUTDIR__/__BASE__/__BASE__.csv 
-       __HIDE-OUTPUT__ || true ; }
-    __NEWCOMMAND__   
-    cp __OUTDIR__/__BASE__/__BASE__.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta
+       --cores __THREADS__ 
+       __HIDE-OUTPUT__ || rm -f __OUTDIR__/__BASE__/__BASE__.gfa __OUTDIR__/__BASE__/__BASE__.csv ; }
 CMD
 
 $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
@@ -10177,14 +10185,15 @@ $runstep{$runstep_name}{cmd_template}{SE} = wrap_cmd_strict(<<CMD);
        > __OUTDIR__/__BASE__/__BASE__.fasta 
        __HIDE-STDERR__
     __NEWCOMMAND__   
-    { conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
+    cp __OUTDIR__/__BASE__/__BASE__.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta
+    __NEWCOMMAND__   
+    { timeout -k 30s $SKESA_GRAPH_TIMEOUT conda run -n $R_cfg->{skesa}->{env} --no-capture-output gfa_connector 
        --reads __SETD__ 
        --contigs __OUTDIR__/__BASE__/__BASE__.fasta 
        --gfa __OUTDIR__/__BASE__/__BASE__.gfa 
        --csv __OUTDIR__/__BASE__/__BASE__.csv 
-       __HIDE-OUTPUT__ || true ; }
-    __NEWCOMMAND__   
-    cp __OUTDIR__/__BASE__/__BASE__.fasta __DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.skesa.fasta
+       --cores __THREADS__ 
+       __HIDE-OUTPUT__ || rm -f __OUTDIR__/__BASE__/__BASE__.gfa __OUTDIR__/__BASE__/__BASE__.csv ; }
 CMD
 
 $runstep{$runstep_name}{cmd_template}{FASTA} = "";
@@ -10217,7 +10226,7 @@ sub preprocess_skesa {
     # which only makes the graph and costs another pass over the reads.
     if ( defined $command && lc( $R_cfg->{cleanup}{assembly_graphs} // "gzip" ) eq "remove"
          && !is_disabled( $R_cfg->{cleanup}{assembler_workfiles} // 1 ) ) {
-        $command =~ s/\{ conda run -n \S+ --no-capture-output gfa_connector .*?__HIDE-OUTPUT__ \|\| true ; \}\s*&&\s*//
+        $command =~ s/\s*&&\s*\{ timeout -k \S+ \S+ conda run -n \S+ --no-capture-output gfa_connector .*?__HIDE-OUTPUT__ \|\| rm -f \S+ \S+ ; \}//
             or log_message("ERROR: [PIPELINE BUG] skesa: the gfa_connector command was not found in the command template", "red");
     }
 
@@ -10273,8 +10282,18 @@ sub postprocess_skesa {
 
 
     my $assemblystats = analyze_assembly_stats($resultfile);
-    
 
+    # The graph is extra: say so when it could not be made (see $SKESA_GRAPH_TIMEOUT).
+    {
+        my $work = fill_placeholders( $runstep{$runstep_name}{output_dir} . "/__BASE__", $samplenr, $runstep_name );
+        my $base = fill_placeholders( "__BASE__", $samplenr, $runstep_name );
+        my $graphs_wanted = lc( $R_cfg->{cleanup}{assembly_graphs} // "gzip" ) ne "remove"
+                            || is_disabled( $R_cfg->{cleanup}{assembler_workfiles} // 1 );
+        if ( $graphs_wanted && -d $work && -s $resultfile && !-s "$work/$base.gfa" && !-s "$work/$base.gfa.gz" ) {
+            log_message("NOTICE: Sample $sample_name: no SKESA assembly graph -- gfa_connector failed or ran longer than $SKESA_GRAPH_TIMEOUT. "
+                      . "The assembly itself is complete and is used as usual");
+        }
+    }
 
     $R_samples->[$samplenr]{results}{$runstep_name} = $assemblystats;
     
@@ -34057,6 +34076,7 @@ sub _verify_config_seal_files {
         return $S_SEAL_RESULT = { status => "SEAL VERIFIED WITH OVERRIDES", name => $name,
                                   detail => $detail, mismatches => [], overrides => \@overrides };
     }
+    log_message("NOTICE: Config seal [$name]: SEAL VERIFIED", "green");
     return $S_SEAL_RESULT = { status => "SEAL VERIFIED", name => $name, detail => join("\n", @notes),
                               mismatches => [], overrides => [] };
 }
@@ -34655,7 +34675,7 @@ sub _setup_offer_db_install {
     $cmd =~ s/__CONDABASE__/$conda_base/g;
     log_message("NOTICE:   Running: $cmd");
     if ( system($cmd) == 0 ) {
-        log_message("NOTICE:   ✓  $label database installed", "green");
+        log_message( $cmd =~ /^echo / ? "NOTICE:   -  $label: nothing to install here" : "NOTICE:   ✓  $label database installed", "green");
         write_db_source_file( $db_path, $cmd );   # B12
         return 1;
     }
@@ -34827,7 +34847,7 @@ sub _cmd_verify_databases {
         log_message( sprintf( "NOTICE: %-20s %-14s %s", $name, $e->{status}, $e->{version} ) );
         log_message( sprintf( "NOTICE: %-20s fingerprint %s", "", $e->{fingerprint} ) );
         push @unknown, "$name\t$e->{fingerprint}\t*\t<label, e.g. what was downloaded and when>"
-            if $e->{version} eq "unknown version" || $e->{version} =~ /\(installed /;
+            if $e->{version} eq "unknown version" || ( $e->{version} =~ /\(installed / && $e->{version} !~ / \@[0-9a-f]{7,}/ );
     }
     if (@unknown) {
         log_message("NOTICE:");
@@ -34889,8 +34909,8 @@ sub _cmd_freeze_databases {
         $R_cfg->{general}{db_freeze_config} = $db_path;
 
         log_message("NOTICE: A default db_freeze.config was created at [$db_path].");
-        log_message("NOTICE: Review it and adjust paths before rerunning --freeze-databases if needed.");
-        log_message("NOTICE: Continuing with freeze using the newly created config...");
+        log_message("NOTICE: (To use other paths: stop at the question below, edit the file and run --freeze-databases again.)");
+        log_message("NOTICE: Continuing with the freeze, using the new db_freeze.config");
     }
 
     my $dbs = load_databases_config($db_path);
@@ -35061,7 +35081,7 @@ sub _cmd_freeze_databases {
             }
         }
         if ($marker eq "schema_version.md5" && !-f $marker_path) {
-            log_message("NOTICE: [$name] generating schema version marker...");
+            log_message("NOTICE: [$name] making the schema version marker");
             _generate_chewbbaca_schema_marker($root, $name)
                 or do {
                     log_message("WARNING: [$name] could not generate schema marker -- skipping", "yellow");
@@ -35175,7 +35195,7 @@ sub _cmd_freeze_databases {
     # Phase A: databases that need copying
     for my $db (@to_freeze) {
         my $target = $db->{frozen_dir};
-        log_message("NOTICE: Freezing $db->{name}: $db->{root} → $target ...");
+        log_message("NOTICE: Freezing $db->{name}: $db->{root} → $target");
 
         ensure_dir("$frozen_root/$db->{name}");
 
@@ -36292,7 +36312,7 @@ sub _install_one_schema {
 
     # ── PrepExternalSchema ────────────────────────────────────────────────────
     # Uses ensure_schema_prepared() which handles short/ dir detection.
-    log_message("NOTICE: Running PrepExternalSchema to prepare the schema...\n");
+    log_message("NOTICE: Checking that the schema is prepared for chewBBACA (PrepExternalSchema runs only when it is not)");
     unless (ensure_schema_prepared($schema_dir, $schema_name)) {
         log_message("WARNING: PrepExternalSchema failed — schema may not be usable.", "yellow");
         # Don't abort — the schema is on disk; user may fix manually.
@@ -36726,7 +36746,7 @@ sub _cmd_install_efsa_schemas {
         my $tmpdir = File::Temp::tempdir(CLEANUP => 1);
         $clone_target = "$tmpdir/$EFSA_REPO_NAME";
 
-        log_message("NOTICE: Cloning EFSA repository (shallow clone, this may take a minute)...");
+        log_message("NOTICE: Cloning EFSA repository (shallow clone, this may take a minute)");
         # Use list form — no shell involved, no path escaping issues.
         # Git prints progress to stderr which goes to the terminal (desirable).
         my $clone_rc = system("git", "clone", "--depth", "1", "--no-tags",
@@ -36796,7 +36816,7 @@ sub _cmd_install_efsa_schemas {
                                    sort keys %catalog;
                 }
                 if ($cat_entry) {
-                    log_message("NOTICE: Installing schema [$sn] from chewieNS...");
+                    log_message("NOTICE: Installing schema [$sn] from chewieNS");
                     $schema_ok = _install_one_schema($cat_entry);
                 } else {
                     log_message("WARNING: Schema [$sn] not found in catalog.", "yellow");
@@ -36956,7 +36976,7 @@ sub _cmd_install_efsa_schemas {
 sub _install_efsa_campylobacter {
     my ($src, $target, $schema_name) = @_;
 
-    log_message("NOTICE: Installing Campylobacter schema [$schema_name]...");
+    log_message("NOTICE: Installing Campylobacter schema [$schema_name]");
 
     system("cp", "-r", $src, $target) == 0
         or do { log_message("ERROR: Failed to copy schema: $!", "red"); return 0; };
@@ -37049,7 +37069,7 @@ sub _efsa_ensure_builtin_catalog {
 
     {
       "name": "chewie_ns_listeria",
-      "label": "Listeria monocytogenes wgMLST (Chewie-NS)",
+      "label": "Listeria monocytogenes cgMLST (Chewie-NS)",
       "description": "Full wgMLST schema for Listeria monocytogenes from Chewie-NS. The schema is already a cgMLST set; no locus filter is applied. An ID mapping (INNUENDO names) is bundled for EFSA upload compatibility.",
       "version": "1",
       "species": ["Listeria monocytogenes"],
@@ -41461,7 +41481,8 @@ sub md5_file_cached {
         my ($m, $sz, $mt) = split /\t/, $l;
         return $m if defined $mt && $m =~ /^[0-9a-f]{32}$/ && $sz == $size && $mt == $mtime;
     }
-    log_message("NOTICE: Computing MD5 of " . basename($path) . sprintf(" (%.1f GB) -- once, remembered for later runs", $size / 1e9))
+    log_message("NOTICE: Computing MD5 of " . basename($path) . sprintf(" (%.1f GB)", $size / 1e9)
+              . ( $o{full} ? " -- full check" : " -- once, remembered for later runs" ))
         if $size > 500_000_000;
     my $md5 = md5_file($path);
     return $md5 if $md5 =~ /^ERROR:/;
@@ -41542,7 +41563,7 @@ sub db_source_label {
     while ( my $l = <$fh> ) { chomp $l; $v{$1} = $2 if $l =~ /^(\w+)\s*=\s*(.*)$/; }
     close $fh;
     return undef unless $v{url};
-    my $name = basename( $v{url} );
+    my $name = $v{url} =~ m{^https?://} ? basename( $v{url} ) : $v{url};
     $name .= " \@$v{commit}" if $v{commit};
     return "$name (installed " . ( $v{installed} // "?" ) . ")";
 }
@@ -41553,6 +41574,8 @@ sub write_db_source_file {
     my ($db_path, $cmd) = @_;
     return unless defined $db_path && $db_path ne "" && -d $db_path;
     my ($url) = ( $cmd // "" ) =~ m{(https?://[^\s;'"]+)};
+    # fastMLST downloads its PubMLST database itself: no URL in the command
+    $url = "PubMLST database, downloaded with fastmlst --update-mlst" if !$url && ( $cmd // "" ) =~ /fastmlst --update-mlst/;
     return unless $url;
     my $commit = "";
     for my $d ( $db_path, glob("$db_path/*") ) {

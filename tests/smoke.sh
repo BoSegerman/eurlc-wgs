@@ -419,6 +419,9 @@ check "strain mixture: Campylobacter has WARNING >100 and CRITICAL >350" bash -c
 check "parallel: no command template writes a temporary file with the same name for every sample" bash -c "! grep -nE '__OUTDIR__/tmp[A-Za-z0-9_.]*\\.(fastq\\.gz|txt)' '$SCRIPT'"
 check "fastMLST: its database is a managed database (installed under the database folder, in db_freeze) and is never read from ~/.cache" \
       bash -c "grep -q 'db_test *=> *\"__DB__/fastmlst/pubmlst/mlst.fasta\"' '$SCRIPT' && grep -q '\[ \"fastmlst\", *\"fastmlst\", *\"pubmlst/mlst.fasta\"' '$SCRIPT' && grep -q 'command = fastmlst_home_wrap' '$SCRIPT'"
+check "SKESA: the assembly is copied before the graph step, which has its own time limit and thread count" \
+      bash -c "perl -0ne 'exit( /skesa\\.fasta\\s+__NEWCOMMAND__\\s+\\{ timeout -k 30s \\\$SKESA_GRAPH_TIMEOUT conda run .*?gfa_connector.*?--cores __THREADS__/s ? 0 : 1 )' '$SCRIPT' && grep -q 'timeout    => \"120m\"' '$SCRIPT'"
+check "start of a run: a verified seal gives a line" grep -q 'Config seal \[\$name\]: SEAL VERIFIED' "$SCRIPT"
 
 # --- validated species of the configuration ---------------------------------
 echo "Validated species"

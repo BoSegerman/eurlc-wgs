@@ -183,12 +183,17 @@ På valideringsdatorn, med exakt den version som releasas:
 - [ ] `eurlc-wgs --freeze-databases`
 - [ ] `eurlc-wgs --verify-databases` — inga fel; lägg okända versioner i
       `known_databases.tsv` (lokalt, och i `assets/` till nästa release).
-- [ ] Valideringen enligt metodbeskrivningen.
+- [ ] Sätt `validated_species` i config-filen (före förseglingen).
 - [ ] `eurlc-wgs --generate-seal="<namn>"`, fyll i `created_by` och
       `description` i `config_seal.ini`.
-- [ ] En körning visar `SEAL VERIFIED`.
-- [ ] Arkivera de fyra filerna (`eurlc-wgs.config`, `db_freeze.config`,
-      `conda_manifest.ini`, `config_seal.ini`) under förseglingens namn, och
+- [ ] Valideringen enligt metodbeskrivningen, med den förseglade
+      installationen: varje körning visar `SEAL VERIFIED` (vid start och i
+      rapporten). Förseglingen görs alltså före valideringskörningarna.
+- [ ] Kontrollset: `eurlc-wgs --make-installation-check=<set> from=<dataset>
+      samples=<id,...>` (kräver `SEAL VERIFIED`).
+- [ ] Arkivera filerna (`eurlc-wgs.config`, `db_freeze.config`,
+      `conda_manifest.ini`, `config_seal.ini`, `known_databases.tsv`,
+      `known_instruments.tsv`, `conda_envs/`) under förseglingens namn, och
       notera pipelineversion, git-tagg och (om den finns) DOI.
 
 ## 8. Git och GitHub

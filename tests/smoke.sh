@@ -306,6 +306,9 @@ if command -v python3 > /dev/null && [[ -f "$VAL" ]]; then
           bash -c "[[ $RC == 1 ]] && grep -q 'Nope: no such sample' '$T/mk1.out' && grep -q '011: fits more than one sample (SET_D1_011, SET_D2_011)' '$T/mk1.out'"
     run "$T/mk2.out" --make-installation-check=M1 from="$DS" samples=D1_011 --assume-yes --allow-unsealed
     check "  ... a sample without read files stops it" bash -c "[[ $RC == 1 ]] && grep -q 'no read files in .* for: SET_D1_011' '$T/mk2.out'"
+    run "$T/mk2b.out" --make-installation-check=M1 from="$DS/fastq" samples=D1_011 --assume-yes --allow-unsealed
+    check "  ... from=<dataset>/fastq is taken as the dataset folder above it" \
+          bash -c "[[ $RC == 1 ]] && grep -q 'using the dataset folder above it' '$T/mk2b.out' && grep -q 'no read files in .* for: SET_D1_011' '$T/mk2b.out'"
     run "$T/mk3.out" --make-installation-check=M1 from="$DS" samples=A --assume-yes --allow-unsealed disable=chewbbaca
     MK="$HOME/eurlc-wgs_db/installation_check/M1"
     check "make installation check: the set is made (exit 0)" bash -c "[[ $RC == 0 ]] && grep -q 'set \[M1\] made' '$T/mk3.out' && [[ -d '$MK' ]]"
@@ -470,7 +473,8 @@ check "  ... one that differs is removed and made again; not without permission"
       bash -c "grep -q '^differs-from-list	1	remove,create-from-list	yes$' <<<'$EL' && grep -q '^differs-not-allowed	1	nothing	no$' <<<'$EL'"
 check "  ... without a list the YML file is used, as before" bash -c "grep -q '^no-list	1	create-from-yml	-$' <<<'$EL'"
 check "install.sh: shell syntax" bash -n "$(dirname "$0")/../install.sh"
-check "--version prints 1.0.0-rc3" bash -c "perl '$SCRIPT' --version 2>&1 | grep -q '1\.0\.0-rc3'"
+check "-v is --version" bash -c "[[ \$(perl '$SCRIPT' -v 2>&1) == 'eurlc-wgs 1.0.0' ]]"
+check "--version prints 1.0.0" bash -c "perl '$SCRIPT' --version 2>&1 | grep -qx 'eurlc-wgs 1\.0\.0'"
 check "downsampling reads gzip with Java's own reader (unbgzip=f unpigz=f), paired and single" \
       bash -c "[[ \$(grep -c '^       unbgzip=f unpigz=f \$' '$SCRIPT') == 2 ]]"
 
@@ -521,6 +525,10 @@ check "--write-configfile=<name>: written in the database folder, every setting 
       bash -c "[[ $RC == 0 ]] && grep -q '^threads=' '$HOME/eurlc-wgs_db/named.config'"
 run "$T/wc2.out" --write-configfile="$T/elsewhere.config"
 check "  ... a path is used as given" bash -c "[[ $RC == 0 && -s '$T/elsewhere.config' ]]"
+mkdir -p "$T/sealdb"; echo "[general]" > "$T/sealdb/eurlc-wgs.config"; touch "$T/sealdb/config_seal.ini"
+run "$T/wc3.out" --write-configfile database="$T/sealdb" --assume-yes
+check "  ... the config file of a sealed installation is not written over; another name is" \
+      bash -c "[[ $RC != 0 ]] && grep -q 'would break the seal' '$T/wc3.out' && [[ \$(cat '$T/sealdb/eurlc-wgs.config') == '[general]' ]]"
 
 # --- setup: species, configuration file, what is in the database folder ---
 echo "Setup"

@@ -189,6 +189,8 @@ På valideringsdatorn, med exakt den version som releasas:
 - [ ] Valideringen enligt metodbeskrivningen, med den förseglade
       installationen: varje körning visar `SEAL VERIFIED` (vid start och i
       rapporten). Förseglingen görs alltså före valideringskörningarna.
+      Efter en ny försegling körs analyserna om från början; `summarize`
+      på en äldre körning visar `SEAL CHANGED SINCE THE ANALYSIS`.
 - [ ] Kontrollset: `eurlc-wgs --make-installation-check=<set> from=<dataset>
       samples=<id,...>` (kräver `SEAL VERIFIED`).
 - [ ] Arkivera filerna (`eurlc-wgs.config`, `db_freeze.config`,

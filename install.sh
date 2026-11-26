@@ -226,7 +226,7 @@ fi
 # -----------------------------------------------------------------------------
 
 if ! command -v conda >/dev/null 2>&1; then
-    echo "ERROR: conda not found in PATH. Please install Miniconda first."
+    echo "ERROR: conda not found in PATH. Install Miniforge first (https://github.com/conda-forge/miniforge); Miniconda works as well."
     exit 1
 fi
 
@@ -315,7 +315,7 @@ fi
 
 CONDA_BASE_ACTUAL="$(conda info --base)"
 TARGET_BIN="${EURLC_ENV_PATH}/bin"
-# Inside the environment, as a bioconda package installs it (B17). The
+# Inside the environment, as a bioconda package installs it. The
 # pipeline also still finds the old location in the conda base.
 TARGET_SHARE="${EURLC_ENV_PATH}/share/eurlc-wgs"
 OLD_SHARE="${CONDA_BASE_ACTUAL}/share/eurlc-wgs"
@@ -429,8 +429,8 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Install YML files into share. They are the only source of tool versions
-# (B17); YML files in <db>/yml/ take priority over these (see find_env_yml).
+# Install YML files into share. They are the only source of tool versions;
+# YML files in <db>/yml/ take priority over these (see find_env_yml).
 # -----------------------------------------------------------------------------
 
 echo

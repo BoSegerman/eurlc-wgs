@@ -1522,8 +1522,7 @@ def _fp_path(arg):
         if os.path.isfile(c):
             return c
     if os.path.isdir(arg):
-        die("no results fingerprint in %s -- it is written by eurlc-wgs 0.1.0-beta1 (Nov 2026) and later; "
-            "for an older output folder run 'eurlc-wgs summarize' in it first" % arg)
+        die("no results fingerprint in %s -- run 'eurlc-wgs summarize' in the output folder first" % arg)
     die("not found: %s" % arg)
 
 

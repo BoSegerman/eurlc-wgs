@@ -17,7 +17,7 @@
 use strict;
 use warnings;
  
-our $PIPELINE_VERSION = '1.0.0-rc3';
+our $PIPELINE_VERSION = '1.0.0';
 
 # The conda environment the pipeline itself runs in (envs/core/eurlc-wgs.yml):
 # Perl with its modules, and the Python that hashes the cgMLST alleles.
@@ -139,14 +139,14 @@ our $S_QCSCREEN = ( grep { /^-{0,2}qc-?screen$/i } @ARGV ) ? 1 : 0;
 our $S_QUIET_SAMPLE_LIST = 0;
 
 # --version alone: just the pipeline version, at once -- no conda, no log,
-# no database folder (review 5.8). --versions lists every tool's version as
+# no database folder. --versions lists every tool's version as
 # well (that needs conda and reads all environments).
-if ( @ARGV == 1 && $ARGV[0] =~ /^-{0,2}version$/i ) {
+if ( @ARGV == 1 && ( $ARGV[0] =~ /^-{0,2}version$/i || $ARGV[0] eq '-v' ) ) {
     print "eurlc-wgs $PIPELINE_VERSION\n";
     exit 0;
 }
 
-# Internal modes of the remap step (planned §36), handled before anything
+# Internal modes of the remap step, handled before anything
 # else is set up: --remap-summary=depth|pileup reads samtools output from a
 # pipe inside the step; --remap-check compares the streaming way with the
 # results already in output folders. See remap_internal_main().
@@ -183,13 +183,13 @@ our %CGMLST_SCHEMA_QC_DEFAULTS = (
     "chewie_ns_campylobacter" => { warning_typing_cgmlst_paralogous => ">5", critical_typing_cgmlst_paralogous => ">10" },
     # Salmonella, 18 Nov 2026 (SVA Salmonella validation Dataset_1-4): clean
     # samples down to 94.2-94.9 % (Choleraesuis ST145 94.8, where SVA's
-    # INNUENDO schema gives 97.7 -- planned section 44); paralogous clean up to 15
+    # INNUENDO schema gives 97.7); paralogous clean up to 15
     # (one 64), WARNING >20 as the SVA Salmonella pipeline.
     "chewie_ns_salmonella"    => { warning_typing_cgmlst_call_rate => "<94", critical_typing_cgmlst_call_rate => "<90",
                                    fail_typing_cgmlst_call_rate => "<80", warning_typing_cgmlst_paralogous => ">20" },
 );
 our %S_CLEANUP_REMOVED = ();
-our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
+our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5             # resume: read categories an earlier cleanup removed (log/cleanup.json)
 our $S_SUMMARIZE_MODE = 0;   # 1 in --summarize: the seal of the analysis is the recorded one (effective_seal)
 our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
 our $S_STATIC_APPLIES = 0;               # 1 while applies_if is asked structurally (graph check,
@@ -284,7 +284,7 @@ $rundata{system_info}{runmode}  = "conda";
 # Docker mode is switched off (review B31): there is no Dockerfile, it is not
 # documented, and it would exec /db/run.perl -- whatever lies in the database
 # folder. The code paths behind is_docker() are left in place but cannot be
-# reached; see eurlc-wgs-planned.md, "Docker-läget". To bring it back, restore
+# reached. To bring it back, restore
 # the assignment below and address the points listed there.
 foreach my $arg (@ARGV) {
   if( $arg eq "docker") {
@@ -312,7 +312,7 @@ else{
 ## (docker development mode)
 
 # Docker development mode: replaced the running script with /db/run.perl.
-# Disabled together with Docker mode (B31) -- it runs any file of that name.
+# Disabled together with Docker mode -- it runs any file of that name.
 #
 # my $debug_replacement = "/db/run.perl";
 # if ( is_docker()  && -f $debug_replacement && $0 ne $debug_replacement) {
@@ -425,7 +425,7 @@ my %data_key = (
             my $type = $R_samples->[$i]{type};
             return 1 if $type ne 'FASTA' && reads_removed_by_cleanup($i, 'trimmed_fastq');
             return 1 if $type eq 'PE' && -s fill_placeholders("__R1T__", $i) && -s fill_placeholders("__R2T__", $i);
-            return 1 if $type eq 'SE' && -s fill_placeholders("__SET__", $i);   # -s like PE (B26)
+            return 1 if $type eq 'SE' && -s fill_placeholders("__SET__", $i);   # -s like PE
             return 0;
         },
     },
@@ -653,7 +653,7 @@ sub gatekeeper_select_winner {
 
     my $winner;
     # Sorted, so two candidates that tie on the metric and are both missing
-    # from the tiebreak list are decided by name, not by hash order (B26).
+    # from the tiebreak list are decided by name, not by hash order.
     for my $name ( sort keys %$candidates ) {
         if ( !defined $winner ) {
             $winner = $name;
@@ -946,7 +946,7 @@ my $S_current_child_pid = 0;
 # (not a lexical inside run_parallel_runsteps) so the signal handler and
 # graceful_die can stop them too (A2).
 our %S_par_active;
-our $S_DB_NOT_INSTALLED = 0;   # databases with no directory yet (B11), set by resolve_and_verify_databases
+our $S_DB_NOT_INSTALLED = 0;   # databases with no directory yet, set by resolve_and_verify_databases
 our $S_CURRENT_STEP;   # sequential: { runstep, sample, start_time } of the step running now
 
 # Parallel scheduler resource ceilings -- resolved once at startup after
@@ -1489,7 +1489,7 @@ $rundata{config}{defaults} = {
                             # to just that type
         archive_results => 0,  # archiving is not implemented yet (planned
                                 # §4); 1 only asks for/creates the archive
-                                # folder (B3)
+                                # folder
         trimming => "fastp",
         main_assembly => "fewest_contigs500",
         species_determination => "kraken2",
@@ -1560,7 +1560,7 @@ $rundata{config}{defaults} = {
         #   These are useful for visual inspection in IGV and to verify coverage,
         #   but are large (comparable to raw input). They can also be used to
         #   reconstruct FASTQ reads via `samtools fastq`. Since the streaming
-        #   remap step (planned §36) the step removes them itself, right after
+        #   remap step the step removes them itself, right after
         #   use; this setting is also read there. Default: remove. Keep with
         #   cleanup.bam=0; make them again with rerun=remap cleanup.bam=0.
         bam                => 1,
@@ -2377,7 +2377,7 @@ my $R_cfg_species     = $rundata{config}{effective}{species};
 my %args;
 my %args_handled;
 
-# An argument given twice (B4): the same value is harmless; enable= and
+# An argument given twice: the same value is harmless; enable= and
 # disable= are lists, so their values are combined; anything else with two
 # different values is an error rather than "the last one wins".
 {
@@ -2392,7 +2392,7 @@ my %args_handled;
         }
         else { next; }
 
-        # A leading ~ in a path (B8): the shell expands it in "configfile=~/x"
+        # A leading ~ in a path: the shell expands it in "configfile=~/x"
         # only in some shells, and never when started from a GUI.
         $value =~ s{^~(?=/|$)}{$ENV{HOME}}
             if defined $ENV{HOME} && $name =~ /^(?:datadir|outdir|database|configfile|archivedir|db_freeze_config|conda_manifest|seal|frozen_dbs_root)$/;
@@ -2671,7 +2671,7 @@ foreach my $key ( sort { ( $_premount_rank{$a} // 50 ) <=> ( $_premount_rank{$b}
 
 
 ###################################################################################################
-## Early check for unknown arguments (B2): before the first question
+## Early check for unknown arguments: before the first question
 ## (database folder, archive folder), so a typo is reported at once instead
 ## of after the prompts. The full check further below (completeness of
 ## %args_handled) still runs; this one uses a list of the names the later
@@ -2814,7 +2814,7 @@ if (-f $rundata{config}{path}) {
     my $cfg = read_ini_file($rundata{config}{path});
     $rundata{config}{configfile} = $cfg;
 
-    # Versions come from the YML files only (B17). An install_version in a
+    # Versions come from the YML files only. An install_version in a
     # config written by an older version is not used; say so once, so that
     # nobody edits it expecting another tool version.
     if ( $cfg && ref $cfg eq 'HASH' ) {
@@ -2917,7 +2917,7 @@ if (-f $rundata{config}{path}) {
                 log_message("NOTICE: [unicycler] in the config file: Unicycler is no longer part of the pipeline -- section ignored");
             }
             elsif ( ref $R_cfg->{$section} ne 'HASH' ) {
-                # A section the pipeline does not have (B5), e.g. a typo like
+                # A section the pipeline does not have, e.g. a typo like
                 # [spadess]. One warning for the whole section, and nothing
                 # from it is used -- before, the existence check created the
                 # section in memory, after which its timeout/parallel_*
@@ -3499,7 +3499,7 @@ foreach my $key ( sort keys %args ) {
     }
 }
 
-# Companion files given on the command line (B9): db_freeze_config=,
+# Companion files given on the command line: db_freeze_config=,
 # conda_manifest=, seal=. The paths from the config file were resolved
 # against the database folder above, before the command line was read; a
 # path given on the command line is taken relative to the current folder,
@@ -3621,7 +3621,7 @@ for my $key (keys %args_handled) {
     $early_handled_args{$key} = 1 if $key =~ /^update-catalog/;
 }
 
-# The early check (B2) must know every name the handlers accept.
+# The early check must know every name the handlers accept.
 {
     my %listed = map { $_ => 1 } @LATER_ARG_NAMES;
     my @missing = grep { !$listed{$_} } ( keys %postmountcheckhandlers, keys %postmountcheckhandlerswithArgs, keys %early_handled_args );
@@ -3742,7 +3742,7 @@ if ($R_cfg->{"general"}->{"verbose"}) {
 # only turn it on, never reset the early --assume-yes scan back off.
 $ASSUME_YES ||= ($R_cfg->{general}{assume_yes} // 0);
 
-if( is_conda()  && -d peekdir("db") && peekdir("db") eq peekdir("home") . "/$rundata{pipeline_info}{name}_db") {   # "/" was missing (B10)
+if( is_conda()  && -d peekdir("db") && peekdir("db") eq peekdir("home") . "/$rundata{pipeline_info}{name}_db") {   # "/" was missing
   log_message("NOTICE: Using default location as database path [" . peekdir("db") . "]");
 }
 
@@ -3961,7 +3961,7 @@ unless ( any_input_files_exist( getdir("in"), $R_cfg->{"general"}->{"recursive"}
     }
 }
 
-# An output folder that holds nothing but logs (B25) -- left by a run that
+# An output folder that holds nothing but logs -- left by a run that
 # stopped before the analysis, e.g. at a missing tool in the test phase --
 # is not a result to protect: with overwrite=prompt (the default) it is
 # replaced without asking, so that the next unattended (--assume-yes) run
@@ -5547,7 +5547,7 @@ sub ensure_genomesize_computed {
 }
 
 ###################################################################################################
-## validate_settings (B1): check the values that are otherwise only read
+## validate_settings: check the values that are otherwise only read
 ## when a step is about to run (a bad timeout would stop the run halfway),
 ## or silently fall back to a default. All problems are reported at once.
 
@@ -5560,7 +5560,7 @@ sub duration_is_valid {
     return $s =~ /^(?:\s*\d+(?:\.\d+)?\s*[dhms]\s*)+$/ ? 1 : 0;
 }
 
-# Species settings (B6): species sections accept any key, so a typo there
+# Species settings: species sections accept any key, so a typo there
 # used to be silently without effect, and a threshold that could not be read
 # simply disappeared. Warns -- does not stop the run -- for
 #   - a warning_/critical_/fail_/expected_ key whose rest is not a measure
@@ -5994,7 +5994,7 @@ sub write_run_status {
     my $out = eval { abs_path( peekdir("out") ) } // "";
     my $report = $S_QCSCREEN ? "$out/qcscreen_report.html" : "$out/report/main_report.html";
 
-    # Seal status (B13), so a GUI can show it without reading the report.
+    # Seal status, so a GUI can show it without reading the report.
     my $seal;
     my $seal_path = $R_cfg->{general}{seal} // "";
     if ( $seal_path ne "" && -f $seal_path ) {
@@ -6585,7 +6585,7 @@ sub run_jellyfish {
     # Build the input command
     my $input_cmd;
     if (defined $R2 && -f $R2) {
-        $input_cmd = "zcat -f '$R1' '$R2'";   # -f: uncompressed .fastq too (B22)
+        $input_cmd = "zcat -f '$R1' '$R2'";   # -f: uncompressed .fastq too
     } else {
         $input_cmd = "zcat -f '$R1'";
     }
@@ -10910,7 +10910,7 @@ $runstep{$runstep_name} = {
       long_name  => "Bowtie2 re-mapping",
       output_dir => "__DIR-QC3__/remapping/__BASE__",
       # Written last, atomically, by --remap-summary=pileup: the step is done
-      # only when the whole chain ran (planned §36). Folders made before the
+      # only when the whole chain ran. Folders made before the
       # streaming way count as done by remap_earlier_way_done().
       resultfile => "__DIR-QC3__/remapping/__BASE__/__BASE__.pileup_summary.json",
       rerun_paths => [ "__DIR-QC3__/remapping/__BASE__" ],   # rerun=remap: the whole folder, cache too
@@ -10935,7 +10935,7 @@ $runstep{$runstep_name} = {
 # The commands are chained with && (wrap_cmd_strict), and the pipes run with
 # pipefail: a failed bowtie2 or samtools then fails the step, instead of the
 # next commands running on a missing or cut-off BAM and the step being
-# reported as done (planned §36, småfel 2).
+# reported as done.
 $runstep{$runstep_name}{cmd_template}{PE} = wrap_cmd_strict(<<CMD);
     cp __DIR-ASSEMBLIES__/__BASE__.fasta __DIR-QC3__/remapping/__BASE__/__BASE__.fasta
        __HIDE-OUTPUT__
@@ -11201,7 +11201,7 @@ sub postprocess_remap {
         }
         elsif (defined $result_ref->{mixture}{mixed_params}
                && remap_params_differ($result_ref->{mixture}{mixed_params}, remap_mixture_params())) {
-            # [remap_mixture] has changed since the cache was written (planned §36, småfel 5).
+            # [remap_mixture] has changed since the cache was written.
             if (remap_mixture_recomputable($samplenr)) {
                 log_message("NOTICE: [remap_mixture] values differ from those used for sample $sample_name -- calculating the mixture metric again");
                 $result_ref = undef;
@@ -12310,7 +12310,7 @@ sub remap_mixture_params {
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 ## The mixture metric is split in three parts, so that the same code serves
 ## both the earlier way (pileup.gz on disk, parsed in result_parsing) and the
-## streaming way (planned §36: samtools mpileup piped into
+## streaming way (samtools mpileup piped into
 ## eurlc-wgs --remap-summary=pileup, a sparse allele_counts.tsv.gz, the method
 ## run on that in result_parsing):
 ##
@@ -13394,214 +13394,6 @@ sub parse_mlst {
 #  allele_pgm  => 4,
 #  allele_tkt  => 5,
 #  allele_uncA => 6
-
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-#+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-## runstep fastmlst
-
-## DEPRECATED -- update_fastmlst_db and its three subs below (test/pre/post)
-## are kept but never wired into the run order. PubMLST closed unauthenticated
-## schema updates, so this no longer achieves a real update in practice --
-## it currently runs harmlessly but pointlessly. Not removed: the
-## conda-env/db-age-checking logic here is likely reusable the day this is
-## reworked to authenticate with user-supplied PubMLST login credentials
-## (a real feature, just not prioritized for this version). Do not wire
-## this back into any runstep list as-is.
-
-$runstep_name = "update_fastmlst_db";
-
-$runstep{$runstep_name} = {
-      requires   => ['main_assembly_present'],
-      message    => "Updating fastmlst db...",
-      long_name  => "Updating fastmlst db",
-      output_dir => "",
-      resultfile => "",
-      resultfiles_status => "NA",
-};
-
-# TEMPLATES---------------------------------
-
-
-
-    $runstep{$runstep_name}{cmd_template}{update_db} =   wrap_cmd(<<CMD);
-         conda run -n $R_cfg->{fastmlst}->{env} --no-capture-output fastmlst 
-           --update-mlst 
-           -t __UPDATE_THREADS__             
-           __HIDE-OUTPUT__
-CMD
-
-#           --db_path __FASTMLST-DB__
-
-
-# TEST---------------------------------
-$runstep{$runstep_name}{test} = \&test_update_fastmlst_db;
-
-# DEPRECATED -- see the section header above. Kept for reuse, not active.
-sub test_update_fastmlst_db {
-
-   return check_conda_tool("fastmlst");
-
-}
-
-# PRE---------------------------------
-
-$runstep{$runstep_name}{preprocessing} = \&preprocess_update_fastmlst_db;
-
-my $fastmlst_update_done = 0;
-my $fastmlst_db_age = 0;
-
-# DEPRECATED -- see the section header above. Kept for reuse, not active.
-sub preprocess_update_fastmlst_db {
-
-    my ($samplenr) = @_;
-
-    my $runstep_name = "update_fastmlst_db";    
-    my $sample_name = $R_samples->[$samplenr]{name};  
-    my $sample_type = $R_samples->[$samplenr]{type};     
-    
-    my $command    = $runstep{$runstep_name}{cmd_template}{update_db};     
-
-    my $fastmlst_db_path = find_fastmlst_db_path();
-    
-    my $resultfile = "$fastmlst_db_path/mlst.fasta";
-    $fastmlst_db_age = file_age_days($resultfile);
-    
-    
-  log_message("INFO: Preparing to run step $runstep_name on sample $sample_name ");
-     
-     log_message("INFO: fastmlst database path is [$fastmlst_db_path]");
-     
-   if( is_docker() ) {    
-      return "";
-   }
-   if($fastmlst_update_done){
-      return "";
-   }
-   if( ! exists($R_cfg->{fastmlst}->{run_update_db}) ){
-     return "";
-   }
-
-   my $missing_files = 0;
-    if( !(-f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.results",$samplenr)) )    { $missing_files = 1;}
-    if ($sample_type ne "FASTA") {
-        for my $ambl (group_members('assembler')) {
-            next unless -f fill_placeholders("__DIR-ALTERNATIVE-ASSEMBLIES__/__BASE__.$ambl.fasta", $samplenr);
-            $missing_files = 1 unless -f fill_placeholders("__DIR-TYPING__/fastmlst/__BASE__/__BASE__-fastmlst.$ambl.results", $samplenr);
-        }
-    }
-
-   if( $missing_files==0 ){
-     return "";  # all resultfiles already present for this sample
-   }
-      
-
-   
-    if($fastmlst_db_age == -1){
-       $fastmlst_update_done = 1;  # mark as done and proceed running the update
-    }
-    elsif($R_cfg->{fastmlst}->{run_update_db} eq "always" || $R_cfg->{fastmlst}->{run_update_db} eq "yes" )   {
-         $fastmlst_update_done = 1;  # mark as done and proceed running the update
-    }
-    elsif($R_cfg->{fastmlst}->{run_update_db} eq "no" ){
-       if( -f $resultfile){
-          return "";
-       }
-       else{
-          $fastmlst_update_done = 1;  # mark as done and proceed running the update
-       } 
-    }
-    elsif($R_cfg->{fastmlst}->{run_update_db} eq "weekly" ){
-       if( -f $resultfile && $fastmlst_db_age<=7 ){
-          return "";
-       }
-       else{
-          $fastmlst_update_done = 1;  # mark as done and proceed running the update
-       } 
-    }
-    elsif($R_cfg->{fastmlst}->{run_update_db} eq "biweekly" ){
-       if( -f $resultfile && $fastmlst_db_age<=14 ){
-          return "";
-       }
-       else{
-          $fastmlst_update_done = 1;  # mark as done and proceed running the update
-       } 
-    }
-    elsif($R_cfg->{fastmlst}->{run_update_db} eq "monthly" ){
-       if( -f $resultfile && $fastmlst_db_age<=30 ){
-          return "";
-       }
-       else{
-          $fastmlst_update_done = 1;  # mark as done and proceed running the update
-       } 
-    }
-    elsif(looks_like_number($R_cfg->{fastmlst}->{run_update_db})  ){
-       if( -f $resultfile && $fastmlst_db_age<=$R_cfg->{fastmlst}->{run_update_db} ){
-          return "";
-       }
-       else{
-          $fastmlst_update_done = 1;  # mark as done
-       } 
-    }
-    else{
-       log_message("WARNING: could not determine fastMLST update db intervall [$R_cfg->{fastmlst}->{run_update_db}] - skipping update");
-       $fastmlst_update_done = 1;  # failed, but mark as done so we not try again
-       return "";
-    }
-    
-  
-    
-   
-        
-    my $u_threads = $R_cfg->{fastmlst}->{update_db_threads} // 2;
-           
-    # runstep specific replacements
-    
-    _fill_placeholders__safe_replace(\$command, "__UPDATE_THREADS__", $u_threads);
-    
-   
-    #format command
-    $command  = fill_placeholders($command, $samplenr, $runstep_name);
-    
-    #create output dir
-
-    
-    return $command; # success
-    
-}
-# POST---------------------------------
-
-$runstep{$runstep_name}{result_parsing} = \&postprocess_update_fastmlst_db;
-
-# DEPRECATED -- see the section header above. Kept for reuse, not active.
-sub postprocess_update_fastmlst_db {
-    my ($samplenr) = @_;
-
-    my $runstep_name = "update_fastmlst_db";
-    my $sample_name = $R_samples->[$samplenr]{name};  
-    my $sample_type = $R_samples->[$samplenr]{type}; 
-
-    my $fastmlst_db_path = find_fastmlst_db_path();
-    
-    my $resultfile = "$fastmlst_db_path/mlst.fasta";
-    
-    my $new_age = file_age_days($resultfile);
-
-
-  if($fastmlst_db_age >=0) { log_message("NOTICE: fastmlst database age was $fastmlst_db_age days", "green");}
-   if($fastmlst_db_age == -1) { log_message("NOTICE: fastmlst database was not found", "green");}
-  if(exists ($R_cfg->{fastmlst}->{run_update_db}) ) { log_message("NOTICE: Database update intervall is: $R_cfg->{fastmlst}->{run_update_db}", "green"); }
-   if($new_age == -1) { log_message("WARNING: fastmlst database is still not found", "yellow");}
-   if($new_age >= 0) { log_message("NOTICE: fastmlst database is age after update is $new_age days ", "green");}
-
-
-
-    return 1; # success
-}
-
-# PARSER---------------------------------
-
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -16318,15 +16110,15 @@ sub parse_sort_assemblies {
 #    'count' => 2,
 #    'species' => 'Campylobacter jejuni',
 #    'fasta' => [
-#      '/home/bosse/assemblies/Campylobacter_jejuni/sample1.fasta',
-#      '/home/bosse/assemblies/Campylobacter_jejuni/sample2.fasta'
+#      '/data/assemblies/Campylobacter_jejuni/sample1.fasta',
+#      '/data/assemblies/Campylobacter_jejuni/sample2.fasta'
 #    ]
 #  },
 #  'Campylobacter_coli' => {
 #    'count' => 1,
 #    'species' => 'Campylobacter coli',
 #    'fasta' => [
-#      '/home/bosse/assemblies/Campylobacter_coli/isolateA.fasta'
+#      '/data/assemblies/Campylobacter_coli/isolateA.fasta'
 #    ]
 #  }
 #}
@@ -18166,6 +17958,13 @@ sub discover_installed_schemas {
             $enabled = 1;
         }
 
+        # The text of a schema this script installs is the script's own, so
+        # that a correction reaches installations (and frozen copies) made
+        # with an earlier text in schema.ini.
+        if ( my $own = builtin_schema_text($schema_name) ) {
+            $s = { %$s, %$own };
+        }
+
         $found{$schema_name} = {
             species     => $s->{species}     // "",
             path        => $path,
@@ -18980,7 +18779,7 @@ sub postprocess_cleanup {
         log_message("INFO: Cleanup: keeping downsampled FASTQ files (cleanup.downsampled_fastq = 0)");
     }
 
-    # ── Merged lane FASTQ (B28) ──────────────────────────────────────────────
+    # ── Merged lane FASTQ ──────────────────────────────────────────────
     if ($cfg->{merged_fastq} // 1) {
         my $m_dir = getdir("out,large_files,fastq,merged", 0);
         if (defined $m_dir && -d $m_dir) {
@@ -19215,7 +19014,7 @@ log_message("NOTICE: collecting sample information.");
 
         # Report input files that are not part of this output directory.
         # Compared by input file, not by line: the sample names of an
-        # earlier run may follow older naming rules (B28).
+        # earlier run may follow older naming rules.
         my $files_of = sub { my ($l) = @_; my @f = split /\t/, $l, -1; my $nf = @f;
                              return grep { $_ ne "" && m{/} } @f[ $nf > 2 ? ( 0, 1, 4 .. $nf - 1 ) : ( 0 ) ]; };
         # Compared relative to the data folder, so that the files of a moved
@@ -19461,12 +19260,12 @@ if ( is_resume_mode() && ( $rundata{config}{overrides} // "" ) !~ /chewbbaca_mod
     prepare_rerun();   # rerun=<steps>: remove their results + dependents' (resume mode only)
     plan_read_regeneration();   # after a cleanup: re-create reads only where still needed
     log_message(sprintf("NOTICE: Validating pipeline configuration: done (%.1f s)", time() - $t0));
-    # Shovill does not give the same assembly twice (planned §49).
+    # Shovill does not give the same assembly twice.
     log_message("NOTICE: Shovill is switched on. Its assembly is not reproducible: two runs on the same reads, with the same settings, give "
               . "assemblies that differ slightly. The typing results were the same in our tests, but a comparison with a reference run "
               . "will report differences in the assembly.", "yellow")
         if $R_cfg->{shovill}{enabled} && grep { $R_cfg->{$_}{enabled} } qw(shovill_spades shovill_skesa);
-    # CheckM runs, but nothing reads its result yet (planned §47).
+    # CheckM runs, but nothing reads its result yet.
     log_message("NOTICE: CheckM is switched on. It is experimental in this version: completeness and contamination are written to the log and to "
               . "results/qc/stage3_assemblies/CheckM*/.../checkm_results.tab, but are not shown in the reports and are not part of the QC status.", "yellow")
         if $R_cfg->{checkm}{enabled};
@@ -19548,7 +19347,7 @@ if($R_cfg_general->{test_software} != 0) {
 # The runstep list is defined once, in @PER_SAMPLE_RUNSTEPS (see "Runstep run order").
 my @_per_sample_runsteps = @PER_SAMPLE_RUNSTEPS;
 
-merge_lane_files();   # same sample on several lanes -> one file per read (B28)
+merge_lane_files();   # same sample on several lanes -> one file per read
 
 write_run_status("running", undef);   # now with the sample list
 emit_event( type => 'run_started', run_number => $S_RUN_NUMBER, mode => ( $S_QCSCREEN ? "qcscreen" : $S_RUN_MODE ),
@@ -21255,7 +21054,7 @@ sub premount_list_versions {
     exit 0;
 }
 
-# `conda env list` is read once per process and remembered (B20); the
+# `conda env list` is read once per process and remembered; the
 # cache is dropped after anything that creates or removes an environment
 # (conda_env_list_changed). A negative answer is checked again, in case the
 # environment was made outside this process meanwhile.
@@ -21391,7 +21190,7 @@ sub ensure_conda_tool {
         log_message("INFO: Found conda YAML for $toolname: [$yml_file]");
     }
     elsif ( ( $cfg->{yml} // "" ) ne "" ) {
-        # The YML file is the only source of the versions (B17): installing
+        # The YML file is the only source of the versions: installing
         # from the package name instead would miss its extra pins (python,
         # setuptools, ...) and give a different environment.
         log_message("ERROR: Conda YAML [$cfg->{yml}] for $toolname not found. Looked in:", "red");
@@ -21632,6 +21431,11 @@ sub ensure_conda_tool {
 sub writedefaultconfigfile {
    
 
+ if ( -f $rundata{config}{path} && -f File::Spec->catfile( dirname( $rundata{config}{path} ), "config_seal.ini" )
+      && basename( $rundata{config}{path} ) eq "$rundata{pipeline_info}{name}.config" ) {
+     graceful_die("[$rundata{config}{path}] is the config file of a sealed installation (config_seal.ini is beside it): "
+                . "writing a new one would break the seal. Give another name, e.g. --write-configfile=test.config");
+ }
  if(-f $rundata{config}{path}) {
 
            if ($ASSUME_YES) {
@@ -21790,7 +21594,7 @@ sub default_db_freeze_entries {
     return (
         # Kraken2: the index itself (hash.k2d), not only its taxonomy -- the
         # -8/-16 GB variants of one release can share taxo.k2d -- plus the
-        # Bracken files in the same folder (B12).
+        # Bracken files in the same folder.
         [ "kraken2",    "kraken2",          "hash.k2d, taxo.k2d, opts.k2d, database*mers.kmer_distrib", "kraken2.db_path", "Kraken2 + Bracken database" ],
         [ "mashscreen", "mash",             "refseq.genomes.k21s1000.msh",   "mashscreen.db_path", "Mash RefSeq sketch"                ],
         [ "fastmlst",   "fastmlst",         "pubmlst/mlst.fasta",            "fastmlst.db_path",   "fastMLST PubMLST database"         ],
@@ -22296,7 +22100,7 @@ sub file_age_days {
 
 # Like wrap_cmd, but the commands are chained with && : the first one that
 # fails ends the step with its exit code. (wrap_cmd joins them with ; so only
-# the last command decides -- see planned §36.) A ; inside a quoted bash -c
+# the last command decides.) A ; inside a quoted bash -c
 # string is left alone, since only __NEWCOMMAND__ markers are replaced.
 ## Two wrappers for a step's command template. __NEWCOMMAND__ separates the
 ## commands of a step:
@@ -22466,7 +22270,7 @@ sub fill_placeholders {
  
     
     # Only something that looks like a placeholder (__NAME__, __DIR-X__),
-    # not any double underscore in a folder or file name (B27).
+    # not any double underscore in a folder or file name.
     if($warnings && $cmd =~ /__[A-Z][A-Z0-9_-]*__/) {  log_message("WARNING: Unreplaced placeholder found in command: $cmd"); }
     
 return $cmd;
@@ -22694,7 +22498,7 @@ sub effective_seal {
         # a run made before the seal was recorded, summarized now
         if ($S_SUMMARIZE_MODE) {
             $r{detail} = join( "\n", grep { $_ ne "" } $r{detail},
-                               "The seal at the time of the analysis was not recorded (analysis made with a version before 1.0.0); "
+                               "The seal at the time of the analysis was not recorded (analysis made with a pre-release version); "
                              . "now, when this report was made: " . _seal_record_text($now) );
             $r{status} = "SEAL OF THE ANALYSIS NOT RECORDED" if ( $now->{status} // "" ) =~ /^SEAL VERIFIED/;
         }
@@ -25003,6 +24807,8 @@ sub short_report_section_typing {
             $n++;
 
             my $schema       = $cg->{schema} // "n/a";
+            my $si           = defined $cg->{scheme} ? clustering_schema_info( $cg->{scheme} ) : undef;
+            $schema          = $si->{name} if $si && ( $si->{name} // "" ) ne "";
             my $schema_size  = $cg->{schema_size} // "n/a";
             my $called       = $cg->{called} // "n/a";
             my $call_rate    = $cg->{call_rate};
@@ -25010,6 +24816,9 @@ sub short_report_section_typing {
             my $inferred     = $cg->{inferred} // "n/a";
             my $inferred_pct = $cg->{inferred_pct};
             my $method       = $cg->{method} // "n/a";
+            $method          = "chewBBACA" . ( $si->{frozen} ne "" && $si->{name} ne $si->{frozen}
+                                               ? ", schema version $si->{frozen}" : "" )
+                if $si && ( $si->{name} // "" ) ne "";
 
             $html .= short_report_raw_row(
                 "cg/wgMLST schema $n",
@@ -25035,8 +24844,7 @@ sub short_report_section_typing {
     return $html;
 }
 
-## Text for the intra-species mixture measure in the reports (planned §36,
-## småfel 1 and 6). Says why there is no value when there is none.
+## Text for the intra-species mixture measure in the reports. Says why there is no value when there is none.
 sub mixture_report_text {
     my ($sample) = @_;
     my $type = uc( $sample->{type} // "" );
@@ -25077,7 +24885,8 @@ sub short_report_section_contamination {
             ( $C->{mixed_sites} // "n/a" ) . ( defined $C->{mixed_sites_isolated} ? ", $C->{mixed_sites_isolated} isolated" : "" ));
         $html .= short_report_row("Median minor allele fraction", $H->{fmt_percent}->(
             ( defined $C->{mixed_minoraf_median} && $C->{mixed_minoraf_median} =~ /^[\d.]+$/ ) ? 100 * $C->{mixed_minoraf_median} : undef, 1));
-        $html .= short_report_row("Mixture method", $C->{mixed_method} // "n/a");
+        # stored as "remap, method 2" (kept: it is part of the results fingerprint)
+        $html .= short_report_row("Mixture method", ( $C->{mixed_method} // "n/a" ) =~ s/^remap, method (\d+)$/remap v$1.0/r);
     }
 
     $html .= short_report_issue_rows($sample, "contamination");
@@ -25098,7 +24907,6 @@ sub short_report_section_assembly {
     $html .= short_report_row("Contigs 500+", $sample->{main_results}{assembly}{contigs_500} // "n/a");
     $html .= short_report_row("N50", $H->{fmt_int}->($sample->{main_results}{assembly}{N50}));
     $html .= short_report_row("GC", $H->{fmt_percent}->($sample->{main_results}{assembly}{gc}, 1));
-    $html .= short_report_row("N rate", $H->{fmt_percent}->($sample->{main_results}{assembly}{n_rate}, 5));
     $html .= short_report_row("k-mer coverage (strand-specific)", ($sample->{main_results}{assembly}{kmer_cov} // "n/a") . "x");
     $html .= short_report_row("Assembly method", $sample->{main_results}{assembly}{method} // "n/a");
     $html .= short_report_row("Assembly method reason", $sample->{main_results}{assembly}{method_reason} // "n/a");
@@ -26136,6 +25944,21 @@ sub clustering_schema_info {
         last;
     }
     return \%i;
+}
+
+# Description and version of the schemas this script installs itself (not
+# from a catalog). CAMPISO-PubMLST-8 is EFSA's name of the schema; what the 8
+# stands for is not documented, so no version is given beside the name.
+sub builtin_schema_text {
+    my ($name) = @_;
+    my %t = (
+        "CAMPISO-PubMLST-8" => {
+            description => "EFSA One Health Campylobacter cgMLST schema (CAMPISO-PubMLST-8): the PubMLST "
+                         . "cgMLST scheme v2, 1142 loci, as distributed by EFSA. No locus filter.",
+            version     => "",
+        },
+    );
+    return $t{ $name // "" };
 }
 
 # One line of text: "CAMPISO-PubMLST-8 (1142 loci; frozen version 0123...)".
@@ -29904,7 +29727,7 @@ sub detailed_report_link_icon {
 ## Same-species mixture (the remap step's mixture measure, method 2) in the
 ## detailed sample report. The measure the sample is judged by, the
 ## 1-kb windows with mixed positions, comes first and is marked; what it is
-## built from follows; the earlier method's values last, for comparison.
+## built from follows.
 sub detailed_report_section_mixture {
     my ($sample) = @_;
     return "" if !defined $sample || ref($sample) ne "HASH";
@@ -29984,21 +29807,6 @@ sub detailed_report_section_mixture {
         my $href = encode_entities( link_from_sample_report_to_outpath( path_relative_to_outdir($tsv) ) );
         $html .= detailed_report_raw_row( "Every candidate position", qq{<a href="$href">} . detailed_report_link_icon("tsv") . " mixed_positions.tsv</a>" );
     }
-
-    # the earlier method
-    $html .= $head->("Earlier method (before November 2026) - for comparison only, not used for QC");
-    my $cs = $M->{callable_sites_dp_ge_20};
-    $html .= detailed_report_row( "Positions with depth >= 20", $num->($cs) );
-    for ( [ "0_05_to_0_10", "5-10 %" ], [ "0_10_to_0_20", "10-20 %" ], [ "ge_0_20", ">= 20 %" ] ) {
-        my ( $k, $lab ) = @$_;
-        my $n = $M->{"sites_minoraf_${k}_dp20"};
-        my $r = $M->{"rate_minoraf_${k}_dp20"};
-        next unless defined $n;
-        $html .= detailed_report_row( "Positions with minor allele fraction $lab",
-            $num->($n) . ( defined $r && $r =~ /^[\d.]+$/ ? sprintf( " (%.3f %% of the positions)", 100 * $r ) : "" ) );
-    }
-    $html .= detailed_report_row( "Minor allele fraction, median / 95th percentile",
-        $pct->( $M->{minoraf_median_dp20} ) . " / " . $pct->( $M->{minoraf_p95_dp20} ) );
 
     $html .= "</tbody>\n</table>\n";
     return $html;
@@ -30735,7 +30543,7 @@ sub ensure_tool_version {
 }
 
 # Where the pipeline's own files (templates, assets, YML files, help.txt)
-# are installed (B17). In order:
+# are installed. In order:
 #   1. <prefix>/share/eurlc-wgs, where <prefix>/bin holds this script -- the
 #      bioconda layout, and install.sh from 0.1.0 on;
 #   2. a source checkout: templates/, assets/, envs/, docs/help.txt next to
@@ -30775,7 +30583,7 @@ sub find_share_file {
 }
 
 # A shipped file the run cannot do without (report templates): its path, or
-# a clear stop that says where it was looked for (B30). Found the same way
+# a clear stop that says where it was looked for. Found the same way
 # wherever the pipeline is started from -- activated environment or not,
 # cron, a GUI launcher.
 sub share_file_or_die {
@@ -31516,7 +31324,7 @@ sub set_sample_warning {
 #
 # The file is tab-separated with a header line so it can be opened directly
 # in Excel / LibreOffice or parsed with awk/cut without extra options.
-# Same sample on several lanes (B28): writes one file per read direction,
+# Same sample on several lanes: writes one file per read direction,
 # large_files/fastq/merged/<name>.merged_<R1|R2|SE>.fastq.gz, by appending
 # the lane files (gzip files may simply be concatenated). Called once,
 # before the first step. An existing merged file of the right size (the sum
@@ -31631,7 +31439,7 @@ sub write_sample_manifest {
             $col_r1 = $sample->{paths}{raw}{FASTA} // "";
         }
 
-        # A merged sample (B28): the lane files it was made from.
+        # A merged sample: the lane files it was made from.
         if ( my $src = $sample->{paths}{lane_sources} ) {
             $col_r1 = join( " + ", @{ $src->{R1} // $src->{SE} // [] } );
             $col_r2 = join( " + ", @{ $src->{R2} // [] } );
@@ -31677,7 +31485,7 @@ sub read_fastq_filelist {
 
         my $sample = new_sample_struct($base);
 
-        # Same sample on several lanes (B28): the analysis reads one merged
+        # Same sample on several lanes: the analysis reads one merged
         # file per read direction, made by merge_lane_files() before the
         # first step runs.
         if ( ( $tag // "" ) eq "merge" ) {
@@ -32157,7 +31965,7 @@ sub _issue_group_lines {
     return ( scalar( grep { $_->{level} eq $level } @S_RUN_ISSUES ), scalar(@order), @lines );
 }
 
-# One line on how well parallel mode used its budget (B24), e.g.
+# One line on how well parallel mode used its budget, e.g.
 # "threads 71 % of 32, RAM 45 % of 64 GB; dispatch blocked 18 % of the time
 # (mostly by spades)". $short leaves out the "Parallel use:" lead.
 sub parallel_use_text {
@@ -32205,7 +32013,7 @@ sub print_run_summary {
     }
     $add->(sprintf "  %-12s %s", "Species:",
            join(", ", map { "$_ ($species{$_})" } sort { $species{$b} <=> $species{$a} || $a cmp $b } keys %species) || "-");
-    # Species not determined (review 5.8): the species-specific steps were
+    # Species not determined: the species-specific steps were
     # skipped for these samples without a message of their own.
     {
         my @unknown = map { $_->{name} // "?" }
@@ -32777,7 +32585,12 @@ sub initiate_logfile {
     print {$log_fh} "INFO: $timestamp\n";
     print {$log_fh} "INFO: Pipeline name: $rundata{pipeline_info}{name}\n";
     print {$log_fh} "INFO: Pipeline version: $rundata{pipeline_info}{version}\n";
-    print {$log_fh} "INFO: Pipeline version date: $rundata{pipeline_info}{versiondate}\n";    
+    print {$log_fh} "INFO: Pipeline version date: $rundata{pipeline_info}{versiondate}\n";
+    {
+        my $script = eval { abs_path($0) } // $0;
+        print {$log_fh} "INFO: Pipeline script: $script\n";
+        print {$log_fh} "INFO: Pipeline script MD5: " . ( ( $script && -f $script ) ? md5_file($script) : "unknown" ) . "\n";
+    }    
                      
 
     
@@ -32870,7 +32683,7 @@ sub emit_event {
 # Hook for every event, after it has been written to log/events.jsonl.
 # Deliberately empty: the terminal status board is drawn by the parallel
 # scheduler itself (_par_render_status_board). Kept as the one place a
-# future live view (e.g. a GUI feed, planned §18) can be attached to.
+# future live view (e.g. a GUI feed) can be attached to.
 sub update_terminal_status {
     my ($event) = @_;
     return;
@@ -33075,7 +32888,7 @@ sub execute_and_log {
 
             if ($is_internal) {
                 my $rc = _run_internal_sub($subname, @subargs);
-                # _exit: no END blocks or destructors in the child (B23);
+                # _exit: no END blocks or destructors in the child;
                 # flush first, _exit does not.
                 STDOUT->flush; STDERR->flush; $log_fh->flush if $logfile_open && $log_fh;
                 POSIX::_exit($rc & 255);
@@ -33198,7 +33011,7 @@ sub execute_and_log {
             my $rc = _run_internal_sub($subname, @subargs);
             $status = ($rc & 255) << 8;
         } else {
-            system("bash", "-c", $cmd);   # bash like the forked path, not /bin/sh (dash) (B21)
+            system("bash", "-c", $cmd);   # bash like the forked path, not /bin/sh (dash)
             $status = $?;
         }
     }
@@ -33817,7 +33630,7 @@ sub resolve_and_verify_databases {
                     $status   = "OK"; $color = "green";
                     # For a chewBBACA schema the marker is a summary, not the
                     # data itself: check that the frozen copy (loci and
-                    # filter) still matches it (B16).
+                    # filter) still matches it.
                     if ( $marker eq "schema_version.md5" ) {
                         my $fp   = _chewbbaca_schema_fingerprint($versioned_dir);
                         my $body = _chewbbaca_marker_body($versioned_marker);
@@ -33860,7 +33673,7 @@ sub resolve_and_verify_databases {
             $status = "UNVERSIONED" if $status eq "LIVE_OK";
         }
 
-        # No database at all (B11). A frozen version was required: an error
+        # No database at all. A frozen version was required: an error
         # that counts. Otherwise -- typically a new installation -- it is
         # simply not installed yet, and the test phase offers to install it.
         if ( $status eq "NO_DB" ) {
@@ -33960,7 +33773,7 @@ sub resolve_and_verify_databases {
         # the one in use: the seal does not hold (see _verify_config_seal).
         $S_SEAL_STATE_PROBLEMS{"database $name: the frozen version is not in use ($status" . ( $detail ne "" ? ": $detail" : "" ) . ")"} = 1
             if $ref_md5 ne "" && $status ne "OK";
-        # Which version this is (B12): the fingerprint of the marker files,
+        # Which version this is: the fingerprint of the marker files,
         # named from known_databases.tsv or the database's SOURCE.txt.
         my ($fingerprint, $version) = ("", "");
         if ( $resolved ne "" && -d $resolved && $marker ne "" && $marker ne "schema_version.md5" ) {
@@ -34013,7 +33826,7 @@ sub _db_fallback_live {
     }
     else {
         # Reported (and counted) by the caller, which knows whether a frozen
-        # version was required (B11).
+        # version was required.
         $$status_ref = "NO_DB"; $$color_ref = "red";
         $$detail_ref = "database directory not found: $root";
         return "";
@@ -34082,7 +33895,7 @@ sub _load_config_seal {
 }
 
 # Fingerprints of what the pipeline itself brings, beside the three config
-# files (B13): the script (version and MD5) and the genome size lists. A
+# files: the script (version and MD5) and the genome size lists. A
 # missing local list is recorded as "none", so adding one later breaks the
 # seal just like changing it.
 sub pipeline_seal_fingerprints {
@@ -34098,7 +33911,7 @@ sub pipeline_seal_fingerprints {
     return \%fp;
 }
 
-# Command-line overrides that can change results (B13). Settings that only
+# Command-line overrides that can change results. Settings that only
 # steer the run -- resources, time limits, resume/overwrite, input
 # selection, cleanup, logging -- are left out: they are in the log, but do
 # not mark the seal.
@@ -34178,7 +33991,7 @@ sub _verify_config_seal_files {
             unless $actual eq $ref_md5;
     }
 
-    # Pipeline script and genome size lists (B13). A seal made before these
+    # Pipeline script and genome size lists. A seal made before these
     # were recorded has no such keys; it is checked as before, with a note.
     my $now = pipeline_seal_fingerprints();
     if ( defined $seal->{fingerprints}{pipeline_version} ) {
@@ -35027,7 +34840,7 @@ sub _generate_chewbbaca_schema_marker {
     return 1;
 }
 
-# --verify-databases (B12): every database in db_freeze.config is checked
+# --verify-databases: every database in db_freeze.config is checked
 # with a full MD5 of its marker files (the remembered values in <file>.md5
 # are not used, and are renewed), and its version is named. A frozen
 # database whose files no longer match is an error. For an unknown version
@@ -35042,11 +34855,13 @@ sub _cmd_verify_databases {
     }
     my $dbs = load_databases_config($path);
     local $S_FULL_DB_VERIFY = 1;
-    log_message("NOTICE: Verifying all databases with a full MD5 of their marker files -- this can take several minutes");
+    log_message("NOTICE: Verifying all databases: the MD5 of every marker file is computed again from the whole file -- this can take several minutes");
+    log_message("NOTICE: 1. The check, database by database:");
     my $errors = resolve_and_verify_databases( $dbs, undef );
     my $v = $rundata{provenance}{run}{db_versions} // {};
     my @unknown;
     log_message("NOTICE:");
+    log_message("NOTICE: 2. Summary: status, version and fingerprint of each database");
     for my $name ( sort keys %$dbs ) {
         my $e = $v->{$name} or next;
         log_message( sprintf( "NOTICE: %-20s %-14s %s", $name, $e->{status}, $e->{version} ) );
@@ -35267,7 +35082,7 @@ sub _cmd_freeze_databases {
         # the schema version without requiring a full MD5 of all allele FASTA files.
         my $marker_path = "$root/$marker";
         # An existing marker is rewritten when the schema or its filter has
-        # changed since it was made (B16); otherwise it is left alone, so its
+        # changed since it was made; otherwise it is left alone, so its
         # MD5 -- the frozen version -- stays the same.
         if ($marker eq "schema_version.md5" && -f $marker_path) {
             my $fp   = _chewbbaca_schema_fingerprint($root);
@@ -35294,7 +35109,7 @@ sub _cmd_freeze_databases {
                 };
         }
 
-        # One marker file, or a list of them (B12): db_marker_fingerprint.
+        # One marker file, or a list of them: db_marker_fingerprint.
         my $fpr = db_marker_fingerprint( $root, $marker );
         if ( $fpr->{error} ) {
             log_message("WARNING: [$name] $fpr->{error} -- skipping", "yellow");
@@ -35671,7 +35486,7 @@ eurlc_wgs_config = $fp{eurlc_wgs_config}
 db_freeze_config = $fp{db_freeze_config}
 conda_manifest   = $fp{conda_manifest}
 
-# The pipeline itself (B13): a new version or a changed script breaks the
+# The pipeline itself: a new version or a changed script breaks the
 # seal. genome_sizes_local = none means there was no <db>/genome_sizes.tsv.
 pipeline_version     = $pfp->{pipeline_version}
 pipeline_md5         = $pfp->{pipeline_md5}
@@ -35701,7 +35516,7 @@ sub load_schema_catalogs {
     my $db = peekdir("db");
     return () if $db eq "";
 
-    # Make sure the builtin catalog exists and is current (B16). Before,
+    # Make sure the builtin catalog exists and is current. Before,
     # only --install-efsa-schemas wrote it.
     # Only where the database folder is writable; a read-only one keeps
     # whatever catalog it has.
@@ -36001,6 +35816,14 @@ sub _cmd_make_installation_check {
     $from = File::Spec->rel2abs($from);
     return $stop->("the dataset folder [$from] does not exist") unless -d $from;
     my @prof = glob("$from/*_validation_profile.yml $from/*_validation_profile.yaml");
+    if ( !@prof && lc( basename($from) ) eq "fastq" ) {
+        my $up = dirname($from);
+        my @p  = glob("$up/*_validation_profile.yml $up/*_validation_profile.yaml");
+        if ( @p == 1 ) {
+            log_message("NOTICE: [$from] is the read folder of the dataset -- using the dataset folder above it, $up");
+            ( $from, @prof ) = ( $up, @p );
+        }
+    }
     return $stop->("[$from] is not a validation dataset: it has " . ( @prof ? "more than one" : "no" ) . " *_validation_profile.yml") if @prof != 1;
     my $profile = $prof[0];
     my ( $exp_name, $id_col ) = ( "", "sample_id" );
@@ -36238,7 +36061,7 @@ sub _cmd_list_schemas {
 
             my $filter_raw = $s->{filter} // "";
             my $filter_str = ($filter_raw eq "" || $filter_raw eq "unfiltered")
-                             ? "(wgMLST / unfiltered)"
+                             ? "no locus filter (all loci of the schema are used)"
                              : "filter: " . basename($filter_raw);
 
             my $desc    = $s->{description} // $s->{species} // "";
@@ -37194,10 +37017,8 @@ sub _install_efsa_campylobacter {
     my $ini_entry = {
         name        => $schema_name,
         label       => "Campylobacter cgMLST - EFSA CAMPISO (PubMLST-8)",
-        description => "EFSA One Health validated Campylobacter cgMLST schema. "
-                     . "Based on PubMLST wgMLST v8, reduced to $loci_count cgMLST loci. "
-                     . "Training file (Campylobacter_jejuni_coli.trn) included. No filter required.",
-        version     => "8",
+        description => builtin_schema_text($schema_name)->{description},
+        version     => "",
         source      => "efsa",
         species     => ["Campylobacter jejuni", "Campylobacter coli"],
         source_meta => {
@@ -37233,7 +37054,7 @@ sub _efsa_ensure_builtin_catalog {
     # Embed the builtin catalog JSON.  Update this block when adding new schemas.
     my $builtin_json = <<'END_BUILTIN_JSON';
 {
-  "catalog_version": "2",
+  "catalog_version": "3",
   "catalog_name": "EURLC-WGS builtin schemas",
   "catalog_description": "Default schemas distributed with the EURLC-WGS pipeline",
   "update_url": "",
@@ -37275,7 +37096,7 @@ sub _efsa_ensure_builtin_catalog {
     {
       "name": "chewie_ns_listeria",
       "label": "Listeria monocytogenes cgMLST (Chewie-NS)",
-      "description": "Full wgMLST schema for Listeria monocytogenes from Chewie-NS. The schema is already a cgMLST set; no locus filter is applied. An ID mapping (INNUENDO names) is bundled for EFSA upload compatibility.",
+      "description": "cgMLST schema for Listeria monocytogenes from Chewie-NS. All loci of the schema are used; no locus filter is applied. An ID mapping (INNUENDO names) is bundled for EFSA upload compatibility.",
       "version": "1",
       "species": ["Listeria monocytogenes"],
       "source": "chewie-ns",
@@ -37290,8 +37111,8 @@ sub _efsa_ensure_builtin_catalog {
       },
       "filters": {
         "wgmlst": {
-          "label": "Full wgMLST (unfiltered, default for Listeria)",
-          "description": "All loci in the wgMLST schema. Listeria schema is already cgMLST-sized; no filter required.",
+          "label": "All loci of the cgMLST schema (no filter, default for Listeria)",
+          "description": "All loci in the schema, which is a cgMLST schema; no filter required.",
           "file": null,
           "default": true
         }
@@ -37381,7 +37202,7 @@ END_BUILTIN_JSON
 
     # Written when missing, and replaced when the catalog embedded in this
     # version of the pipeline is newer (catalog_version), so that a fixed
-    # entry reaches existing installations (B16). Own schemas belong in a
+    # entry reaches existing installations. Own schemas belong in a
     # separate *.json file in the same folder; an older builtin.json is kept
     # as builtin.json.v<N> in case it had been edited.
     my ($new_v) = $builtin_json =~ /"catalog_version"\s*:\s*"?(\d+)/;
@@ -40056,7 +39877,7 @@ sub run_parallel_runsteps {
                     if (defined $subname) {
                         my $rc = _run_internal_sub($subname, @subargs);
                         STDOUT->flush; STDERR->flush; $log_fh->flush if $logfile_open && $log_fh;
-                        POSIX::_exit($rc & 255);   # no END blocks in the child (B23)
+                        POSIX::_exit($rc & 255);   # no END blocks in the child
                     }
                     exec("bash", "-c", $command) or POSIX::_exit(127);
                 }
@@ -40317,7 +40138,7 @@ sub get_config_value_for_species {
         }
 
         # 1b. genus section, e.g. [species__Campylobacter] for C. lari or a
-        # sample identified only to genus level (review 5.6).
+        # sample identified only to genus level.
         my ($genus) = $species_name =~ /^(\S+)/;
         if ( defined $genus ) {
             for my $species_key ( keys %{ $R_cfg->{species} } ) {
@@ -40770,7 +40591,7 @@ foreach my $analysispath (@listoffiles) {
 }
 
 # Illumina file names carry the sample number and lane after the sample
-# name: X_S12_L001_R1_001.fastq.gz (B28). Both are removed from the sample
+# name: X_S12_L001_R1_001.fastq.gz. Both are removed from the sample
 # name, so the sample is called X. Only for names in that form (ending in
 # _R1_001 / _R2_001), so a name that merely ends in _S2 is left alone.
 # Returns (name, sample number or undef, lane or undef).
@@ -40784,7 +40605,7 @@ sub split_illumina_stem {
     return ( $stem, undef, undef );
 }
 
-# Groups the file list by cleaned sample name (B28). One entry: the cleaned
+# Groups the file list by cleaned sample name. One entry: the cleaned
 # name is used. Several entries that are the same sample on different lanes
 # (same sample number, different lanes, all PE or all SE): one line that
 # asks for the lanes to be merged before the analysis (see
@@ -41021,7 +40842,7 @@ sub merge_R1R2 {
         }
         else {
             # An R1 without its R2 is analysed as single-end; usually a
-            # missing or misnamed file, so say so (B28).
+            # missing or misnamed file, so say so.
             log_message("WARNING: [" . basename($R1) . "] has no matching R2 file"
                       . ( $expected_R2 ? " (expected " . basename($expected_R2) . ")" : "" )
                       . " -- it is analysed as single-end", "yellow") unless $S_QUIET_SAMPLE_LIST;
@@ -41669,7 +41490,7 @@ sub file_date {
 
 #############################################################################3
 
-# MD5 of a file, remembered in <file>.md5 as "md5<TAB>size<TAB>mtime" (B12).
+# MD5 of a file, remembered in <file>.md5 as "md5<TAB>size<TAB>mtime".
 # A large database file (Kraken2's hash.k2d is several GB) is hashed once;
 # later runs only compare size and modification time. A changed file is
 # hashed again. full => 1 ignores the stored value (--verify-databases,
@@ -41683,6 +41504,10 @@ sub md5_file_cached {
     my ($size, $mtime) = @st[7, 9];
     return md5_file($path) if $size < 50_000_000;   # small: hashing is quicker than remembering
     my $cache = "$path.md5";
+    # the same file twice in one start (Bracken uses the Kraken2 database): once is enough
+    our %S_MD5_THIS_START;
+    my $seen = "$path\t$size\t$mtime";
+    return $S_MD5_THIS_START{$seen} if exists $S_MD5_THIS_START{$seen};
     if ( !$o{full} && -f $cache && open( my $fh, '<', $cache ) ) {
         my $l = <$fh> // "";
         close $fh;
@@ -41691,10 +41516,11 @@ sub md5_file_cached {
         return $m if defined $mt && $m =~ /^[0-9a-f]{32}$/ && $sz == $size && $mt == $mtime;
     }
     log_message("NOTICE: Computing MD5 of " . basename($path) . sprintf(" (%.1f GB)", $size / 1e9)
-              . ( $o{full} ? " -- full check" : " -- once, remembered for later runs" ))
+              . ( $o{full} ? " from the whole file" : " -- once, remembered for later runs" ))
         if $size > 500_000_000;
     my $md5 = md5_file($path);
     return $md5 if $md5 =~ /^ERROR:/;
+    $S_MD5_THIS_START{$seen} = $md5;
     if ( open( my $out, '>', "$cache.tmp$$" ) ) {   # not writable (read-only database): fine, just not remembered
         print {$out} "$md5\t$size\t$mtime\n";
         close $out;
@@ -41703,7 +41529,7 @@ sub md5_file_cached {
     return $md5;
 }
 
-# Fingerprint of a database version (B12), from its marker_file setting in
+# Fingerprint of a database version, from its marker_file setting in
 # db_freeze.config:
 #   - one file name: the MD5 of that file, exactly as before (existing
 #     frozen databases keep their version);
@@ -41735,7 +41561,7 @@ sub db_marker_fingerprint {
     return { fingerprint => $fp, files => \@rows };
 }
 
-# Known database versions (B12): assets/known_databases.tsv shipped with the
+# Known database versions: assets/known_databases.tsv shipped with the
 # pipeline, plus <db>/known_databases.tsv (wins). Returns the label for an
 # MD5 -- of the whole fingerprint or of one file in it -- or undef.
 our %S_KNOWN_DBS;
@@ -41762,7 +41588,7 @@ sub known_database_label {
     return undef;
 }
 
-# Where a database was installed from (B12): SOURCE.txt, written by the
+# Where a database was installed from: SOURCE.txt, written by the
 # install commands (write_db_source_file). Returns e.g.
 # "k2_standard_08_GB_20251015.tar.gz (installed 2026-11-12)", or undef.
 sub db_source_label {
@@ -42478,7 +42304,7 @@ sub set_output_paths {
 
     setdir("out,large_files,fastq,trimmed"             , peekdir("out,large_files,fastq") . "/trimmed");
     setdir("out,large_files,fastq,trimmed_downsampled" , peekdir("out,large_files,fastq") . "/trimmed_downsampled");
-    setdir("out,large_files,fastq,merged"              , peekdir("out,large_files,fastq") . "/merged");   # lanes of one sample (B28) 
+    setdir("out,large_files,fastq,merged"              , peekdir("out,large_files,fastq") . "/merged");   # lanes of one sample
 
 }
 
@@ -42906,7 +42732,7 @@ sub read_json_file {
 # Lightweight INI Parser (replacement for Config::IniFiles)
 #==================================================
 
-# The one INI reader (B14), for eurlc-wgs.config, schema.ini,
+# The one INI reader, for eurlc-wgs.config, schema.ini,
 # db_freeze.config, conda_manifest.ini and config_seal.ini. Same rules for
 # all of them:
 #   - a line starting with # or ; is a comment;

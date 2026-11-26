@@ -41,6 +41,11 @@ if [[ -n "$SCRIPT_VERSION" ]] && ! grep -q -m1 "^Version ${SCRIPT_VERSION} " "$S
     echo "ERROR: the manual does not say 'Version ${SCRIPT_VERSION}' (line 3 of $(basename "$SRC")) -- update it first"
     exit 1
 fi
+# ... and so must "This version, <version>." under Known limitations.
+if [[ -n "$SCRIPT_VERSION" ]] && grep -q "^This version, " "$SRC" && ! grep -q "^This version, ${SCRIPT_VERSION}\.$" "$SRC"; then
+    echo "ERROR: Known limitations in the manual does not say 'This version, ${SCRIPT_VERSION}.' -- update it first"
+    exit 1
+fi
 
 # One file, nothing fetched from anywhere: the style sheet is put into it.
 # GitHub-flavoured Markdown in, so the section links of the manual work.

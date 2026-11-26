@@ -1,6 +1,6 @@
 # EURLC-WGS User Manual
 
-Version 1.0.0-rc3 · November 2026
+Version 1.0.0 · November 2026
 
 This manual is for the person who runs the pipeline: what it does, how to
 start it, where the results are and how to read them, and what to do when
@@ -78,7 +78,10 @@ samples continue.
 ### What you need
 
 - Linux, or Windows with WSL. Native Windows is not supported.
-- Conda (Miniconda or Miniforge). `mamba` is used if it is installed.
+- Conda. [Miniforge](https://github.com/conda-forge/miniforge) is
+  recommended; Miniconda works as well (its base environment uses Anaconda's
+  `defaults` channel, which has its own terms of service; the pipeline's
+  environments do not use it). `mamba` is used if it is installed.
 - Disk space for the databases (allow a few tens of GB; the default
   Kraken2 database alone is the 8 GB standard database) and memory to
   match: 16 GB is a reasonable minimum, more for parallel runs.
@@ -302,8 +305,7 @@ Things to know:
   naming the file that was expected.
 - **A read set and an assembly with the same name** in one folder become
   two samples (`PT43` and `PT43_1`), with a warning.
-- **A resumed run keeps the names** of its first run, also if that was made
-  with an earlier version.
+- **A resumed run keeps the names** of its first run.
 
 ### Folder names
 
@@ -364,18 +366,10 @@ from `contigs.fasta`). `cleanup.assembler_workfiles=0` keeps everything.
 The BLAST files ResFinder, VirulenceFinder and PlasmidFinder leave behind
 are removed at the end of the run (`cleanup.blast_tmp=0` keeps them).
 
-A config file written with `configfile=write` before November 2026 says
-`bam = 0` (the default then): BAM files are then kept. Remove the line, or
-set it to `1`, to get the current default.
-
 The re-mapping keeps about 1 MB per sample: statistics, a depth summary
 and allele counts, from which the mixture measure can be calculated again.
 The BAM file is removed (`cleanup.bam=0` keeps it; `rerun=remap
-cleanup.bam=0` makes it again). An output folder made before November 2026
-also has the large `<sample>.depth.tsv` and `<sample>.pileup.gz`
-(100-250 MB per sample); `eurlc-wgs --remap-check --convert <output folder>`
-replaces them with the small files after checking that the results are
-identical.
+cleanup.bam=0` makes it again).
 
 An analysis can be moved or copied: move the whole data folder, with
 `eurlc-wgs/` in it, and run `eurlc-wgs --resume` there (or `eurlc-wgs
@@ -563,8 +557,7 @@ after the remapping: the measure first (marked &#9733;, with its QC status
 or a note that no threshold is set for the species), then what it is built from (the mixed
 positions, how many are isolated, their median minor allele fraction, which
 is roughly the share of a second strain, the depth, why candidate positions
-were set aside, the settings, and a link to every candidate position), and
-last the values of the earlier method, for comparison only. With a
+were set aside, the settings, and a link to every candidate position). With a
 threshold set (below) it takes part in the sample's QC status like any
 other measure.
 
@@ -889,8 +882,8 @@ give the same results. Differences often start in the assembly (another
 MD5) and carry over into the steps after it; a different number of threads
 is a common cause, and the comparison points out when it differs.
 
-Older output folders have no fingerprint; `eurlc-wgs summarize` in the
-folder writes one without analysing anything again.
+An output folder without a fingerprint gets one with `eurlc-wgs summarize`
+in the folder, without analysing anything again.
 
 ### Find out why two cgMLST analyses differ
 
@@ -983,8 +976,7 @@ measure and its status.
 ([section 6](#two-strains-of-the-same-species-in-one-sample)), what they
 are built from, and the species and QC status, then the spread per species
 (median, 90th and 95th percentile, maximum). Use it on runs of clean
-isolates to choose a threshold. Samples analysed with an earlier version
-are listed with the command that updates them.
+isolates to choose a threshold.
 
 `extract --anonymize` replaces the sample names with S01, S02, ... and the
 folder paths with `<OUTDIR>` and `<DATADIR>` in both file names and
@@ -1055,8 +1047,9 @@ eurlc-wgs --write-configfile=campy-test.config     # in the database folder
 eurlc-wgs --write-configfile=/some/folder/my.config
 ```
 
-writes a file where every setting is in use with its current value
-(`configfile=write` is the older form of the same command). A file with
+writes a file where every setting is in use with its current value. In a
+sealed installation the config file of the seal is not written over (give
+another name). A file with
 another name is used with `configfile=<name>`: a name without a folder is
 looked for in the database folder. That
 fixes all of them, also against later changes of the defaults -- for when
@@ -1316,7 +1309,7 @@ size lists. Every report then shows one of:
 | `SEAL VERIFIED WITH OVERRIDES` | As sealed, but the run was started with command-line settings that can change results; the report lists them |
 | `SEAL BROKEN` | A file, a frozen database, a conda environment (a tool's, or the pipeline's own) or the pipeline itself has changed since; the report says what. This includes an installation that is no longer what the files describe: an environment that was updated, or a frozen database that could not be used |
 | `SEAL CHANGED SINCE THE ANALYSIS` | The analysis was made under a verified seal, and the report was made again later (`--summarize`) under another seal, another seal status or a changed pipeline script. Both are shown. The results are those of the analysis; QC limits and layout are those of the configuration now |
-| `SEAL OF THE ANALYSIS NOT RECORDED` | A run made with a version before 1.0.0, summarized now: what it was analysed under is not known |
+| `SEAL OF THE ANALYSIS NOT RECORDED` | A run made with a pre-release version, summarized now: what it was analysed under is not known |
 | `UNSEALED` | No seal |
 
 The seal shown is the one the **analysis** was made under: it is written
@@ -1436,7 +1429,7 @@ a line `id<TAB><instrument ID><TAB><name>` in
 
 ## 13. Known limitations
 
-This version, 1.0.0-rc2.
+This version, 1.0.0.
 
 **Validation and thresholds**
 - The built-in QC thresholds are set from validation data for
@@ -1651,7 +1644,7 @@ eurlc-wgs --freeze-databases[=<db,...>] | --verify-databases
 eurlc-wgs --generate-seal[=<name>]
 eurlc-wgs --installation-check[=<set>]      # does this installation give the right results?
 eurlc-wgs --make-installation-check=<set> from=<dataset folder> samples=<id,...>   # make a check set
-eurlc-wgs --help | --version | --versions
+eurlc-wgs --help | --version (-v) | --versions
 
 # control a running pipeline
 echo pause|resume|terminate > <output folder>/control/cmd

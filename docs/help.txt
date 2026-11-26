@@ -131,7 +131,7 @@ INFORMATION
     --manual                     Where the user manual is on this computer
                                  (one HTML file for the web browser, and a
                                  PDF)
-    --version                    The pipeline version
+    --version, -v                The pipeline version
     --versions                   The pipeline and every tool's version
 
 EXIT CODES

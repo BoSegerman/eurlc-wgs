@@ -22,9 +22,9 @@ Sweden, which is the **European Union Reference Laboratory for
 the methods and cgMLST schemas used by the EU network of national
 reference laboratories.
 
-> **Status: release candidate (1.0.0-rc3).** Feature-frozen and under test
-> before version 1.0.0; only corrections are made. Feedback is very welcome.
-> What has changed is in [CHANGELOG.md](CHANGELOG.md).
+> **Version 1.0.0**, the first public release. Changes between versions are
+> in [CHANGELOG.md](CHANGELOG.md); known limitations are in section 13 of the
+> manual. Feedback is very welcome.
 
 ---
 
@@ -72,8 +72,12 @@ Also included:
 
 - **Linux**, or **Windows with WSL** (native Windows is not supported).
 - **Conda** — [Miniforge](https://github.com/conda-forge/miniforge) is
-  recommended. All tools are installed by the pipeline in their own conda
-  environments, from the conda-forge and bioconda channels.
+  recommended: it uses the community channel conda-forge by default. All
+  tools are installed by the pipeline in their own conda environments, from
+  the conda-forge and bioconda channels. Miniconda works as well, and the
+  pipeline's environments never use Anaconda's `defaults` channel, but
+  Miniconda's own base environment does; Anaconda's terms of service may
+  require a licence for organisations with 200 or more employees.
 - **Disk**: a few tens of GB for the databases (the default Kraken2
   database alone is 8 GB), plus room for the results.
 - **Memory**: 16 GB is a reasonable minimum; more for parallel runs.

@@ -1315,7 +1315,15 @@ size lists. Every report then shows one of:
 | `SEAL VERIFIED` | Everything is as sealed |
 | `SEAL VERIFIED WITH OVERRIDES` | As sealed, but the run was started with command-line settings that can change results; the report lists them |
 | `SEAL BROKEN` | A file, a frozen database, a conda environment (a tool's, or the pipeline's own) or the pipeline itself has changed since; the report says what. This includes an installation that is no longer what the files describe: an environment that was updated, or a frozen database that could not be used |
+| `SEAL CHANGED SINCE THE ANALYSIS` | The analysis was made under a verified seal, and the report was made again later (`--summarize`) under another seal, another seal status or a changed pipeline script. Both are shown. The results are those of the analysis; QC limits and layout are those of the configuration now |
+| `SEAL OF THE ANALYSIS NOT RECORDED` | A run made with a version before 1.0.0, summarized now: what it was analysed under is not known |
 | `UNSEALED` | No seal |
+
+The seal shown is the one the **analysis** was made under: it is written
+to the run's data when the analysis ends. A run that was resumed under
+another seal or script is `SEAL BROKEN`, since its parts were not made
+under one configuration. After a new seal, run the analysis again rather
+than `--summarize` when the report has to show the new seal.
 
 Settings that only steer the run (threads, time limits, `--resume`,
 `outdir=`, cleanup, ...) do not count as overrides. A new pipeline version

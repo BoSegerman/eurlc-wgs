@@ -2,7 +2,7 @@
 
 Changes that a user of the pipeline can notice. The newest version first.
 
-## 1.0.0-rc3 (25 November 2026)
+## 1.0.0-rc3 (26 November 2026)
 
 ### Changed
 
@@ -59,6 +59,47 @@ Changes that a user of the pipeline can notice. The newest version first.
   `--resume` command that runs the failed steps again. Results made with an
   earlier version show these samples as PASS in `qc_status`; a comparison
   with such a reference reports the difference.
+- **A report shows the seal the analysis was made under.** The seal was
+  verified when a report was written, so `--summarize` after a new seal
+  gave a report that said `SEAL VERIFIED` with the new seal name and the
+  new script MD5 for an analysis made under the old ones. The seal (status,
+  name, pipeline version and script MD5) is now written to the run's data
+  when the analysis ends, and is what the report, the validation label,
+  the EFSA export and the results fingerprint show. A report made later
+  under another seal or script says `SEAL CHANGED SINCE THE ANALYSIS` and
+  shows both; a run resumed under another seal is `SEAL BROKEN`; a run
+  from before this was recorded says `SEAL OF THE ANALYSIS NOT RECORDED`
+  when it is summarized under a verified seal. The run summary in the
+  terminal has a `Seal:` line.
+- **Main report, sample overview: the ST shown is the selected one**
+  (`general.mlst_determination`, by default fastMLST), with the other
+  tool's ST beside it in the tooltip. The cell showed the ST of the tool
+  that finished first, labelled "mlst (tseemann)| fastmlst (CC)" -- the
+  same ST whenever the tools agree.
+- Main report: the date range read "â€“" for the dash; the cgMLST tooltip
+  had no schema name; "k-mer coverage: 0.00x" was shown for SKESA
+  assemblies; the AMRFinderPlus database is shown with its version;
+  "Infered" is spelled "Inferred".
+- **A sealed installation copied to another computer** (found the first
+  time it was done, 25 November):
+  - `--setup` passed tool environments that were already on the computer
+    as "installed" without comparing them with the package lists of the
+    seal, so they kept their own builds and the seal broke at the first
+    run. An existing environment is now compared with its list and made
+    again from it when it differs (the pipeline's own environment already
+    was, by `install.sh`).
+  - `--setup` reported every cgMLST schema as missing, because it looked
+    for the live schema folders and a copied installation has the frozen
+    copies only. A frozen copy now counts.
+  - A run did not find the cgMLST schemas: they were only looked for as
+    live folders (`chewbbaca/schemas/<name>`), so their frozen copies were
+    reported `NO_PATH`, the seal was BROKEN and no cgMLST was made. A
+    schema that is here as a frozen copy only is now registered from it.
+  - The AMRFinderPlus database, which is inside its environment and so
+    cannot be copied, is installed by `--setup` also in a sealed
+    installation when it is missing.
+- `install.sh --resources-only` no longer ends by saying that tools and
+  databases are not installed.
 - **SKESA: the assembly graph can no longer cost the assembly.** The
   graph step (`gfa_connector`) ran between the assembly and the copy of
   the result, with every core of the computer and no time limit of its

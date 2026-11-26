@@ -112,7 +112,7 @@ my %rundata;
 $rundata{pipeline_info} = {
     name        => "eurlc-wgs",
     version     => $PIPELINE_VERSION,
-    versiondate => "2026-11-25",
+    versiondate => "2026-11-26",
     author      => "Bo Segerman",
     contact     => "bo.segerman\@sva.se",
 };
@@ -190,6 +190,7 @@ our %CGMLST_SCHEMA_QC_DEFAULTS = (
 );
 our %S_CLEANUP_REMOVED = ();
 our $S_FULL_DB_VERIFY = 0;   # --verify-databases: hash every marker file again, ignoring <file>.md5 (B12)             # resume: read categories an earlier cleanup removed (log/cleanup.json)
+our $S_SUMMARIZE_MODE = 0;   # 1 in --summarize: the seal of the analysis is the recorded one (effective_seal)
 our $S_NO_KMER = 0;                      # 1: genome size from config only, never run jellyfish (pre-species)
 our $S_STATIC_APPLIES = 0;               # 1 while applies_if is asked structurally (graph check,
                                          # progress denominator): answer from config only, never
@@ -3554,6 +3555,7 @@ if ( exists $args{"summarize"} || exists $args{"summarise"} ) {
 
     my $rundata_file = peekdir("out,data") . "/rundata.json";
     %rundata = %{ load_hash_from_json($rundata_file) };
+    $S_SUMMARIZE_MODE = 1;            # the seal of the analysis is the recorded one (effective_seal)
 
     $R_samples = $rundata{samples};   # RESET alias
 
@@ -18110,29 +18112,23 @@ sub discover_installed_schemas {
     my $schemas_root = File::Spec->catdir(peekdir("db") // "", "chewbbaca", "schemas");
     my %found;
 
-    return %found unless defined $schemas_root && -d $schemas_root;
-
-    opendir(my $dh, $schemas_root) or do {
-        log_message("WARNING: Could not open schemas directory [$schemas_root]: $!");
-        return %found;
-    };
-
-    for my $entry (readdir $dh) {
-        next if $entry =~ /^\./;
-        my $schema_dir = File::Spec->catdir($schemas_root, $entry);
-        next unless -d $schema_dir;
+    # One schema folder. $schema_dir holds schema.ini and the filter files;
+    # $live_path is what the schema's "path" is set to (the live folder --
+    # resolve_and_verify_databases replaces it with the frozen copy).
+    my $register = sub {
+        my ($entry, $schema_dir, $live_path) = @_;
 
         my $ini_file = File::Spec->catfile($schema_dir, "schema.ini");
         unless (-f $ini_file) {
             # Directory exists but has no schema.ini -- not a registered schema
             log_message("INFO: Skipping $entry (no schema.ini found)");
-            next;
+            return;
         }
 
         my $ini = read_ini_file($ini_file);
         unless ($ini && ref $ini eq 'HASH') {
             log_message("WARNING: Could not parse schema.ini in [$schema_dir]");
-            next;
+            return;
         }
 
         # Support both [schema] and bare key=value at root level
@@ -18143,7 +18139,7 @@ sub discover_installed_schemas {
         $schema_name =~ s/\s+/_/g;  # normalise spaces to underscores
 
         # Derive path: always the directory itself (schema files live directly in it)
-        my $path = $schema_dir;
+        my $path = $live_path;
 
         # Resolve filter path
         my $filter = $s->{filter} // "";
@@ -18183,11 +18179,50 @@ sub discover_installed_schemas {
         };
 
         log_message("INFO: Discovered chewBBACA schema: [$schema_name] in [$schema_dir]");
+        return $schema_name;
+    };
+
+    if ( -d $schemas_root ) {
+        if ( opendir( my $dh, $schemas_root ) ) {
+            for my $entry ( sort readdir $dh ) {
+                next if $entry =~ /^\./;
+                my $schema_dir = File::Spec->catdir($schemas_root, $entry);
+                next unless -d $schema_dir;
+                $register->( $entry, $schema_dir, $schema_dir );
+            }
+            closedir $dh;
+        }
+        else {
+            log_message("WARNING: Could not open schemas directory [$schemas_root]: $!");
+        }
     }
 
-    closedir $dh;
+    # Schemas that are here as a frozen copy only. A sealed installation
+    # copied to another computer has no live schema folders, only
+    # frozen_dbs/chewbbaca_<name>/<version>/ -- and a schema that was not
+    # discovered had no path, so its frozen copy was reported NO_PATH, the
+    # seal broke and no cgMLST was made (first seen 25 Nov 2026). Such a
+    # schema is registered from its frozen copy, with the live folder as its
+    # path: resolve_and_verify_databases() then puts the frozen copy in use.
+    my $freeze_cfg = $R_cfg->{general}{db_freeze_config} // "";
+    if ( $freeze_cfg ne "" && -f $freeze_cfg ) {
+        my $dbs = load_databases_config($freeze_cfg);
+        for my $name ( sort keys %$dbs ) {
+            my ($entry) = $name =~ /^chewbbaca_(.+)$/ or next;
+            my $md5 = lc( $dbs->{$name}{marker_md5} // "" );
+            next if $md5 eq "";
+            my $live = File::Spec->catdir($schemas_root, $entry);
+            next if -f "$live/schema.ini";                      # found above
+            my $frozen = get_frozen_dbs_root( File::Basename::dirname($schemas_root) ) . "/$name/$md5";
+            next unless -f "$frozen/schema.ini";
+            my $got = $register->( $entry, $frozen, $live );
+            log_message("INFO: chewBBACA schema [$got] is here as a frozen copy only ($frozen)") if defined $got;
+        }
+    }
+
     return %found;
 }
+
 
 # Returns the list of (schema_dirname, schema_path, filtercommand) triples
 # matching this sample's species -- the per-sample equivalent of
@@ -19591,6 +19626,7 @@ for(my $samplenr=0;$samplenr< @$R_samples; $samplenr++ ){
 
 my $rundata_file  = getdir("out,data") . "/rundata.json";
 
+record_analysis_seal($rundata_file);   # the seal this analysis was made under (see effective_seal)
 save_hash_as_json($rundata_file, \%rundata);
 
 ###################################################################################################
@@ -22598,6 +22634,90 @@ sub summarize_results(){
 ####################################################################################################
 
 
+## The seal of a run is the one the ANALYSIS was made under. It is written
+## to rundata.json when the analysis ends (provenance.run.seal_history, one
+## entry per analysis: a resumed run has several). Before 1.0.0-rc3 of 26 Nov
+## the seal was only verified when a report was written, so --summarize
+## after a new seal gave a report that said SEAL VERIFIED with the new seal
+## name and the new script MD5 for an analysis made under the old ones.
+# ($S_SUMMARIZE_MODE is declared at the top of the file: it is set long before this point.)
+
+# The seal as it verifies now, with what identifies the script.
+sub current_seal_record {
+    my $seal_path = $R_cfg->{general}{seal} // "";
+    my %r = ( status => "UNSEALED", name => "",
+              detail => $seal_path ne "" ? "config_seal.ini not found" : "No seal configured" );
+    if ( $seal_path ne "" && -f $seal_path ) {
+        my $res = _verify_config_seal( $seal_path, $rundata{config}{path} // "",
+                                       $R_cfg->{general}{db_freeze_config} // "", $R_cfg->{general}{conda_manifest} // "" );
+        %r = ( status => $res->{status} // "UNSEALED", name => $res->{name} // "", detail => $res->{detail} // "" );
+    }
+    my $fp = pipeline_seal_fingerprints();
+    return { %r, pipeline_version => $fp->{pipeline_version}, pipeline_md5 => $fp->{pipeline_md5},
+             time => strftime( "%Y-%m-%d %H:%M:%S", localtime ) };
+}
+
+# Called once, when an analysis (not a summarize) is about to save rundata.json.
+sub record_analysis_seal {
+    my ($rundata_file) = @_;
+    my $now = current_seal_record();
+    my @hist;
+    if ( defined $rundata_file && -s $rundata_file ) {      # a resumed run: keep what the earlier parts ran under
+        my $old = eval { load_hash_from_json($rundata_file) };
+        @hist = @{ $old->{provenance}{run}{seal_history} } if ref $old eq 'HASH' && ref $old->{provenance}{run}{seal_history} eq 'ARRAY';
+    }
+    push @hist, { map { $_ => $now->{$_} } qw(status name pipeline_version pipeline_md5 time) };
+    $rundata{provenance}{run}{seal_history} = \@hist;
+    return;
+}
+
+sub _seal_record_text {
+    my ($r) = @_;
+    return join( " ", grep { defined && $_ ne "" } $r->{status}, $r->{name} )
+         . ", pipeline " . ( $r->{pipeline_version} // "?" ) . " (script MD5 " . ( $r->{pipeline_md5} || "?" ) . ")"
+         . ( $r->{time} ? ", $r->{time}" : "" );
+}
+
+# What a report, the validation and the exports say about the seal: status,
+# name and detail of the analysis -- not of the moment the report is made.
+#   SEAL VERIFIED                      analysis and (if summarized) report under the same verified seal
+#   SEAL CHANGED SINCE THE ANALYSIS    summarized under another seal, script or seal status
+#   SEAL BROKEN                        as before, and: a resumed run whose parts ran under different seals or scripts
+#   SEAL OF THE ANALYSIS NOT RECORDED  a run from before this was recorded, summarized now under a verified seal
+sub effective_seal {
+    my $now  = current_seal_record();
+    my @hist = @{ $rundata{provenance}{run}{seal_history} // [] };
+    my $key  = sub { join( "|", map { $_[0]{$_} // "" } qw(status name pipeline_md5) ) };
+    my %r    = ( status => $now->{status}, name => $now->{name}, detail => $now->{detail},
+                 now => $now, at_analysis => ( @hist ? $hist[-1] : undef ) );
+    if ( !@hist ) {
+        # a run made before the seal was recorded, summarized now
+        if ($S_SUMMARIZE_MODE) {
+            $r{detail} = join( "\n", grep { $_ ne "" } $r{detail},
+                               "The seal at the time of the analysis was not recorded (analysis made with a version before 1.0.0); "
+                             . "now, when this report was made: " . _seal_record_text($now) );
+            $r{status} = "SEAL OF THE ANALYSIS NOT RECORDED" if ( $now->{status} // "" ) =~ /^SEAL VERIFIED/;
+        }
+        return \%r;
+    }
+    my %distinct = map { $key->($_) => 1 } @hist;
+    if ( keys %distinct > 1 ) {
+        $r{status} = "SEAL BROKEN";
+        $r{name}   = $hist[-1]{name} // "";
+        $r{detail} = join( "\n", "The analysis was made in parts (resumed) under different seals or scripts:",
+                           map { "  " . _seal_record_text($_) } @hist );
+    }
+    elsif ( $key->( $hist[-1] ) ne $key->($now) ) {
+        my $a = $hist[-1];
+        $r{status} = ( $a->{status} // "" ) =~ /^SEAL VERIFIED/ ? "SEAL CHANGED SINCE THE ANALYSIS" : ( $a->{status} // "UNSEALED" );
+        $r{name}   = $a->{name} // "";
+        $r{detail} = join( "\n", "Analysis:    " . _seal_record_text($a),
+                           "This report: " . _seal_record_text($now),
+                           "The results are those of the analysis. QC limits, report layout and the validation comparison are those of the configuration now." );
+    }
+    return \%r;
+}
+
 # Generate a config seal status banner for the HTML report.
 # Returns an HTML snippet showing SEAL VERIFIED / SEAL BROKEN / UNSEALED
 # with appropriate color coding and the seal name if available.
@@ -22609,20 +22729,14 @@ sub get_config_seal_html_for_report {
     my $cfg_path  = $rundata{config}{path} // "";
 
     my ($status, $name, $detail, $color_class);
-
-    if ($seal_path ne "" && -f $seal_path) {
-        my $result = _verify_config_seal($seal_path, $cfg_path, $db_path, $prog_path);
-        $status      = $result->{status};
-        $name        = $result->{name}   // "";
-        $detail      = $result->{detail} // "";
+    {
+        my $eff = effective_seal();
+        $status      = $eff->{status};
+        $name        = $eff->{name}   // "";
+        $detail      = $eff->{detail} // "";
         $color_class = $status eq "SEAL VERIFIED" ? "verified"
                      : $status eq "SEAL BROKEN"   ? "fail"
                      :                              "warning";
-    } else {
-        $status      = "UNSEALED";
-        $name        = "";
-        $detail      = $seal_path ne "" ? "config_seal.ini not found" : "No seal configured";
-        $color_class = "warning";
     }
 
     my $name_html   = $name   ne "" ? " &mdash; <b>" . encode_entities($name) . "</b>" : "";
@@ -23370,7 +23484,7 @@ sub summarise_dates {
     my @dates = sort keys %$R_dates;
     return $dates[0] if @dates == 1;
     return join(", ", @dates) if @dates <= 3;
-    return $dates[0] . " – " . $dates[-1];
+    return $dates[0] . " to " . $dates[-1];
 }
 
 sub summarise_count_hash {
@@ -23718,17 +23832,8 @@ sub short_report_section_versions {
         my $prog_path = $R_cfg->{general}{conda_manifest}  // "";
         my $cfg_path  = $rundata{config}{path}              // "";
 
-        my ($status, $seal_name, $detail);
-        if ($seal_path ne "" && -f $seal_path) {
-            my $result = _verify_config_seal($seal_path, $cfg_path, $db_path, $prog_path);
-            $status    = $result->{status};
-            $seal_name = $result->{name}   // "";
-            $detail    = $result->{detail} // "";
-        } else {
-            $status    = "UNSEALED";
-            $seal_name = "";
-            $detail    = $seal_path ne "" ? "config_seal.ini not found" : "No seal configured";
-        }
+        my $eff = effective_seal();
+        my ($status, $seal_name, $detail) = ( $eff->{status}, $eff->{name} // "", $eff->{detail} // "" );
 
         my $status_color = $status eq "SEAL VERIFIED" ? "pass"
                          : $status eq "SEAL BROKEN"   ? "fail"
@@ -23750,9 +23855,15 @@ sub short_report_section_versions {
         $html .= "<tr><td>conda_manifest.ini</td><td>"
                . encode_entities(-f $prog_path ? $prog_path : $prog_path ? "(not found) $prog_path" : "not configured")
                . "</td></tr>\n";
-        $html .= "<tr><td>Pipeline</td><td>"
-               . encode_entities("$seal_pfp->{pipeline_version} (script MD5 $seal_pfp->{pipeline_md5})")
-               . "</td></tr>\n";
+        {
+            # the script the ANALYSIS was made with; the script that wrote the report when it is another
+            my $a = $eff->{at_analysis};
+            my $at = $a ? "$a->{pipeline_version} (script MD5 $a->{pipeline_md5})" : "$seal_pfp->{pipeline_version} (script MD5 $seal_pfp->{pipeline_md5})";
+            $html .= "<tr><td>Pipeline</td><td>" . encode_entities($at) . "</td></tr>\n";
+            $html .= "<tr><td>Report made with</td><td class=\"warning\">"
+                   . encode_entities("$seal_pfp->{pipeline_version} (script MD5 $seal_pfp->{pipeline_md5})") . "</td></tr>\n"
+                if $a && ( $a->{pipeline_md5} // "" ) ne ( $seal_pfp->{pipeline_md5} // "" );
+        }
         $html .= "<tr><td>Local genome size list</td><td>"
                . encode_entities( $seal_pfp->{genome_sizes_local} eq "none" ? "none" : "<db>/genome_sizes.tsv (MD5 $seal_pfp->{genome_sizes_local})" )
                . "</td></tr>\n";
@@ -24032,6 +24143,31 @@ sub build_overview_typing_cell {
     my $cc_raw          = $sample->{main_results}{typing}{mlst}{clonal_complex} // "n/a";
     my $mlst_method_raw = $sample->{main_results}{typing}{mlst}{mlst_method} // "n/a";
     my $mlst_scheme_raw = $sample->{main_results}{typing}{mlst}{scheme} // "n/a";
+    # The result that select_main_mlst chose (general.mlst_determination, by
+    # default fastMLST) is the one to show. The four values above are what
+    # each tool wrote as it finished: the first tool's ST, labelled
+    # "mlst (tseemann)| fastmlst (CC)" -- the same ST whenever the tools
+    # agree, but not the selected one when they do not.
+    {
+        my $main = $sample->{main_results}{mlst};
+        if ( ref $main eq 'HASH' && defined $main->{st} && $main->{st} ne "" && $main->{st} ne "n/a" ) {
+            $st_raw          = $main->{st};
+            $mlst_method_raw = $main->{method} // "n/a";
+            $mlst_scheme_raw = $main->{schema} // "n/a";
+            if ( defined $main->{cc} && $main->{cc} ne "" && $main->{cc} ne "n/a" ) {
+                $cc_raw = $main->{cc};
+                $mlst_method_raw .= " (clonal complex from $main->{cc_method})"
+                    if ( $main->{cc_method} // "" ) ne "" && $main->{cc_method} ne ( $main->{method} // "" );
+            }
+            else { $cc_raw = "n/a"; }
+            # the other tool, as a second opinion
+            for my $other ( sort grep { $_ ne ( $main->{method} // "" ) } qw(mlst fastmlst) ) {
+                my $o = $sample->{results}{$other};
+                next unless ref $o eq 'HASH' && defined $o->{st} && $o->{st} ne "" && $o->{st} ne "n/a";
+                $mlst_method_raw .= "; $other: ST $o->{st}";
+            }
+        }
+    }
 
     my $has_st = defined $st_raw && !ref($st_raw) && $st_raw ne "" && $st_raw ne "n/a";
     my $has_cc = defined $cc_raw && !ref($cc_raw) && $cc_raw ne "" && $cc_raw ne "n/a";
@@ -24078,11 +24214,17 @@ for my $cg (@{ $sample->{main_results}{typing}{cgmlst_schemas} || [] }) {
     push @tooltip_lines, "------------------------";
     push @tooltip_lines, "cg/wgMLST";    
     
-    push @tooltip_lines, "Schema: " .  $esc->($schema) . " (size=$schema_size)";
+    {
+        my $info = clustering_schema_info( $cg->{scheme} // $schema // "" );
+        my $id   = $cg->{scheme} // $schema // "";
+        push @tooltip_lines, "Schema: " . $esc->( $info->{name} ne "" ? $info->{name} : $id )
+                           . ( $info->{name} ne "" && $info->{name} ne $id && $id ne "" ? " (version " . $esc->($id) . ")" : "" )
+                           . " (size=$schema_size)";
+    }
     push @tooltip_lines, "Called alleles: " . $esc->($called);    
     push @tooltip_lines, "Call rate: " . $esc->(sprintf("%.1f%%", $call_rate));
     push @tooltip_lines, "Paralogous loci: " . $esc->($paralogous);
-    push @tooltip_lines, "Infered percent: " . $esc->(sprintf("%.1f%%",$inferred_pct));
+    push @tooltip_lines, "Inferred percent: " . $esc->(sprintf("%.1f%%",$inferred_pct));
 }
 
     append_report_issues_to_tooltip_lines($sample, 'typing', \@tooltip_lines);
@@ -24171,7 +24313,7 @@ sub build_overview_assembly_cell {
         "Assembly method reason: " . $esc->($assembly_reason_raw),
     );
 
-    if ($assembly_kmer_cov_raw ne "n/a" && $assembly_kmer_cov_raw ne "") {
+    if ($assembly_kmer_cov_raw ne "n/a" && $assembly_kmer_cov_raw ne "" && $assembly_kmer_cov_raw !~ /^0(\.0+)?$/) {   # SKESA gives none: 0.00 was shown
         push @tooltip_lines, "k-mer coverage: " . $esc->($assembly_kmer_cov_raw) . "x (strand-specific, ≈½×)";
     }
 
@@ -32198,6 +32340,13 @@ sub print_run_summary {
         }
     }
 
+    # the seal the analysis was made under (only where there is a seal)
+    if ( ( $R_cfg->{general}{seal} // "" ) ne "" && -f $R_cfg->{general}{seal} ) {
+        my $eff = effective_seal();
+        $add->( sprintf( "  %-12s %s", "Seal:", $eff->{status} . ( $eff->{name} ne "" ? " ($eff->{name})" : "" ) ),
+                $eff->{status} eq "SEAL VERIFIED" ? "green" : "yellow" );
+    }
+
     # validation against a validation dataset
     if (%S_VALIDATION) {
         $add->(sprintf( "  %-12s %s: %s", "Validation:", $S_VALIDATION{dataset}, $S_VALIDATION{verdict} ),
@@ -39118,8 +39267,10 @@ sub fingerprint_context {
         }
     }
     $set{"run.overrides"} = $rundata{config}{overrides} // "";
-    $set{"run.seal"} = ref $S_SEAL_RESULT eq 'HASH'
-        ? join( " ", grep { defined $_ && $_ ne "" } $S_SEAL_RESULT->{status}, $S_SEAL_RESULT->{name} ) : "UNSEALED";
+    {
+        my $eff = effective_seal();
+        $set{"run.seal"} = join( " ", grep { defined $_ && $_ ne "" } $eff->{status}, $eff->{name} );
+    }
     return { versions => \%v, settings => \%set };
 }
 
@@ -39261,7 +39412,7 @@ sub run_efsa_export {
                 ( ( $g->{efsa_locus_suffix} // "" ) ne "" ? ( "--locus-suffix", $g->{efsa_locus_suffix} ) : () ),
                 ( ( $g->{efsa_pipeline_tag} // "" ) ne "" ? ( "--pipeline-tag", $g->{efsa_pipeline_tag} )
                   : ( "--pipeline-tag", "EURLC-WGS $PIPELINE_VERSION"
-                      . ( ref $S_SEAL_RESULT eq 'HASH' && $S_SEAL_RESULT->{name} ? " ($S_SEAL_RESULT->{name})" : "" ) ) ) );
+                      . ( effective_seal()->{name} ne "" ? " (" . effective_seal()->{name} . ")" : "" ) ) ) );
     my $txt = "";
     if ( open( my $p, '-|', @cmd ) ) { local $/; $txt = <$p> // ""; close $p; }
     my $rc = $? >> 8;
@@ -39338,8 +39489,10 @@ sub run_dataset_validation {
         my $thr = get_clustering_default_threshold( { schema => $schema // "" } );
         push @dist, "--distances", "$f:$thr";
     }
-    my $label = "EURLC-WGS $PIPELINE_VERSION" . ( ref $S_SEAL_RESULT eq 'HASH' && $S_SEAL_RESULT->{status}
-                ? ", " . $S_SEAL_RESULT->{status} . ( $S_SEAL_RESULT->{name} ? " ($S_SEAL_RESULT->{name})" : "" ) : ", UNSEALED" );
+    my $label = do {
+        my $eff = effective_seal();
+        "EURLC-WGS $PIPELINE_VERSION, $eff->{status}" . ( $eff->{name} ne "" ? " ($eff->{name})" : "" );
+    };
     my @cmd = ( "python3", $validator, "--dataset", $ds, "--observed", $observed, @dist,
                 ( -s $md5 ? ( "--fastq-md5", $md5 ) : () ), "--out", $out, "--label", $label );
     log_message("NOTICE: Validation: dataset found in [$ds] -- comparing the results with its expected results");
@@ -41660,6 +41813,12 @@ sub checkversion_db {
     my $known = known_database_label( undef, $md5 );
     my $db_info = $known // db_source_label( dirname($filepath) ) // "$tool db";
     my $lookup_status = defined $known ? "recognized" : "unknown";
+    # AMRFinderPlus: the file is version.txt, and what it holds is the version
+    if ( !defined $known && $filepath =~ m{/version\.txt$} && open( my $vfh, '<', $filepath ) ) {
+        my $line = <$vfh> // ""; close $vfh;
+        $line =~ s/\s+$//;
+        if ( $line =~ /^[\w.:-]{1,40}$/ ) { $db_info = "$tool database $line"; $lookup_status = "version file"; }
+    }
 
     my $db_size = human_readable_filesize($filepath);
     my $db_date = file_date($filepath);

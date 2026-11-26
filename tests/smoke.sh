@@ -422,6 +422,13 @@ check "fastMLST: its database is a managed database (installed under the databas
 check "SKESA: the assembly is copied before the graph step, which has its own time limit and thread count" \
       bash -c "perl -0ne 'exit( /skesa\\.fasta\\s+__NEWCOMMAND__\\s+\\{ timeout -k 30s \\\$SKESA_GRAPH_TIMEOUT conda run .*?gfa_connector.*?--cores __THREADS__/s ? 0 : 1 )' '$SCRIPT' && grep -q 'timeout    => \"120m\"' '$SCRIPT'"
 check "start of a run: a verified seal gives a line" grep -q 'Config seal \[\$name\]: SEAL VERIFIED' "$SCRIPT"
+SA=$(perl "$(dirname "$0")/unit/seal_at_analysis.pl" "$SCRIPT" 2>&1)
+check "seal: a report shows the seal of the analysis; summarize under the same seal keeps SEAL VERIFIED" \
+      bash -c "grep -qP '^analysis\tSEAL VERIFIED\tK2\t$' <<<\"\$0\" && grep -qP '^summarize-same\tSEAL VERIFIED\tK2\t$' <<<\"\$0\"" "$SA"
+check "  ... summarize under a new seal or script: not VERIFIED, both are shown, the name is the analysis's" \
+      bash -c "grep -qP '^summarize-new-seal\tSEAL CHANGED SINCE THE ANALYSIS\tK2\tboth-shown$' <<<\"\$0\" && grep -qP '^unsealed-then-sealed\tUNSEALED\t\t$' <<<\"\$0\"" "$SA"
+check "  ... a run resumed under another seal is BROKEN; an old run without a record is not shown as VERIFIED" \
+      bash -c "grep -qP '^resumed-other-seal\tSEAL BROKEN\tK3\tparts$' <<<\"\$0\" && grep -qP '^resumed-same-seal\tSEAL VERIFIED\tK2\t$' <<<\"\$0\" && grep -qP '^old-run\tSEAL OF THE ANALYSIS NOT RECORDED\tK3\tnot-recorded$' <<<\"\$0\"" "$SA"
 
 # --- validated species of the configuration ---------------------------------
 echo "Validated species"
@@ -573,10 +580,14 @@ check "  ... used as it is: the missing schema is reported, not downloaded" \
 # a copied sealed installation has frozen copies only: a schema counts when its frozen copy is there
 FZ="$DBN/frozen_dbs/chewbbaca_chewie_ns_listeria/0123456789abcdef0123456789abcdef"
 mkdir -p "$FZ"; echo "l1.fasta:3" > "$FZ/schema_version.md5"
+printf '[schema]\nname = chewie_ns_listeria\nspecies = Listeria monocytogenes\n' > "$FZ/schema.ini"; echo ">a" > "$FZ/l1.fasta"
 printf '[chewbbaca_chewie_ns_listeria]\npath = %s\nmarker_file = schema_version.md5\nmarker_md5 = 0123456789abcdef0123456789abcdef\n' "$DBN/chewbbaca/schemas/chewie_ns_listeria" > "$DBN/db_freeze.config"
 run "$T/setup6b.out" --setup --assume-yes database="$DBN"
 check "  ... a schema with only a frozen copy (copied sealed installation) counts as installed" \
       bash -c "grep -q 'Listeria .*chewie_ns_listeria (frozen 01234567)' '$T/setup6b.out' && ! grep -q 'cgMLST schema(s) missing' '$T/setup6b.out'"
+run "$T/setup6c.out" --list-schemas database="$DBN"
+check "  ... and is registered from its frozen copy (no live schema folder): --list-schemas shows it" \
+      bash -c "grep -q 'chewie_ns_listeria' '$T/setup6c.out' && ! grep -q 'does not match an installed' '$T/setup6c.out'"
 rm -rf "$DBN/db_freeze.config" "$DBN/frozen_dbs"
 rm "$DBN/config_seal.ini"
 run "$T/setup7.out" species=listeria datadir="$D"

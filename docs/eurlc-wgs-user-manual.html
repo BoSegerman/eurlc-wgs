@@ -1812,11 +1812,30 @@ files describe: an environment that was updated, or a frozen database
 that could not be used</td>
 </tr>
 <tr class="even">
+<td><code>SEAL CHANGED SINCE THE ANALYSIS</code></td>
+<td>The analysis was made under a verified seal, and the report was made
+again later (<code>--summarize</code>) under another seal, another seal
+status or a changed pipeline script. Both are shown. The results are
+those of the analysis; QC limits and layout are those of the
+configuration now</td>
+</tr>
+<tr class="odd">
+<td><code>SEAL OF THE ANALYSIS NOT RECORDED</code></td>
+<td>A run made with a version before 1.0.0, summarized now: what it was
+analysed under is not known</td>
+</tr>
+<tr class="even">
 <td><code>UNSEALED</code></td>
 <td>No seal</td>
 </tr>
 </tbody>
 </table>
+<p>The seal shown is the one the <strong>analysis</strong> was made
+under: it is written to the run&#39;s data when the analysis ends. A run
+that was resumed under another seal or script is
+<code>SEAL BROKEN</code>, since its parts were not made under one
+configuration. After a new seal, run the analysis again rather than
+<code>--summarize</code> when the report has to show the new seal.</p>
 <p>Settings that only steer the run (threads, time limits,
 <code>--resume</code>, <code>outdir=</code>, cleanup, ...) do not count
 as overrides. A new pipeline version breaks the seal: validate it and

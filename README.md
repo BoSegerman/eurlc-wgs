@@ -1,5 +1,7 @@
 # EURLC-WGS
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24583969.svg)](https://doi.org/10.5281/zenodo.24583969)
+
 **Whole-genome sequencing analysis of bacterial isolates — from Illumina
 reads to a QC-checked, typed and clustered report in one command.**
 
@@ -218,9 +220,17 @@ had to work around — is especially welcome.
 ## Citing
 
 There is no publication yet. If you use EURLC-WGS in your work, please
-cite this repository and the version you used (`eurlc-wgs --version`), and
-the tools it runs — their versions are listed in every report and in
-`log/versioning_explicit/`.
+cite the archived software with the version you used
+(`eurlc-wgs --version`):
+
+> Segerman B. EURLC-WGS: whole-genome sequencing analysis of bacterial
+> isolates. Zenodo. https://doi.org/10.5281/zenodo.24583969
+
+That DOI stands for all versions and resolves to the latest one; every
+version also has its own DOI, shown on the Zenodo page (version 1.0.0:
+[10.5281/zenodo.24583970](https://doi.org/10.5281/zenodo.24583970)).
+Please also cite the tools the pipeline runs — their versions are listed in
+every report and in `log/versioning_explicit/`.
 
 ---
 
